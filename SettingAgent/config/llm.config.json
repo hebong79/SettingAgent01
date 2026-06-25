@@ -1,0 +1,27 @@
+{
+  "_comment": "RTX-3090 서버의 Ollama(OpenAI 호환 /v1) gemma4:12b 사용. 1회성 셋업에서 enabled=true.",
+  "llm": {
+    "provider": "gemma",
+    "model": "gemma4:12b",
+    "baseUrl": "http://192.168.0.210:11434/v1",
+    "apiKeyEnv": "LLM_API_KEY",
+    "temperature": 0.1,
+    "maxTokens": 3072,
+    "enabled": true
+  },
+  "mcp": {
+    "enabled": true,
+    "transport": "stdio",
+    "servers": [
+      { "name": "parkagent-setting-tools", "transport": "stdio", "command": "node", "args": ["dist/mcp/server.js"] }
+    ]
+  },
+  "setupPrompts": {
+    "stage1Enabled": true,
+    "stage2Enabled": true,
+    "stage3Enabled": true,
+    "stage1": { "system": "config/prompts/stage1_preset_judge.system.md", "user": "config/prompts/stage1_preset_judge.user.md" },
+    "stage2": { "system": "config/prompts/stage2_dedupe_label.system.md", "user": "config/prompts/stage2_dedupe_label.user.md" },
+    "stage3": { "system": "config/prompts/stage3_final_report.system.md", "user": "config/prompts/stage3_final_report.user.md" }
+  }
+}

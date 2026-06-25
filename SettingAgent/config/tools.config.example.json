@@ -1,0 +1,58 @@
+{
+  "_comment": "MCP 도구(능력 엔드포인트) + 기타 설정. llm.config 와 분리. SettingAgent 도구: camera, vpd.",
+  "camera": {
+    "baseUrl": "http://localhost:13100",
+    "imageTimeoutMs": 7000,
+    "moveTimeoutMs": 3000,
+    "zoomMin": 1.0,
+    "zoomMax": 36.0
+  },
+  "vpd": {
+    "endpoint": "http://127.0.0.1:9081",
+    "detPath": "/vpd/api/v2/det/imgupload",
+    "apiKeyEnv": "VPD_API_KEY",
+    "timeoutMs": 8000,
+    "maxRetries": 3
+  },
+  "lpd": {
+    "endpoint": "http://127.0.0.1:9082",
+    "detPath": "/lpd/api/v1/imgupload",
+    "apiKeyEnv": "LPD_API_KEY",
+    "timeoutMs": 8000,
+    "maxRetries": 3
+  },
+  "setup": {
+    "presetSettleMs": 1000,
+    "betweenPresetMs": 500,
+    "minConfidence": 0.5,
+    "roiPadding": 0.05,
+    "yBandTolerance": 0.1,
+    "accumFrames": 1,
+    "accumIntervalMs": 1000,
+    "clusterDist": 0.06,
+    "clusterMinSupport": 1,
+    "lpdEnabled": false
+  },
+  "map": {
+    "cameraposFile": "config/camerapos.json",
+    "presetFile": "config/preset.json"
+  },
+  "discovery": {
+    "enabled": false,
+    "maxCameras": 32,
+    "maxPresetsPerCamera": 32
+  },
+  "presetProvider": {
+    "type": "unity-api",
+    "unityUrl": "",
+    "refreshOnRun": true
+  },
+  "server": {
+    "port": 13020,
+    "apiKeyEnv": "SETTING_API_KEY"
+  },
+  "store": {
+    "dataDir": "data",
+    "captureDir": "data/captures"
+  }
+}

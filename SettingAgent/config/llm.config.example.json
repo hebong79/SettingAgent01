@@ -1,0 +1,27 @@
+{
+  "_comment": "LLM 두뇌(model-agnostic) + MCP 연결 + 셋업 단계별 프롬프트 설정. tools.config 와 역할 분리.",
+  "llm": {
+    "provider": "qwen3",
+    "model": "qwen3-vl",
+    "baseUrl": "http://localhost:8000/v1",
+    "apiKeyEnv": "LLM_API_KEY",
+    "temperature": 0.1,
+    "maxTokens": 2048,
+    "enabled": true
+  },
+  "mcp": {
+    "enabled": true,
+    "transport": "stdio",
+    "servers": [
+      { "name": "parkagent-setting-tools", "transport": "stdio", "command": "node", "args": ["dist/mcp/server.js"] }
+    ]
+  },
+  "setupPrompts": {
+    "stage1Enabled": true,
+    "stage2Enabled": true,
+    "stage3Enabled": true,
+    "stage1": { "system": "config/prompts/stage1_preset_judge.system.md", "user": "config/prompts/stage1_preset_judge.user.md" },
+    "stage2": { "system": "config/prompts/stage2_dedupe_label.system.md", "user": "config/prompts/stage2_dedupe_label.user.md" },
+    "stage3": { "system": "config/prompts/stage3_final_report.system.md", "user": "config/prompts/stage3_final_report.user.md" }
+  }
+}

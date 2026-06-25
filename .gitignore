@@ -1,0 +1,34 @@
+# ── Node ──────────────────────────────────────────────
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+.vite/
+coverage/
+
+# ── Python (Sub/*_api) ────────────────────────────────
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# ── 런타임 산출물/캡처 ────────────────────────────────
+**/data/captures/
+*.log
+
+# ── 환경/비밀 ─────────────────────────────────────────
+.env
+.env.*
+!.env.example
+**/settings.local.json
+.logfire/
+**/*credentials*.json
+
+# ── OS/에디터 ─────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp

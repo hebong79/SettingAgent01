@@ -1,0 +1,39 @@
+* { box-sizing: border-box; }
+body { margin: 0; font-family: system-ui, sans-serif; background: #1e1e1e; color: #e0e0e0; }
+
+.topbar { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; background: #2a2a2a; }
+.tabs .tab { background: #333; color: #ccc; border: none; padding: 6px 14px; cursor: pointer; margin-right: 4px; }
+.tabs .tab.active { background: #0a84ff; color: #fff; }
+.badges .badge { margin-left: 10px; color: #888; }
+.badge.ok { color: #34c759; }
+.badge.down { color: #ff453a; }
+
+.layout { display: flex; gap: 12px; padding: 12px; align-items: flex-start; }
+.viewport-wrap { flex: 1; }
+
+/* letterbox 오차 방지(설계서 §5.2): img 자체 크기에 canvas 일치. object-fit 미사용. */
+.viewport { position: relative; display: inline-block; background: #000; }
+.viewport img { display: block; max-width: 100%; }
+.viewport canvas { position: absolute; left: 0; top: 0; pointer-events: none; }
+
+.stream-controls { margin-top: 8px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.stream-controls input[type="number"] { width: 56px; }
+
+.panel { width: 320px; background: #262626; padding: 12px; border-radius: 6px; }
+.panel hr { border: none; border-top: 1px solid #3a3a3a; margin: 10px 0; }
+.ptz-now { display: flex; gap: 10px; flex-wrap: wrap; }
+.select-row { margin: 6px 0; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.ptz-pad { display: flex; gap: 16px; }
+.pad-grid { display: grid; grid-template-columns: repeat(3, 40px); grid-template-rows: repeat(3, 32px); gap: 2px; }
+.pad-grid button:nth-child(1) { grid-column: 2; }
+.pad-grid button:nth-child(2) { grid-column: 1; grid-row: 2; }
+.pad-grid button:nth-child(3) { grid-column: 3; grid-row: 2; }
+.pad-grid button:nth-child(4) { grid-column: 2; grid-row: 3; }
+.zoom-col { display: flex; flex-direction: column; gap: 4px; }
+.zoom-col input { width: 64px; }
+.abs-row { margin-top: 10px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.abs-row input { width: 64px; }
+.login-box { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.slot-list { margin-top: 10px; max-height: 240px; overflow: auto; font-size: 13px; }
+.slot-list .slot { padding: 2px 0; }
+button { cursor: pointer; }

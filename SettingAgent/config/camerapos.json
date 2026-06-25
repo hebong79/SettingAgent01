@@ -1,0 +1,55 @@
+{
+  "_comment": "SettingAgent 생성(export). 공급자(자동탐색/벤더API)의 결과. 수동 편집 가능.",
+  "datas": [
+    {
+      "cam_id": 1,
+      "datas": [
+        {
+          "cam_id": 1,
+          "preset_id": 1,
+          "sname": "Preset 1",
+          "pan": 151.9,
+          "tilt": 16.5,
+          "zoom": 1.7
+        },
+        {
+          "cam_id": 1,
+          "preset_id": 2,
+          "sname": "Preset 2",
+          "pan": 125.2,
+          "tilt": 12,
+          "zoom": 1.8
+        }
+      ]
+    },
+    {
+      "cam_id": 2,
+      "datas": [
+        {
+          "cam_id": 2,
+          "preset_id": 1,
+          "sname": "Preset 1",
+          "pan": 53.9,
+          "tilt": 14.5,
+          "zoom": 1.7
+        },
+        {
+          "cam_id": 2,
+          "preset_id": 2,
+          "sname": "Preset 2",
+          "pan": 28.7,
+          "tilt": 10.3,
+          "zoom": 1.9
+        },
+        {
+          "cam_id": 2,
+          "preset_id": 3,
+          "sname": "Preset 3",
+          "pan": 92.6,
+          "tilt": 40.5,
+          "zoom": 1
+        }
+      ]
+    }
+  ]
+}

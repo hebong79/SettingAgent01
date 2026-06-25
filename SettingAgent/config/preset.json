@@ -1,0 +1,8 @@
+{
+  "_comment": "프리셋별 주차면 개수(기대값). 셋업 검출 슬롯 수 교차검증에 사용. camIdx/idx(=presetIdx)/faceCount.",
+  "datas": [
+    { "camIdx": 1, "idx": 1, "faceCount": 2 },
+    { "camIdx": 1, "idx": 2, "faceCount": 3 },
+    { "camIdx": 2, "idx": 1, "faceCount": 1 }
+  ]
+}

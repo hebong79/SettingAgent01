@@ -1,0 +1,28 @@
+import { describe, it, expect } from 'vitest';
+import { readJpegSize } from '../src/util/jpeg.js';
+
+describe('readJpegSize', () => {
+  it('SOF0 마커에서 width/height 파싱', () => {
+    // SOI(FFD8) + SOF0(FFC0) len=0x0011 prec=08 height=0x00F0(240) width=0x0140(320) + 패딩
+    const buf = Buffer.from([
+      0xff, 0xd8,
+      0xff, 0xc0, 0x00, 0x11, 0x08, 0x00, 0xf0, 0x01, 0x40,
+      0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01,
+    ]);
+    expect(readJpegSize(buf)).toEqual({ width: 320, height: 240 });
+  });
+
+  it('APP0 세그먼트를 건너뛰고 SOF 탐색', () => {
+    // SOI + APP0(FFE0 len=0x0004 + 2바이트) + SOF0
+    const buf = Buffer.from([
+      0xff, 0xd8,
+      0xff, 0xe0, 0x00, 0x04, 0xaa, 0xbb,
+      0xff, 0xc0, 0x00, 0x11, 0x08, 0x01, 0x00, 0x00, 0xc8, 0x03, 0x01, 0x22, 0x00,
+    ]);
+    expect(readJpegSize(buf)).toEqual({ width: 200, height: 256 });
+  });
+
+  it('JPEG 시그니처 아니면 throw', () => {
+    expect(() => readJpegSize(Buffer.from([0x00, 0x01, 0x02, 0x03]))).toThrow();
+  });
+});

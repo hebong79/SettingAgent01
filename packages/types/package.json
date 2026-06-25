@@ -1,0 +1,13 @@
+{
+  "name": "@parkagent/types",
+  "version": "0.1.0",
+  "description": "ParkAgent 3개 에이전트(Setting/Action/DM) 공유 도메인 타입",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "types": "./src/index.ts"
+}

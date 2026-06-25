@@ -1,0 +1,12 @@
+{
+  "name": "parkagent",
+  "version": "0.1.0",
+  "description": "ParkAgent — 주차장 카메라 에이전트(SettingAgent/ActionAgent/DMAgent). LLM 두뇌 + MCP 도구.",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "SettingAgent",
+    "SettingViewer"
+  ]
+}
