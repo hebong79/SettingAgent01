@@ -10,6 +10,10 @@ import { discoverViews } from '../setup/discover.js';
 import { writeCamerapos } from '../setup/cameraposWriter.js';
 import type { PresetProvider } from '../setup/presetProvider.js';
 import type { ToolsConfig } from '../config/toolsConfig.js';
+import type { CaptureJob } from '../capture/CaptureJob.js';
+import type { Finalizer } from '../capture/Finalizer.js';
+import type { SqliteStore } from '../capture/SqliteStore.js';
+import { registerCaptureRoutes } from './captureRoutes.js';
 
 const TargetSchema = z.object({
   camIdx: z.number().int().positive(),
@@ -34,6 +38,12 @@ export interface ApiDeps {
   presetProvider?: PresetProvider | null;
   /** 셋업 직전 공급자로 camerapos.json 을 자동 갱신할지(2번 옵션). */
   refreshOnRun?: boolean;
+  /** 장기 관측·반복 수집 잡(/capture/*). 미주입 시 capture 라우트 미등록(가산). */
+  captureJob?: CaptureJob;
+  finalizer?: Finalizer;
+  sqlite?: SqliteStore;
+  /** capture 라우트 설정·targets 로딩용. */
+  capture?: ToolsConfig['capture'];
 }
 
 /**
@@ -168,6 +178,17 @@ export function buildServer(deps: ApiDeps): FastifyInstance {
     }
     return artifact;
   });
+
+  // 장기 관측·반복 수집(/capture/*). 의존성 주입 시에만 등록(가산, 기존 라우트 불변).
+  if (deps.captureJob && deps.finalizer && deps.sqlite && deps.capture) {
+    registerCaptureRoutes(app, {
+      job: deps.captureJob,
+      finalizer: deps.finalizer,
+      store: deps.sqlite,
+      cfg: deps.capture,
+      mapFiles: deps.mapFiles,
+    });
+  }
 
   return app;
 }

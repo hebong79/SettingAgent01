@@ -11,6 +11,7 @@
       <nav class="tabs">
         <button class="tab active" data-tab="control">제어·모니터링</button>
         <button class="tab" data-tab="inspect">주차면 검수</button>
+        <button class="tab" data-tab="precise">정밀 수집</button>
       </nav>
       <div class="badges">
         <span id="badge-backend" class="badge">● backend</span>
@@ -83,6 +84,31 @@
           <span id="login-status"></span>
         </div>
         <div id="slot-list" class="slot-list"></div>
+
+        <!-- 정밀 수집(장기 관측·반복 수집) 패널. precise 탭에서 표시. -->
+        <div id="precise-box" class="precise-box" hidden>
+          <h3>정밀 수집</h3>
+          <div class="select-row">
+            반복 횟수 <input id="cap-count" type="number" min="1" value="50" />
+          </div>
+          <div class="select-row">
+            주기(초) <input id="cap-interval" type="number" min="1" value="30" />
+          </div>
+          <div class="select-row">
+            체크포인트 간격 <input id="cap-checkpoint" type="number" min="1" value="10" />
+          </div>
+          <div class="select-row">
+            <button id="cap-start">시작</button>
+            <button id="cap-stop">정지</button>
+            <button id="cap-finalize">최종화</button>
+          </div>
+          <div class="cap-progress">
+            <progress id="cap-bar" max="100" value="0"></progress>
+            <span id="cap-label">idle 0/0 (0%)</span>
+          </div>
+          <div id="cap-advisory" class="cap-advisory"></div>
+          <div id="cap-msg" class="cap-msg"></div>
+        </div>
       </aside>
     </main>
 

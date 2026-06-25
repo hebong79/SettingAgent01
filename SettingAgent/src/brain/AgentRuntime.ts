@@ -7,6 +7,8 @@ import {
   Stage1ResultSchema,
   Stage2ResultSchema,
   Stage3ResultSchema,
+  CheckpointResultSchema,
+  FinalizeCaptureResultSchema,
   type SetupBrain,
   type Stage1Input,
   type Stage1Result,
@@ -14,6 +16,10 @@ import {
   type Stage2Result,
   type Stage3Input,
   type Stage3Result,
+  type CheckpointInput,
+  type CheckpointResult,
+  type FinalizeCaptureInput,
+  type FinalizeCaptureResult,
 } from './SetupBrain.js';
 
 /**
@@ -97,6 +103,40 @@ export class AgentRuntime implements SetupBrain {
     // stage3 는 긴 한글 리포트(report_ko)가 핵심이라 JSON 강제(response_format) 시 토큰 한도에서
     // 잘려 무효화될 위험이 큼 → JSON 모드를 끄고 extractJson+재시도로 회수(2번 방안).
     return this.chatJson(system, user, (j) => Stage3ResultSchema.parse(j), undefined, false);
+  }
+
+  // ── 체크포인트: 장기 관측 중간 보정(텍스트 요약만 — §11-4) ───
+  // 1차는 인라인 한글 프롬프트(단순함 우선). 좌표 불변 — 병합/라벨/거부 판정·자문만.
+  async reviewCheckpoint(input: CheckpointInput): Promise<CheckpointResult | null> {
+    if (!this.client) return null;
+    const system =
+      '너는 주차장 장기 관측 수집의 중간 체크포인트 검토자다. ' +
+      '좌표(bbox)는 절대 만들거나 바꾸지 않는다. ' +
+      '같은 면으로 볼 클러스터 병합(merges), 존 라벨(labels), 노이즈 클러스터 거부(rejects), ' +
+      '기대 대비 부족 프리셋(coverage), 수렴 여부와 자문(convergence)만 판단한다. ' +
+      'JSON 으로만 답하라.';
+    const user =
+      `라운드 ${input.atRound}/${input.plannedCount}, 최근 신규 면 수=${input.newFacesRecentK}.\n` +
+      `프리셋별 집계 요약(JSON):\n${JSON.stringify(input.presets, null, 2)}\n` +
+      '클러스터 식별자는 "presetKey#clusterId" 형식이다. ' +
+      '스키마: { merges: string[][], labels: {key:label}, rejects: string[], ' +
+      'coverage: [{preset, expected, got, short}], convergence: {converged, advice} }';
+    return this.chatJson(system, user, (j) => CheckpointResultSchema.parse(j));
+  }
+
+  // ── 최종화: 전체 집계 보조 판정(중복 제거/라벨/노이즈/리포트) ──
+  async finalizeCapture(input: FinalizeCaptureInput): Promise<FinalizeCaptureResult | null> {
+    if (!this.client) return null;
+    const system =
+      '너는 주차장 장기 관측 수집의 최종 판정자다. 좌표(bbox)는 만들거나 바꾸지 않는다. ' +
+      '프리셋 간 중복 클러스터 그룹(duplicates), 존 라벨(zoneLabels), 노이즈 거부(rejects), ' +
+      '한국어 설치 리포트(report_ko)만 산출한다. JSON 으로만 답하라.';
+    const user =
+      `총 슬롯=${input.totalSlots}.\n프리셋 요약(JSON):\n${JSON.stringify(input.presets, null, 2)}\n` +
+      `체크포인트 누적 메모:\n${input.checkpointNotes.length ? input.checkpointNotes.join('\n') : '(없음)'}\n` +
+      'zoneLabels 의 키는 slotId 이다. duplicates/rejects 의 식별자는 "presetKey#clusterId" 형식이다. ' +
+      '스키마: { duplicates: string[][], zoneLabels: {slotId:label}, rejects: string[], report_ko: string }';
+    return this.chatJson(system, user, (j) => FinalizeCaptureResultSchema.parse(j), undefined, false);
   }
 
   /** 셋업 산출물 자연어 검토(보조, /brain/review). 비활성 시 null. */

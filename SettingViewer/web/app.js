@@ -1,6 +1,16 @@
 // SettingViewer DOM 결선·이벤트·스트림 오케스트레이션(환경 의존).
 // 순수 로직은 core.js 에서 import.
-import { toPixel, presetKey, slotLabel, clampZoom, stepPtz, createStreamLoop } from './core.js';
+import {
+  toPixel,
+  presetKey,
+  slotLabel,
+  clampZoom,
+  stepPtz,
+  createStreamLoop,
+  captureProgress,
+  mapAdvisory,
+  pollPlan,
+} from './core.js';
 
 const $ = (id) => document.getElementById(id);
 const api = (path) => `/viewer/api${path}`;
@@ -203,14 +213,95 @@ async function move(ptz) {
   return res.ok;
 }
 
+// --- 정밀 수집(장기 관측·반복 수집) ------------------------------------
+let capPollTimer = null;
+
+async function capFetchStatus() {
+  try {
+    const res = await fetch(api('/capture/status'));
+    return res.ok ? await res.json() : null;
+  } catch {
+    return null;
+  }
+}
+
+function renderCaptureStatus(status) {
+  const { percent, label } = captureProgress(status ?? {});
+  $('cap-bar').value = percent;
+  $('cap-label').textContent = label;
+  const adv = mapAdvisory(status ?? {});
+  $('cap-advisory').innerHTML = '';
+  for (const line of adv) {
+    const div = document.createElement('div');
+    div.className = 'adv-line';
+    div.textContent = line;
+    $('cap-advisory').appendChild(div);
+  }
+}
+
+async function capPoll() {
+  const status = await capFetchStatus();
+  renderCaptureStatus(status);
+  const plan = pollPlan(status?.state ?? 'idle');
+  if (capPollTimer) {
+    clearTimeout(capPollTimer);
+    capPollTimer = null;
+  }
+  if (plan.poll) capPollTimer = setTimeout(capPoll, plan.intervalMs);
+}
+
+async function capStart() {
+  $('cap-msg').textContent = '';
+  const body = {
+    count: Number($('cap-count').value) || 50,
+    intervalMs: (Number($('cap-interval').value) || 30) * 1000,
+    checkpointEvery: Number($('cap-checkpoint').value) || 10,
+  };
+  const res = await fetch(api('/capture/start'), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  $('cap-msg').textContent = res.ok ? `시작됨 (run #${data.runId})` : `시작 실패: ${data.error ?? res.status}`;
+  capPoll();
+}
+
+async function capStop() {
+  const res = await fetch(api('/capture/stop'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+  const data = await res.json().catch(() => ({}));
+  $('cap-msg').textContent = res.ok ? '정지 요청됨' : `정지 실패: ${data.error ?? res.status}`;
+  capPoll();
+}
+
+async function capFinalize() {
+  const res = await fetch(api('/capture/finalize'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+  const data = await res.json().catch(() => ({}));
+  if (res.ok) {
+    $('cap-msg').textContent = `최종화 완료: 슬롯 ${data.slots}, 전역 ${data.globalCount}`;
+    await loadMapping(); // 정밀 결과를 검수 탭에 반영.
+    drawRoiOverlay();
+    renderSlotList();
+  } else {
+    $('cap-msg').textContent = `최종화 실패: ${data.error ?? res.status}`;
+  }
+}
+
 // --- 이벤트 결선 ---------------------------------------------------------
 function wire() {
   document.querySelectorAll('.tab').forEach((t) =>
     t.addEventListener('click', () => {
       document.querySelectorAll('.tab').forEach((x) => x.classList.remove('active'));
       t.classList.add('active');
+      const isPrecise = t.dataset.tab === 'precise';
+      $('precise-box').hidden = !isPrecise;
+      if (isPrecise) capPoll();
     }),
   );
+
+  $('cap-start').addEventListener('click', capStart);
+  $('cap-stop').addEventListener('click', capStop);
+  $('cap-finalize').addEventListener('click', capFinalize);
 
   $('sel-source').addEventListener('change', async (e) => {
     state.source = e.target.value;

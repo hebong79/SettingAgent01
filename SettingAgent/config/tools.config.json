@@ -47,6 +47,15 @@
     "unityUrl": "",
     "refreshOnRun": true
   },
+  "capture": {
+    "defaultCount": 50,
+    "intervalMs": 30000,
+    "checkpointEvery": 10,
+    "dbFile": "data/observations.sqlite",
+    "clusterDist": 0.06,
+    "clusterMinSupport": 3,
+    "minConfidence": 0.5
+  },
   "server": {
     "port": 13020,
     "apiKeyEnv": "SETTING_API_KEY"

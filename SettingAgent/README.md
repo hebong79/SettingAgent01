@@ -85,6 +85,7 @@ LLM 서버가 없으면 `config/llm.config.json` 의 `llm.enabled=false` → 결
 | GET | `/mapping` | 최종 산출물 조회 |
 | GET | `/brain/ping` | LLM 연결 점검 |
 | POST | `/brain/review` | 산출물 LLM 검토 |
+| POST | `/capture/start`·`/stop`·`/finalize`, GET `/capture/status`·`/runs` | 정밀 수집(반복 관측→SQLite 누적→집계→LLM 보정→`setup_artifact.json`). 단발 `/setup/*` 보완. 문서: `docs/20260625_233818_정밀주차면_반복수집_구현문서.md` |
 
 ---
 

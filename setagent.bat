@@ -1,0 +1,2 @@
+cd SettingAgent 
+npm start

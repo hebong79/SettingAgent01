@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { area, center, clamp01, clampRect, containsPoint, intersectionArea, iou, normalizeBox, pad } from '../src/domain/geometry.js';
+import { area, center, clamp01, clampRect, containsPoint, intersectionArea, iou, median, normalizeBox, pad } from '../src/domain/geometry.js';
 
 describe('geometry', () => {
   it('center/area', () => {
@@ -70,5 +70,29 @@ describe('geometry', () => {
     expect(n.x + n.w).toBeLessThanOrEqual(1);
     expect(n.y + n.h).toBeLessThanOrEqual(1.0000001);
     expect(n.x).toBeGreaterThanOrEqual(0);
+  });
+});
+
+// 검증자(qa-tester): Aggregator 대표 bbox 산출의 핵심 헬퍼(설계서 §4.2 "중앙값").
+describe('median (집계 대표 bbox 헬퍼)', () => {
+  it('홀수 길이 → 가운데 값', () => {
+    expect(median([3, 1, 2])).toBe(2); // 정렬 [1,2,3] → 2
+    expect(median([5])).toBe(5);
+  });
+
+  it('짝수 길이 → 가운데 두 값의 평균', () => {
+    expect(median([1, 2, 3, 4])).toBe(2.5); // (2+3)/2
+    expect(median([0.2, 0.4])).toBeCloseTo(0.3);
+  });
+
+  it('정렬되지 않은 입력도 정렬 후 중앙값(원본 불변)', () => {
+    const input = [0.9, 0.1, 0.5, 0.3, 0.7];
+    expect(median(input)).toBeCloseTo(0.5);
+    // 원본 배열을 변형하지 않아야 한다([...values].sort 사용).
+    expect(input).toEqual([0.9, 0.1, 0.5, 0.3, 0.7]);
+  });
+
+  it('빈 배열 → 0', () => {
+    expect(median([])).toBe(0);
   });
 });

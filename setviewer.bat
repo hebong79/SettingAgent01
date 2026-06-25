@@ -1,0 +1,2 @@
+cd SettingViewer 
+npm start

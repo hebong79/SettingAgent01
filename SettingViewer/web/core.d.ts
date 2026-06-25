@@ -27,6 +27,22 @@ export interface GlobalIndexEntry {
   slotId: string;
 }
 
+export interface CaptureStatus {
+  state: string;
+  runId?: number;
+  round: number;
+  done: number;
+  planned: number;
+  latestAdvisory?: string[];
+}
+
+export function captureProgress(status: Partial<CaptureStatus> | null | undefined): {
+  percent: number;
+  label: string;
+};
+export function mapAdvisory(status: Partial<CaptureStatus> | null | undefined): string[];
+export function pollPlan(state: string, intervalMs?: number): { poll: boolean; intervalMs: number };
+
 export function toPixel(rect: NormalizedRect, imgW: number, imgH: number): PixelRect;
 export function presetKey(camIdx: number | string, presetIdx: number | string): string;
 export function slotLabel(slotId: string, globalIndex?: GlobalIndexEntry[]): string;

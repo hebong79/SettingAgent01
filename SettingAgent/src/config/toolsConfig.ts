@@ -55,6 +55,26 @@ const SetupSchema = z.object({
   lpdEnabled: z.boolean(),
 });
 
+/**
+ * 장기 관측·반복 수집(/capture/*) 설정. 단발 셋업(setup)과 독립값 허용(설계서 §7).
+ */
+const CaptureSchema = z.object({
+  /** 기본 반복 횟수(정지조건). 시작 시 UI 값으로 덮어쓸 수 있음. */
+  defaultCount: z.number().int().positive(),
+  /** 라운드 주기(ms, 점유 변화 포착). */
+  intervalMs: z.number().int().positive(),
+  /** K라운드마다 LLM 체크포인트(llm.enabled 시). */
+  checkpointEvery: z.number().int().positive(),
+  /** SQLite 파일 경로(테스트는 주입으로 :memory:). */
+  dbFile: z.string().min(1),
+  /** 집계 클러스터 거리 임계(중심 간 거리, 정규화). */
+  clusterDist: z.number().min(0).max(1),
+  /** 면 인정 최소 지지수(단발보다 높게). */
+  clusterMinSupport: z.number().int().positive(),
+  /** 집계용 최소 신뢰도(setup 과 독립값 허용). */
+  minConfidence: z.number().min(0).max(1),
+});
+
 const ServerSchema = z.object({
   port: z.number().int().positive(),
   apiKeyEnv: z.string().optional(),
@@ -106,6 +126,7 @@ export const ToolsConfigSchema = z.object({
   map: MapSchema,
   discovery: DiscoverySchema,
   presetProvider: PresetProviderSchema,
+  capture: CaptureSchema,
   server: ServerSchema,
   store: StoreSchema,
 });
@@ -123,6 +144,10 @@ export const DEFAULT_TOOLS_CONFIG: ToolsConfig = {
   map: { cameraposFile: 'config/camerapos.json', presetFile: 'config/preset.json' },
   discovery: { enabled: false, maxCameras: 32, maxPresetsPerCamera: 32 },
   presetProvider: { type: 'unity-api', unityUrl: '', refreshOnRun: false },
+  capture: {
+    defaultCount: 50, intervalMs: 30000, checkpointEvery: 10, dbFile: 'data/observations.sqlite',
+    clusterDist: 0.06, clusterMinSupport: 3, minConfidence: 0.5,
+  },
   server: { port: 13020, apiKeyEnv: 'SETTING_API_KEY' },
   store: { dataDir: 'data', captureDir: 'data/captures' },
 };

@@ -8,6 +8,11 @@ import { SetupOrchestrator } from './setup/SetupOrchestrator.js';
 import { createPresetProvider } from './setup/presetProvider.js';
 import { AgentRuntime } from './brain/AgentRuntime.js';
 import { buildServer } from './api/server.js';
+import { SqliteStore } from './capture/SqliteStore.js';
+import { CheckpointReviewer } from './capture/CheckpointReviewer.js';
+import { CaptureJob } from './capture/CaptureJob.js';
+import { Finalizer } from './capture/Finalizer.js';
+import { loadExpectedFaces } from './setup/mapTargets.js';
 import { logger } from './util/logger.js';
 
 /** SettingAgent 부트스트랩: 두 config(도구/LLM)를 분리 로드 → 의존성 조립 → REST 서버 기동. */
@@ -28,7 +33,25 @@ async function main(): Promise<void> {
     cameraBaseUrl: tools.camera.baseUrl,
     timeoutMs: tools.camera.imageTimeoutMs,
   });
-  const app = buildServer({ orchestrator, repo, camera, vpd, brain, mapFiles: tools.map, discovery: tools.discovery, presetProvider, refreshOnRun: tools.presetProvider.refreshOnRun });
+
+  // 장기 관측·반복 수집(/capture/*) 조립. 좌표는 검출+집계만, LLM 은 판정·자문만(좌표 불변).
+  const sqlite = new SqliteStore(tools.capture.dbFile);
+  const expectedByPreset = loadExpectedFaces(tools.map.presetFile);
+  const reviewer = new CheckpointReviewer({ store: sqlite, brain });
+  const captureJob = new CaptureJob({
+    camera, vpd, lpd, store: sqlite, reviewer, cfg: tools.capture,
+    lpdEnabled: tools.setup.lpdEnabled, expectedByPreset,
+  });
+  const finalizer = new Finalizer({
+    store: sqlite, repo, brain, cfg: tools.capture,
+    roiPadding: tools.setup.roiPadding, yBandTolerance: tools.setup.yBandTolerance, expectedByPreset,
+  });
+
+  const app = buildServer({
+    orchestrator, repo, camera, vpd, brain, mapFiles: tools.map, discovery: tools.discovery,
+    presetProvider, refreshOnRun: tools.presetProvider.refreshOnRun,
+    captureJob, finalizer, sqlite, capture: tools.capture,
+  });
   await app.listen({ port: tools.server.port, host: '0.0.0.0' });
   logger.info(
     { port: tools.server.port, llmEnabled: llm.llm.enabled, mcpEnabled: llm.mcp.enabled },

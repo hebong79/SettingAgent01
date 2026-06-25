@@ -68,6 +68,37 @@ export function stepPtz(cur, dir, step) {
 }
 
 /**
+ * 정밀 수집 진행률(설계서 §7.2). done/planned → { percent, label }. 0 division 방어.
+ * status: { state, round, done, planned, runId? }.
+ */
+export function captureProgress(status) {
+  const planned = Number(status?.planned ?? 0);
+  const done = Number(status?.done ?? 0);
+  const percent = planned > 0 ? Math.min(100, Math.round((done / planned) * 100)) : 0;
+  const state = status?.state ?? 'idle';
+  const label = `${state} ${done}/${planned} (${percent}%)`;
+  return { percent, label };
+}
+
+/**
+ * 체크포인트 자문 매핑(표시 문자열 배열). status.latestAdvisory(서버 산출) 우선,
+ * 없으면 빈 배열. (서버 advisoryLines 결과를 그대로 표시 — UI 는 얇게 유지.)
+ */
+export function mapAdvisory(status) {
+  const adv = status?.latestAdvisory;
+  return Array.isArray(adv) ? adv.slice() : [];
+}
+
+/**
+ * 폴링 계획(설계서 §7.2). running/stopping 중에만 폴링 계속(간격 ms).
+ * → { poll: boolean, intervalMs }.
+ */
+export function pollPlan(state, intervalMs = 2000) {
+  const poll = state === 'running' || state === 'stopping' || state === 'finalizing';
+  return { poll, intervalMs };
+}
+
+/**
  * 스냅샷 폴링 루프(백프레셔·Blob revoke·정지). DOM/브라우저 전역 미참조 → 의존성 주입.
  * deps:
  *   - fetchFn(url, { signal }) → Response(blob() 보유)

@@ -51,6 +51,14 @@ export function clamp01(v: number): number {
   return Math.min(1, Math.max(0, v));
 }
 
+/** 수열의 중앙값(빈 배열이면 0). 짝수 길이는 가운데 두 값의 평균. */
+export function median(values: number[]): number {
+  if (values.length === 0) return 0;
+  const s = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 === 0 ? (s[mid - 1] + s[mid]) / 2 : s[mid];
+}
+
 /** 사각형을 0~1 범위로 클램프(x+w, y+h 도 1 을 넘지 않게). 음수/경계초과 방어. */
 export function clampRect(r: NormalizedRect): NormalizedRect {
   const x = clamp01(r.x);
