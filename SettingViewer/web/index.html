@@ -19,6 +19,7 @@
         <button class="tab active" data-tab="control">제어·모니터링</button>
         <button class="tab" data-tab="inspect">주차면 검수</button>
         <button class="tab" data-tab="precise">정밀 수집</button>
+        <button class="tab" data-tab="analyze">분석</button>
       </nav>
       <div class="badges">
         <span id="badge-backend" class="badge">backend</span>
@@ -141,6 +142,44 @@
           <div id="cap-msg" class="cap-msg"></div>
         </section>
       </aside>
+
+      <!-- 분석 뷰: '분석' 탭에서 전체폭 표시. 최종 setup_artifact.json(/mapping) 분석. -->
+      <section id="analyze-view" class="analyze-view" hidden>
+        <div class="analyze-head">
+          <div>
+            <h2>최종 셋업 산출물 분석</h2>
+            <p id="an-source">SettingAgent <code>data/setup_artifact.json</code> · <code>/viewer/api/mapping</code></p>
+          </div>
+          <div class="toolbar">
+            <button id="an-refresh" class="primary">새로고침</button>
+            <button id="an-download">JSON 내려받기</button>
+            <button id="an-raw-toggle">원본 JSON</button>
+          </div>
+        </div>
+        <div id="an-summary" class="an-summary"></div>
+        <div class="an-grid">
+          <section class="panel-section">
+            <div class="section-title">프리셋별 요약</div>
+            <div id="an-presets" class="an-table-wrap"></div>
+          </section>
+          <section class="panel-section">
+            <div class="section-title">경고 (warnings)</div>
+            <div id="an-warnings" class="an-warnings"></div>
+          </section>
+        </div>
+        <section class="panel-section">
+          <div class="section-title">주차면 목록 (전역 인덱스 순)</div>
+          <div id="an-slots" class="an-table-wrap"></div>
+        </section>
+        <section class="panel-section">
+          <div class="section-title">LLM 설치 리포트 (report)</div>
+          <div id="an-report" class="an-report"></div>
+        </section>
+        <section id="an-raw-box" class="panel-section" hidden>
+          <div class="section-title">원본 JSON</div>
+          <pre id="an-raw" class="an-raw"></pre>
+        </section>
+      </section>
     </main>
 
     <script type="module" src="./app.js"></script>

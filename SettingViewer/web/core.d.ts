@@ -51,6 +51,42 @@ export function clampZoom(z: number, min?: number, max?: number): number;
 export function stepPtz(cur: Ptz, dir: string, step: number): Ptz;
 export function clampPanelWidth(px: number, min?: number, max?: number): number;
 
+export interface CameraListItem {
+  camIdx: number;
+  presets: Array<{ presetIdx: number; pan?: number; tilt?: number; zoom?: number; label?: string }>;
+}
+export function findPresetPtz(
+  cameras: CameraListItem[] | undefined,
+  camIdx: number,
+  presetIdx: number,
+): Ptz | null;
+
+export interface ArtifactAnalysis {
+  ok: boolean;
+  createdAt: string | null;
+  totals: {
+    cameras: number;
+    presets: number;
+    slots: number;
+    globalSlots: number;
+    withPlate: number;
+    warnings: number;
+    zones: number;
+  };
+  perPreset: Array<{ key: string; camIdx: number; presetIdx: number; label: string; slotCount: number }>;
+  slots: Array<{
+    globalIdx: number | null;
+    slotId: string;
+    zone: string;
+    presetKey: string;
+    roi: NormalizedRect | null;
+    hasPlate: boolean;
+  }>;
+  warnings: string[];
+  report: string;
+}
+export function analyzeArtifact(artifact: unknown): ArtifactAnalysis;
+
 export interface StreamLoopDeps {
   fetchFn: (url: string, opt: { signal: AbortSignal }) => Promise<{
     blob: () => Promise<unknown>;

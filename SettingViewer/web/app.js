@@ -11,6 +11,8 @@ import {
   mapAdvisory,
   pollPlan,
   clampPanelWidth,
+  analyzeArtifact,
+  findPresetPtz,
 } from './core.js';
 
 const $ = (id) => document.getElementById(id);
@@ -32,7 +34,8 @@ const overlay = $('overlay');
 
 // --- 데이터 로드 ---------------------------------------------------------
 async function loadCameras() {
-  const res = await fetch(api(`/cameras${state.source ? `?source=${encodeURIComponent(state.source)}` : ''}`));
+  // no-store: 시뮬레이터 카메라/프리셋이 바뀌어도 항상 최신 목록을 받도록(브라우저 캐시 방지).
+  const res = await fetch(api(`/cameras${state.source ? `?source=${encodeURIComponent(state.source)}` : ''}`), { cache: 'no-store' });
   if (!res.ok) return;
   const data = await res.json();
   state.cameras = data.cameras ?? [];
@@ -41,7 +44,7 @@ async function loadCameras() {
 
 async function loadMapping() {
   try {
-    const res = await fetch(api('/mapping'));
+    const res = await fetch(api('/mapping'), { cache: 'no-store' });
     state.mapping = res.ok ? await res.json() : null;
   } catch {
     state.mapping = null;
@@ -50,7 +53,7 @@ async function loadMapping() {
 
 async function loadHealth() {
   try {
-    const res = await fetch(api('/health'));
+    const res = await fetch(api('/health'), { cache: 'no-store' });
     const ok = res.ok;
     $('badge-backend').classList.toggle('ok', ok);
     $('badge-camera').classList.toggle('ok', ok);
@@ -91,13 +94,23 @@ function renderPresetSelect() {
     state.preset = presets[0].presetIdx;
     sel.value = state.preset;
   }
+  syncPtzFromPreset();
   renderSlotList();
+}
+
+/** '현재 PTZ' 표시를 선택 프리셋의 PTZ(/cameras 제공)로 동기화. 카메라 위치의 신뢰 원천(명령 기준). */
+function syncPtzFromPreset() {
+  const ptz = findPresetPtz(state.cameras, state.cam, state.preset);
+  if (ptz) {
+    state.ptz = { ...ptz };
+    updatePtzDisplay();
+  }
 }
 
 async function loadSources() {
   // health 응답의 sources 목록으로 소스 셀렉트 구성.
   try {
-    const res = await fetch(api('/health'));
+    const res = await fetch(api('/health'), { cache: 'no-store' });
     const data = res.ok ? await res.json() : { sources: [] };
     const sel = $('sel-source');
     sel.innerHTML = '';
@@ -182,15 +195,8 @@ const loop = createStreamLoop({
     if (frame.decode) await frame.decode().catch(() => {});
     drawRoiOverlay();
   },
-  onPtz: (headers) => {
-    const pan = headers.get('X-PTZ-Pan');
-    const tilt = headers.get('X-PTZ-Tilt');
-    const zoom = headers.get('X-PTZ-Zoom');
-    if (pan != null) state.ptz.pan = Number(pan);
-    if (tilt != null) state.ptz.tilt = Number(tilt);
-    if (zoom != null) state.ptz.zoom = Number(zoom);
-    updatePtzDisplay();
-  },
+  // onPtz 제거: 시뮬레이터 /req_img 응답 PTZ 가 항상 0/0/1 이라 '현재 PTZ' 를 덮어쓰면 표시가 깨지고
+  // 수동 스트리밍 시 0/0/1 로 드리프트한다. 카메라 위치는 명령(프리셋/이동/PTZ버튼) 기준으로 추적한다.
 });
 
 function updatePtzDisplay() {
@@ -212,6 +218,40 @@ async function move(ptz) {
     await loop.tick();
   }
   return res.ok;
+}
+
+/**
+ * 프리셋 이동: 선택 프리셋으로 카메라를 실제 이동(현재 모드 무관).
+ * 버그 수정 — 기존엔 loop.tick()만 호출해 수동 모드에선 PTZ override 가 가서 프리셋이 적용되지 않았음.
+ * 프리셋 PTZ 가 있으면 /move(검증된 /req_move 경로)로 물리 이동, 없으면 preset 모드 스냅샷으로 강제 적용.
+ */
+async function gotoPreset() {
+  const ptz = findPresetPtz(state.cameras, state.cam, state.preset);
+  if (ptz) {
+    await move(ptz); // /req_move + 갱신. state.ptz 도 프리셋 값으로 갱신됨.
+    return;
+  }
+  // 폴백: 프리셋 PTZ 미제공(예: 일부 실카메라) → 현재 모드 무시하고 preset 모드 스냅샷.
+  const p = new URLSearchParams({ cam: state.cam, preset: state.preset, mode: 'preset', t: Date.now() });
+  if (state.source) p.set('source', state.source);
+  try {
+    const res = await fetch(api(`/snapshot?${p.toString()}`), { cache: 'no-store' });
+    if (!res.ok) return;
+    const url = URL.createObjectURL(await res.blob());
+    frame.src = url;
+    if (frame.decode) await frame.decode().catch(() => {});
+    URL.revokeObjectURL(url);
+    const pan = res.headers.get('X-PTZ-Pan');
+    const tilt = res.headers.get('X-PTZ-Tilt');
+    const zoom = res.headers.get('X-PTZ-Zoom');
+    if (pan != null) state.ptz.pan = Number(pan);
+    if (tilt != null) state.ptz.tilt = Number(tilt);
+    if (zoom != null) state.ptz.zoom = Number(zoom);
+    updatePtzDisplay();
+    drawRoiOverlay();
+  } catch {
+    /* ignore */
+  }
 }
 
 // --- 정밀 수집(장기 관측·반복 수집) ------------------------------------
@@ -288,6 +328,141 @@ async function capFinalize() {
   }
 }
 
+// --- 분석(최종 셋업 산출물) --------------------------------------------
+let lastArtifact = null;
+
+async function fetchArtifact() {
+  try {
+    const res = await fetch(api('/mapping'), { cache: 'no-store' });
+    return res.ok ? await res.json() : null;
+  } catch {
+    return null;
+  }
+}
+
+function fmtRoi(roi) {
+  if (!roi) return '-';
+  const f = (n) => Number(n).toFixed(3);
+  return `${f(roi.x)}, ${f(roi.y)}, ${f(roi.w)}, ${f(roi.h)}`;
+}
+
+function summaryCard(label, value) {
+  const div = document.createElement('div');
+  div.className = 'an-card';
+  const v = document.createElement('div');
+  v.className = 'an-card-v';
+  v.textContent = String(value);
+  const l = document.createElement('div');
+  l.className = 'an-card-l';
+  l.textContent = label;
+  div.append(v, l);
+  return div;
+}
+
+function buildTable(headers, rows) {
+  const table = document.createElement('table');
+  table.className = 'an-table';
+  const thead = document.createElement('thead');
+  const htr = document.createElement('tr');
+  for (const h of headers) {
+    const th = document.createElement('th');
+    th.textContent = h;
+    htr.appendChild(th);
+  }
+  thead.appendChild(htr);
+  table.appendChild(thead);
+  const tbody = document.createElement('tbody');
+  for (const r of rows) {
+    const tr = document.createElement('tr');
+    for (const c of r) {
+      const td = document.createElement('td');
+      td.textContent = String(c);
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  return table;
+}
+
+async function renderAnalysis() {
+  lastArtifact = await fetchArtifact();
+  const a = analyzeArtifact(lastArtifact);
+  const sum = $('an-summary');
+  sum.innerHTML = '';
+
+  if (!a.ok) {
+    sum.textContent = '저장된 산출물이 없습니다. (셋업 또는 정밀 수집 최종화 후 생성됩니다)';
+    ['an-presets', 'an-slots', 'an-warnings', 'an-report', 'an-raw'].forEach((id) => ($(id).innerHTML = ''));
+    $('an-source').innerHTML = 'SettingAgent <code>data/setup_artifact.json</code> · 산출물 없음';
+    return;
+  }
+
+  const t = a.totals;
+  for (const [l, v] of [
+    ['카메라', t.cameras], ['프리셋', t.presets], ['주차면', t.slots],
+    ['전역 인덱스', t.globalSlots], ['번호판 ROI', t.withPlate], ['존', t.zones], ['경고', t.warnings],
+  ]) {
+    sum.appendChild(summaryCard(l, v));
+  }
+  $('an-source').innerHTML = `SettingAgent <code>data/setup_artifact.json</code> · 생성 ${a.createdAt ?? '-'}`;
+
+  $('an-presets').innerHTML = '';
+  $('an-presets').appendChild(
+    buildTable(
+      ['프리셋 키', '카메라', '프리셋', '라벨', '주차면 수'],
+      a.perPreset.map((p) => [p.key, p.camIdx, p.presetIdx, p.label, p.slotCount]),
+    ),
+  );
+
+  $('an-slots').innerHTML = '';
+  $('an-slots').appendChild(
+    buildTable(
+      ['#', 'slotId', '존', '프리셋', 'ROI(x,y,w,h)', '번호판'],
+      a.slots.map((s) => [s.globalIdx ?? '-', s.slotId, s.zone, s.presetKey, fmtRoi(s.roi), s.hasPlate ? '✓' : '-']),
+    ),
+  );
+
+  const wbox = $('an-warnings');
+  wbox.innerHTML = '';
+  if (!a.warnings.length) {
+    wbox.textContent = '경고 없음';
+  } else {
+    for (const w of a.warnings) {
+      const div = document.createElement('div');
+      div.className = 'an-warn';
+      div.textContent = w;
+      wbox.appendChild(div);
+    }
+  }
+
+  $('an-report').textContent = a.report || '(LLM 리포트 없음)';
+  $('an-raw').textContent = JSON.stringify(lastArtifact, null, 2);
+}
+
+function downloadArtifact() {
+  const blob = new Blob([JSON.stringify(lastArtifact ?? {}, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'setup_artifact.json';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// --- 탭 전환 ------------------------------------------------------------
+function setTab(tab) {
+  document.querySelectorAll('.tab').forEach((x) => x.classList.toggle('active', x.dataset.tab === tab));
+  const analyze = tab === 'analyze';
+  document.querySelector('.viewport-wrap').hidden = analyze;
+  $('panel-resizer').hidden = analyze;
+  $('panel').hidden = analyze;
+  $('analyze-view').hidden = !analyze;
+  $('precise-box').hidden = tab !== 'precise';
+  if (tab === 'precise') capPoll();
+  if (analyze) renderAnalysis();
+}
+
 // --- 패널 너비 리사이즈(드래그 + localStorage 보존) ----------------------
 const PANEL_W_KEY = 'sv.panelWidth';
 
@@ -331,18 +506,17 @@ function wirePanelResize() {
 // --- 이벤트 결선 ---------------------------------------------------------
 function wire() {
   document.querySelectorAll('.tab').forEach((t) =>
-    t.addEventListener('click', () => {
-      document.querySelectorAll('.tab').forEach((x) => x.classList.remove('active'));
-      t.classList.add('active');
-      const isPrecise = t.dataset.tab === 'precise';
-      $('precise-box').hidden = !isPrecise;
-      if (isPrecise) capPoll();
-    }),
+    t.addEventListener('click', () => setTab(t.dataset.tab)),
   );
 
   $('cap-start').addEventListener('click', capStart);
   $('cap-stop').addEventListener('click', capStop);
   $('cap-finalize').addEventListener('click', capFinalize);
+  $('an-refresh').addEventListener('click', renderAnalysis);
+  $('an-download').addEventListener('click', downloadArtifact);
+  $('an-raw-toggle').addEventListener('click', () => {
+    $('an-raw-box').hidden = !$('an-raw-box').hidden;
+  });
 
   $('sel-source').addEventListener('change', async (e) => {
     state.source = e.target.value;
@@ -356,6 +530,7 @@ function wire() {
   });
   $('sel-preset').addEventListener('change', (e) => {
     state.preset = Number(e.target.value);
+    syncPtzFromPreset();
     renderSlotList();
   });
   document.querySelectorAll('input[name="mode"]').forEach((r) =>
@@ -366,7 +541,7 @@ function wire() {
 
   $('btn-start').addEventListener('click', () => loop.start(Number($('fps').value) || 3));
   $('btn-stop').addEventListener('click', () => loop.stop());
-  $('btn-goto').addEventListener('click', () => loop.tick());
+  $('btn-goto').addEventListener('click', gotoPreset);
   $('roi-vehicle').addEventListener('change', drawRoiOverlay);
   $('roi-plate').addEventListener('change', drawRoiOverlay);
 

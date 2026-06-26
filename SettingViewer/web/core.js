@@ -104,6 +104,84 @@ export function clampPanelWidth(px, min = 260, max = 720) {
 }
 
 /**
+ * 카메라 목록에서 (camIdx, presetIdx) 프리셋의 PTZ 조회.
+ * pan/tilt/zoom 이 모두 있으면 { pan, tilt, zoom }, 아니면 null(→ 호출측 폴백).
+ * '프리셋 이동' 이 현재 모드와 무관하게 프리셋 위치로 가게 하는 근거값.
+ */
+export function findPresetPtz(cameras, camIdx, presetIdx) {
+  const cam = (cameras ?? []).find((c) => c.camIdx === camIdx);
+  const preset = (cam?.presets ?? []).find((p) => p.presetIdx === presetIdx);
+  if (preset && preset.pan != null && preset.tilt != null && preset.zoom != null) {
+    return { pan: preset.pan, tilt: preset.tilt, zoom: preset.zoom };
+  }
+  return null;
+}
+
+/**
+ * 최종 셋업 산출물(SetupArtifact) 분석 요약(순수). '분석' 탭 렌더용.
+ * artifact: { presets, slots, globalIndex, createdAt?, warnings?, report? } | null.
+ * slots 는 globalIdx 오름차순 정렬, presetKey/roi/번호판 보유 여부를 평탄화한다.
+ */
+export function analyzeArtifact(artifact) {
+  const empty = { cameras: 0, presets: 0, slots: 0, globalSlots: 0, withPlate: 0, warnings: 0, zones: 0 };
+  if (!artifact || typeof artifact !== 'object') {
+    return { ok: false, createdAt: null, totals: empty, perPreset: [], slots: [], warnings: [], report: '' };
+  }
+  const presets = Array.isArray(artifact.presets) ? artifact.presets : [];
+  const rawSlots = Array.isArray(artifact.slots) ? artifact.slots : [];
+  const globalIndex = Array.isArray(artifact.globalIndex) ? artifact.globalIndex : [];
+  const warnings = Array.isArray(artifact.warnings) ? artifact.warnings : [];
+
+  const gidBySlot = new Map(globalIndex.map((g) => [g.slotId, g.globalIdx]));
+  const zones = new Set();
+  let withPlate = 0;
+
+  const slots = rawSlots.map((s) => {
+    const presetKey = Object.keys(s.roiByPreset ?? {})[0] ?? '';
+    const roi = (s.roiByPreset ?? {})[presetKey] ?? null;
+    const hasPlate = !!(s.plateRoiByPreset && Object.keys(s.plateRoiByPreset).length);
+    if (hasPlate) withPlate += 1;
+    if (s.zone) zones.add(s.zone);
+    return {
+      globalIdx: gidBySlot.has(s.slotId) ? gidBySlot.get(s.slotId) : null,
+      slotId: s.slotId,
+      zone: s.zone ?? '',
+      presetKey,
+      roi,
+      hasPlate,
+    };
+  });
+  slots.sort((a, b) => (a.globalIdx ?? Infinity) - (b.globalIdx ?? Infinity));
+
+  const cameras = new Set(presets.map((p) => p.camIdx));
+  const perPreset = presets.map((p) => ({
+    key: `${p.camIdx}:${p.presetIdx}`,
+    camIdx: p.camIdx,
+    presetIdx: p.presetIdx,
+    label: p.label ?? `${p.camIdx}:${p.presetIdx}`,
+    slotCount: Array.isArray(p.coveredSlotIds) ? p.coveredSlotIds.length : 0,
+  }));
+
+  return {
+    ok: true,
+    createdAt: artifact.createdAt ?? null,
+    totals: {
+      cameras: cameras.size,
+      presets: presets.length,
+      slots: rawSlots.length,
+      globalSlots: globalIndex.length,
+      withPlate,
+      warnings: warnings.length,
+      zones: zones.size,
+    },
+    perPreset,
+    slots,
+    warnings,
+    report: artifact.report ?? '',
+  };
+}
+
+/**
  * 스냅샷 폴링 루프(백프레셔·Blob revoke·정지). DOM/브라우저 전역 미참조 → 의존성 주입.
  * deps:
  *   - fetchFn(url, { signal }) → Response(blob() 보유)

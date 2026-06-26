@@ -625,7 +625,133 @@ body.resizing {
   color: #9be7b5;
 }
 
+/* ── 분석 탭 ─────────────────────────────────────────── */
+.analyze-view {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  max-height: calc(100vh - 96px);
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.analyze-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.analyze-head h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.analyze-head p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.analyze-head code {
+  color: #cfe5ff;
+}
+
+.an-summary {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.an-card {
+  min-width: 92px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  padding: 10px 14px;
+  background: var(--surface-2);
+}
+
+.an-card-v {
+  color: var(--text);
+  font-size: 22px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.an-card-l {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.an-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.an-table-wrap {
+  overflow: auto;
+  max-height: 380px;
+}
+
+.an-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.an-table th,
+.an-table td {
+  border-bottom: 1px solid var(--line-soft);
+  padding: 6px 8px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.an-table th {
+  position: sticky;
+  top: 0;
+  background: var(--surface-3);
+  color: #cbd5df;
+  font-size: 12px;
+}
+
+.an-table tbody tr:hover {
+  background: rgba(47, 140, 255, 0.08);
+}
+
+.an-warn {
+  padding: 5px 0;
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--warn);
+  font-size: 13px;
+}
+
+.an-report {
+  white-space: pre-wrap;
+  line-height: 1.5;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.an-raw {
+  max-height: 360px;
+  overflow: auto;
+  margin: 0;
+  color: #b9c6d1;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
 @media (max-width: 980px) {
+  .an-grid {
+    grid-template-columns: 1fr;
+  }
+
   .topbar {
     grid-template-columns: 1fr;
     align-items: stretch;
