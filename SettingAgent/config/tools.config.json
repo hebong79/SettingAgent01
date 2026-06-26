@@ -8,14 +8,14 @@
     "zoomMax": 36.0
   },
   "vpd": {
-    "endpoint": "http://127.0.0.1:9081",
+    "endpoint": "http://192.168.0.125:9081",
     "detPath": "/vpd/api/v2/det/imgupload",
     "apiKeyEnv": "VPD_API_KEY",
     "timeoutMs": 8000,
     "maxRetries": 3
   },
   "lpd": {
-    "endpoint": "http://127.0.0.1:9082",
+    "endpoint": "http://192.168.0.125:9082",
     "detPath": "/lpd/api/v1/imgupload",
     "apiKeyEnv": "LPD_API_KEY",
     "timeoutMs": 8000,

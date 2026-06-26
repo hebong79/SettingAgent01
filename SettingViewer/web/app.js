@@ -10,6 +10,7 @@ import {
   captureProgress,
   mapAdvisory,
   pollPlan,
+  clampPanelWidth,
 } from './core.js';
 
 const $ = (id) => document.getElementById(id);
@@ -287,6 +288,46 @@ async function capFinalize() {
   }
 }
 
+// --- 패널 너비 리사이즈(드래그 + localStorage 보존) ----------------------
+const PANEL_W_KEY = 'sv.panelWidth';
+
+function applyPanelWidth(px) {
+  const w = clampPanelWidth(px);
+  $('panel').style.width = `${w}px`;
+  drawRoiOverlay(); // 뷰포트 폭 변동 → ROI 재배치
+  return w;
+}
+
+function wirePanelResize() {
+  const panel = $('panel');
+  const handle = $('panel-resizer');
+  // 저장된 너비 복원.
+  const saved = Number(localStorage.getItem(PANEL_W_KEY));
+  if (saved) applyPanelWidth(saved);
+
+  let dragging = false;
+  const onMove = (e) => {
+    if (!dragging) return;
+    // 패널 오른쪽 모서리는 고정 → 새 너비 = 오른쪽모서리 - 커서X (왼쪽 모서리가 커서를 따라옴).
+    applyPanelWidth(panel.getBoundingClientRect().right - e.clientX);
+  };
+  const onUp = () => {
+    if (!dragging) return;
+    dragging = false;
+    handle.classList.remove('dragging');
+    document.body.classList.remove('resizing');
+    localStorage.setItem(PANEL_W_KEY, String(parseInt(panel.style.width, 10) || 320));
+  };
+  handle.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    dragging = true;
+    handle.classList.add('dragging');
+    document.body.classList.add('resizing');
+  });
+  window.addEventListener('mousemove', onMove);
+  window.addEventListener('mouseup', onUp);
+}
+
 // --- 이벤트 결선 ---------------------------------------------------------
 function wire() {
   document.querySelectorAll('.tab').forEach((t) =>
@@ -366,6 +407,7 @@ function wire() {
 
 async function init() {
   wire();
+  wirePanelResize();
   await loadSources();
   await Promise.all([loadCameras(), loadMapping(), loadHealth()]);
   drawRoiOverlay();

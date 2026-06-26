@@ -49,6 +49,7 @@ export function slotLabel(slotId: string, globalIndex?: GlobalIndexEntry[]): str
 export function fpsToInterval(fps: number): number;
 export function clampZoom(z: number, min?: number, max?: number): number;
 export function stepPtz(cur: Ptz, dir: string, step: number): Ptz;
+export function clampPanelWidth(px: number, min?: number, max?: number): number;
 
 export interface StreamLoopDeps {
   fetchFn: (url: string, opt: { signal: AbortSignal }) => Promise<{

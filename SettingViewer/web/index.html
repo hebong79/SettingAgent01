@@ -8,97 +8,128 @@
   </head>
   <body>
     <header class="topbar">
-      <nav class="tabs">
+      <div class="brand">
+        <div class="brand-mark">SV</div>
+        <div>
+          <h1>SettingViewer</h1>
+          <p>Camera PTZ · ROI Inspection</p>
+        </div>
+      </div>
+      <nav class="tabs" aria-label="viewer modes">
         <button class="tab active" data-tab="control">제어·모니터링</button>
         <button class="tab" data-tab="inspect">주차면 검수</button>
         <button class="tab" data-tab="precise">정밀 수집</button>
       </nav>
       <div class="badges">
-        <span id="badge-backend" class="badge">● backend</span>
-        <span id="badge-camera" class="badge">● camera</span>
+        <span id="badge-backend" class="badge">backend</span>
+        <span id="badge-camera" class="badge">camera</span>
       </div>
     </header>
 
     <main class="layout">
       <section class="viewport-wrap">
-        <div class="viewport">
-          <img id="frame" alt="camera frame" />
-          <canvas id="overlay"></canvas>
+        <div class="viewport-head">
+          <div>
+            <h2>Live View</h2>
+            <p>선택한 카메라 프리셋 영상과 ROI 오버레이</p>
+          </div>
+          <div class="roi-toggles">
+            <label><input id="roi-vehicle" type="checkbox" checked /> 차량</label>
+            <label><input id="roi-plate" type="checkbox" checked /> 번호판</label>
+          </div>
         </div>
-        <div class="stream-controls">
-          <button id="btn-start">시작</button>
+        <div class="viewport-shell">
+          <div class="viewport">
+            <img id="frame" alt="camera frame" />
+            <canvas id="overlay"></canvas>
+          </div>
+        </div>
+        <div class="stream-controls toolbar">
+          <button id="btn-start" class="primary">시작</button>
           <button id="btn-stop">정지</button>
-          fps <input id="fps" type="number" min="1" max="10" value="3" />
-          <label><input id="roi-vehicle" type="checkbox" checked /> 차량</label>
-          <label><input id="roi-plate" type="checkbox" checked /> 번호판</label>
+          <label class="field compact">fps <input id="fps" type="number" min="1" max="10" value="3" /></label>
         </div>
       </section>
 
-      <aside class="panel">
-        <div class="ptz-now">현재 PTZ
-          <span>P <b id="ptz-pan">-</b></span>
-          <span>T <b id="ptz-tilt">-</b></span>
-          <span>Z <b id="ptz-zoom">-</b></span>
-        </div>
-        <hr />
-        <div class="select-row">
-          소스 <select id="sel-source"></select>
-        </div>
-        <div class="select-row">
-          카메라 <select id="sel-cam"></select>
-          프리셋 <select id="sel-preset"></select>
-          <button id="btn-goto">이동</button>
-        </div>
-        <div class="select-row">
-          모드
-          <label><input type="radio" name="mode" value="preset" checked /> 프리셋 보기</label>
-          <label><input type="radio" name="mode" value="manual" /> 수동 제어</label>
-        </div>
-        <hr />
-        <div class="ptz-pad">
-          <div class="pad-grid">
-            <button data-dir="up">▲</button>
-            <button data-dir="left">◄</button>
-            <button data-dir="right">►</button>
-            <button data-dir="down">▼</button>
+      <div class="panel-resizer" id="panel-resizer" title="드래그하여 패널 너비 조절"></div>
+
+      <aside class="panel" id="panel">
+        <section class="panel-section ptz-summary">
+          <div class="section-title">현재 PTZ</div>
+          <div class="ptz-now">
+            <span>P <b id="ptz-pan">-</b></span>
+            <span>T <b id="ptz-tilt">-</b></span>
+            <span>Z <b id="ptz-zoom">-</b></span>
           </div>
-          <div class="zoom-col">
-            <button data-dir="zoomIn">+ zoom</button>
-            <button data-dir="zoomOut">− zoom</button>
-            step <input id="step" type="number" value="500" />
+        </section>
+
+        <section class="panel-section">
+          <div class="section-title">대상 선택</div>
+          <label class="field full">소스 <select id="sel-source"></select></label>
+          <div class="control-grid">
+            <label class="field">카메라 <select id="sel-cam"></select></label>
+            <label class="field">프리셋 <select id="sel-preset"></select></label>
+            <button id="btn-goto" class="primary">이동</button>
           </div>
-        </div>
-        <div class="abs-row">
-          절대 이동
-          pan <input id="abs-pan" type="number" />
-          tilt <input id="abs-tilt" type="number" />
-          zoom <input id="abs-zoom" type="number" />
-          <button id="btn-abs">이동</button>
-        </div>
-        <hr />
-        <div id="login-box" class="login-box" hidden>
-          실카메라 로그인
+          <div class="mode-row">
+            <span>모드</span>
+            <label><input type="radio" name="mode" value="preset" checked /> 프리셋 보기</label>
+            <label><input type="radio" name="mode" value="manual" /> 수동 제어</label>
+          </div>
+        </section>
+
+        <section class="panel-section">
+          <div class="section-title">PTZ 제어</div>
+          <div class="ptz-pad">
+            <div class="pad-grid" aria-label="ptz direction pad">
+              <button data-dir="up" title="위로">▲</button>
+              <button data-dir="left" title="왼쪽">◄</button>
+              <button data-dir="right" title="오른쪽">►</button>
+              <button data-dir="down" title="아래로">▼</button>
+            </div>
+            <div class="zoom-col">
+              <button data-dir="zoomIn">+ zoom</button>
+              <button data-dir="zoomOut">− zoom</button>
+              <label class="field compact">step <input id="step" type="number" value="500" /></label>
+            </div>
+          </div>
+          <div class="abs-row">
+            <span>절대 이동</span>
+            <label class="field compact">pan <input id="abs-pan" type="number" /></label>
+            <label class="field compact">tilt <input id="abs-tilt" type="number" /></label>
+            <label class="field compact">zoom <input id="abs-zoom" type="number" /></label>
+            <button id="btn-abs">이동</button>
+          </div>
+        </section>
+
+        <section id="login-box" class="panel-section login-box" hidden>
+          <div class="section-title">실카메라 로그인</div>
           <input id="login-user" type="text" placeholder="user" autocomplete="off" />
           <input id="login-pass" type="password" placeholder="pass" autocomplete="off" />
-          <button id="btn-login">로그인</button>
+          <button id="btn-login" class="primary">로그인</button>
           <span id="login-status"></span>
-        </div>
-        <div id="slot-list" class="slot-list"></div>
+        </section>
+
+        <section class="panel-section">
+          <div class="section-title">주차면 목록</div>
+          <div id="slot-list" class="slot-list"></div>
+        </section>
 
         <!-- 정밀 수집(장기 관측·반복 수집) 패널. precise 탭에서 표시. -->
-        <div id="precise-box" class="precise-box" hidden>
-          <h3>정밀 수집</h3>
-          <div class="select-row">
-            반복 횟수 <input id="cap-count" type="number" min="1" value="50" />
+        <section id="precise-box" class="precise-box panel-section" hidden>
+          <div class="precise-head">
+            <div>
+              <h3>정밀 수집</h3>
+              <p>반복 관측 → 누적 → 정밀 ROI</p>
+            </div>
           </div>
-          <div class="select-row">
-            주기(초) <input id="cap-interval" type="number" min="1" value="30" />
+          <div class="capture-grid">
+            <label class="field">반복 횟수 <input id="cap-count" type="number" min="1" value="50" /></label>
+            <label class="field">주기(초) <input id="cap-interval" type="number" min="1" value="30" /></label>
+            <label class="field">체크포인트 <input id="cap-checkpoint" type="number" min="1" value="10" /></label>
           </div>
-          <div class="select-row">
-            체크포인트 간격 <input id="cap-checkpoint" type="number" min="1" value="10" />
-          </div>
-          <div class="select-row">
-            <button id="cap-start">시작</button>
+          <div class="cap-actions toolbar">
+            <button id="cap-start" class="primary">시작</button>
             <button id="cap-stop">정지</button>
             <button id="cap-finalize">최종화</button>
           </div>
@@ -108,7 +139,7 @@
           </div>
           <div id="cap-advisory" class="cap-advisory"></div>
           <div id="cap-msg" class="cap-msg"></div>
-        </div>
+        </section>
       </aside>
     </main>
 

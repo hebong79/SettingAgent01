@@ -98,6 +98,11 @@ export function pollPlan(state, intervalMs = 2000) {
   return { poll, intervalMs };
 }
 
+/** 컨트롤 패널 드래그 리사이즈 폭 클램프(px → [min,max] 정수). */
+export function clampPanelWidth(px, min = 260, max = 720) {
+  return Math.min(max, Math.max(min, Math.round(px)));
+}
+
 /**
  * 스냅샷 폴링 루프(백프레셔·Blob revoke·정지). DOM/브라우저 전역 미참조 → 의존성 주입.
  * deps:
