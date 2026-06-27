@@ -48,7 +48,7 @@ LLM 서버가 없으면 `config/llm.config.json` 의 `llm.enabled=false` → 결
 
 ## 설정 (config/ — 역할 분리 2파일)
 
-- **`tools.config.json`** — 도구·셋업 파라미터: `camera`/`vpd`/`lpd`/`setup`/`map`/`presetProvider`/`discovery`/`server`/`store`
+- **`tools.config.json`** — 도구·셋업 파라미터: `camera`/`vpd`/`lpd`/`setup`/`map`/`presetProvider`/`discovery`/`server`/`store`/`viewer`(+옵셔널 `cameraSources`)
 - **`llm.config.json`** — LLM 두뇌 + MCP + 단계별 프롬프트: `llm`/`mcp`/`setupPrompts`
 
 자주 바꾸는 값:
@@ -62,6 +62,7 @@ LLM 서버가 없으면 `config/llm.config.json` 의 `llm.enabled=false` → 결
 | `tools.discovery.enabled` | 셋업 시 즉석 자동탐색(B) |
 | `llm.llm.enabled` | LLM 게이트 on/off |
 | `llm.setupPrompts.stageNEnabled` | 단계별(1 비전판정/2 중복·라벨/3 리포트) on/off |
+| `tools.viewer.enabled` | 웹 뷰어(SPA + `/viewer/api/*`) 서빙 on/off. `false`=헤드리스(순수 에이전트) |
 
 > 프리셋 출처 3가지: **A**(카메라 `/cameras`), **B**(자동탐색 probing), **수동**(camerapos 직접 작성).
 > 어느 출처든 `npm run export:camerapos` 로 `camerapos.json` 에 모아 두면 셋업은 항상 파일 기준으로 동작.
@@ -85,6 +86,7 @@ LLM 서버가 없으면 `config/llm.config.json` 의 `llm.enabled=false` → 결
 | GET | `/mapping` | 최종 산출물 조회 |
 | GET | `/brain/ping` | LLM 연결 점검 |
 | POST | `/brain/review` | 산출물 LLM 검토 |
+| GET | `/viewer/`, `/viewer/api/*` | 웹 뷰어(SPA + 카메라/스냅샷/이동/mapping). `viewer.enabled=true` 일 때만. 접속: `http://localhost:13020/viewer/` |
 | POST | `/capture/start`·`/stop`·`/finalize`, GET `/capture/status`·`/runs` | 정밀 수집(반복 관측→SQLite 누적→집계→LLM 보정→`setup_artifact.json`). 단발 `/setup/*` 보완. 문서: `docs/20260625_233818_정밀주차면_반복수집_구현문서.md` |
 
 ---
@@ -135,3 +137,4 @@ warnings?, report?
 - LLM 단계 프롬프트(전략 C): `20260624_202329_..._전략C_단계별프롬프트_구현.md`
 - 프리셋 공급자/Export: `20260624_233629_..._프리셋공급자_camerapos_export.md`
 - A타입(Unity /cameras): `20260625_000814_..._A타입_UnityProvider_구현검증.md`
+- 웹 뷰어 재통합(단일 프로세스): `20260626_233954_SettingViewer_SettingAgent_재통합.md`(+ `..._재통합_영향도분석.md`)

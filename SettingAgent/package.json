@@ -18,6 +18,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@fastify/static": "^9.0.0",
     "@modelcontextprotocol/sdk": "^1.0.4",
     "@parkagent/types": "*",
     "better-sqlite3": "^12.11.1",

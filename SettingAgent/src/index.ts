@@ -8,6 +8,7 @@ import { SetupOrchestrator } from './setup/SetupOrchestrator.js';
 import { createPresetProvider } from './setup/presetProvider.js';
 import { AgentRuntime } from './brain/AgentRuntime.js';
 import { buildServer } from './api/server.js';
+import { buildSourceRegistry } from './viewer/sourceRegistry.js';
 import { SqliteStore } from './capture/SqliteStore.js';
 import { CheckpointReviewer } from './capture/CheckpointReviewer.js';
 import { CaptureJob } from './capture/CaptureJob.js';
@@ -47,14 +48,18 @@ async function main(): Promise<void> {
     roiPadding: tools.setup.roiPadding, yBandTolerance: tools.setup.yBandTolerance, expectedByPreset,
   });
 
+  // 웹 뷰어 통합(SettingViewer). enabled=false 면 sources 미빌드(헤드리스).
+  const sources = tools.viewer.enabled ? buildSourceRegistry(tools) : undefined;
+
   const app = buildServer({
     orchestrator, repo, camera, vpd, brain, mapFiles: tools.map, discovery: tools.discovery,
     presetProvider, refreshOnRun: tools.presetProvider.refreshOnRun,
     captureJob, finalizer, sqlite, capture: tools.capture,
+    viewer: tools.viewer, sources,
   });
   await app.listen({ port: tools.server.port, host: '0.0.0.0' });
   logger.info(
-    { port: tools.server.port, llmEnabled: llm.llm.enabled, mcpEnabled: llm.mcp.enabled },
+    { port: tools.server.port, llmEnabled: llm.llm.enabled, mcpEnabled: llm.mcp.enabled, viewerEnabled: tools.viewer.enabled },
     'SettingAgent 기동 완료',
   );
 }

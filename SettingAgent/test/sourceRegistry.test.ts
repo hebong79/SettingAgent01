@@ -1,10 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import { buildSourceRegistry } from '../src/viewer/sourceRegistry.js';
-import { DEFAULT_VIEWER_CONFIG, type ViewerConfig } from '../src/config/viewerConfig.js';
+import { DEFAULT_TOOLS_CONFIG, type ToolsConfig } from '../src/config/toolsConfig.js';
 import { SimulatorSource } from '../src/viewer/SimulatorSource.js';
 import { RealPtzSource } from '../src/viewer/RealPtzSource.js';
 
-const base = (): ViewerConfig => structuredClone(DEFAULT_VIEWER_CONFIG);
+/** buildSourceRegistry 입력(camera + cameraSources)만 발췌. */
+type RegistryCfg = Pick<ToolsConfig, 'camera' | 'cameraSources'>;
+const base = (): RegistryCfg => ({ camera: structuredClone(DEFAULT_TOOLS_CONFIG.camera), cameraSources: undefined });
 
 describe('buildSourceRegistry — 하위호환/다중소스', () => {
   it('cameraSources 미설정 → sim 단일 폴백(id=sim)', () => {

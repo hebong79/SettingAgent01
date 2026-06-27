@@ -14,6 +14,8 @@ import type { CaptureJob } from '../capture/CaptureJob.js';
 import type { Finalizer } from '../capture/Finalizer.js';
 import type { SqliteStore } from '../capture/SqliteStore.js';
 import { registerCaptureRoutes } from './captureRoutes.js';
+import { registerViewerRoutes } from '../viewer/routes.js';
+import type { CameraSource } from '../viewer/CameraSource.js';
 
 const TargetSchema = z.object({
   camIdx: z.number().int().positive(),
@@ -44,6 +46,10 @@ export interface ApiDeps {
   sqlite?: SqliteStore;
   /** capture 라우트 설정·targets 로딩용. */
   capture?: ToolsConfig['capture'];
+  /** 웹 뷰어 설정. enabled=true && sources 주입 시에만 뷰어 라우트·정적 등록(헤드리스 보존). */
+  viewer?: ToolsConfig['viewer'];
+  /** 카메라 소스 레지스트리(뷰어 카메라 라우트용). */
+  sources?: Map<string, CameraSource>;
 }
 
 /**
@@ -187,6 +193,26 @@ export function buildServer(deps: ApiDeps): FastifyInstance {
       store: deps.sqlite,
       cfg: deps.capture,
       mapFiles: deps.mapFiles,
+    });
+  }
+
+  // 웹 뷰어 통합(SettingViewer). viewer.enabled && sources 주입 시에만 등록(헤드리스 보존, 가산).
+  // registerViewerRoutes 는 async(내부 @fastify/static register) → app.register 로 감싸 buildServer 동기 유지.
+  if (deps.viewer?.enabled && deps.sources) {
+    const viewer = deps.viewer;
+    const sources = deps.sources;
+    app.register(async (instance) => {
+      // /viewer/api/mapping 직접 읽기(프록시 폐기) — repo.loadArtifact() 그대로 반환, 404 보존.
+      instance.get('/viewer/api/mapping', async (_req, reply) => {
+        const artifact = deps.repo.loadArtifact();
+        if (!artifact) {
+          reply.code(404);
+          return { error: 'no setup artifact' };
+        }
+        return artifact;
+      });
+      // 카메라 라우트 + 정적 SPA(와일드카드는 내부에서 API 라우트 뒤에 register).
+      await registerViewerRoutes(instance, { sources, viewer });
     });
   }
 

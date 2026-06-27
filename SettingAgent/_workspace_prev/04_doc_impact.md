@@ -1,43 +1,24 @@
-# SettingViewer — 문서화·영향도 요약 (04_doc_impact)
+# 04. 문서화·영향도 요약 — 정밀 주차면 반복 수집
 
-- 작성일: 2026-06-25 18:28:19
-- 작성자: documenter
-- 파이프라인 마지막 단계(설계→구현→검증→문서화). 앞 단계 산출물 + 실제 코드 기반.
+- 작성: 문서화 에이전트(documenter) · 2026-06-25
+- 입력: `01_architect_plan.md`·`02_developer_changes.md`·`03_qa_report.md` + 실제 구현 코드
 
----
+## 생성 문서(2)
+- 구현/사용: `SettingAgent/docs/20260625_233818_정밀주차면_반복수집_구현문서.md`
+- 영향도 분석: `SettingAgent/docs/20260625_233818_정밀주차면_반복수집_영향도분석.md`
 
-## 1. 생성 문서 (2개)
+## 문서 A(구현/사용) 요약
+- 단발 1프레임 한계(빈 면 누락·지터) → 시간 누적 정밀화. 방식 C(체크포인트 하이브리드) 채택.
+- 파이프라인: 수집(CaptureJob)→SQLite 적재→결정형 집계(Aggregator: 클러스터·지지·점유·중앙값 bbox)→체크포인트 LLM(CheckpointReviewer, 텍스트 요약)→최종화(Finalizer)→setup_artifact.json.
+- 신규 5모듈+routes·SQLite 6테이블·REST 6엔드포인트·capture 설정·SettingViewer 정밀 수집 탭·좌표 불변식·실행 흐름·테스트 결과/미커버 기록.
 
-| 문서 | 경로 |
-|------|------|
-| 구현/사용 문서 | `SettingAgent/docs/20260625_182819_SettingViewer_구현문서.md` |
-| 영향도 분석 | `SettingAgent/docs/20260625_182819_SettingViewer_영향도분석.md` |
+## 문서 B(영향도) 요약
+- 변경: SettingAgent capture 신규 7파일 + 가산 수정 8, SettingViewer 가산 수정 5. 전부 가산.
+- 불변: `@parkagent/types`·`/setup/*`·`/mapping`·SetupArtifact·기존 81/62 테스트 회귀 0(실측).
+- 의존성: better-sqlite3@12.11.1 프리빌트 로드 실측 성공(SettingAgent 단독). 타 환경 이식 시 재확인.
+- 브레인 옵셔널 가산(reviewCheckpoint/finalizeCapture), 기존 메서드 보존.
 
-### 구현문서 요약
-- 무엇: SettingAgent(:13020)가 정적 SPA + 카메라 프록시를 단일 출처로 서빙하는 웹 뷰어. 범위 = 설계서 §10.1 1~10단계(11단계 WebRTC 제외).
-- 아키텍처: 단일 출처 프록시, `CameraSource` 추상화(SimulatorSource/RealPtzSource), 프록시 라우트 5개.
-- 파일별 책임·프록시 API 명세(403 등 에러코드)·명명규약·설정 가이드·실행법·실 PTZ 보정 항목·테스트 결과(138 통과) 수록.
-
-### 영향도분석 요약
-- 변경 파일 표(신규/수정·영향·리스크·완화).
-- 기존 기능 보존: `CameraClient` 시그니처 불변(listCameras 가산), 셋업 파이프라인·SetupArtifact·`@parkagent/types` 무영향, ActionAgent/DMAgent 무관.
-- 의존성 `@fastify/static@9.1.3`·조립부(index/server) 영향, 회귀(기존 81 그린), 잔여 리스크 7항.
-
----
-
-## 2. 최종 영향도 결론
-
-- **가산적·`/viewer` prefix 격리·옵셔널 기본값** — 기존 동작 경로(셋업·MCP·공유 타입·타 에이전트) 의미 변경 0.
-- **공유 계약 무변경**: `@parkagent/types`(뷰어가 import 안 함)·`SetupArtifact`·기존 REST 라우트 → ActionAgent/DMAgent 파급 없음.
-- **회귀 부재**: vitest 138 passed / 0 failed(기존 81 + 신규 57), 결함 0.
-- **미검증 명시**: 실 PTZ 실기기(Hucoms CGI 가정값)·Unity 실서버 manual 모드·브라우저 DOM(jsdom 미도입)은 본 라운드 미커버 → 설계서 §10.1 12단계(동작확인) 대상.
-
----
-
-## 3. 문서 외 최소 제안 (외과적 — 직접 대규모 수정 안 함)
-
-1. **루트 `CLAUDE.md` 변경 이력 표**: SettingViewer 라운드를 한 줄 추가하면 추적성↑. (예: `| 2026-06-25 | SettingViewer 웹 뷰어(프록시/CameraSource/실 PTZ 어댑터) 추가 | SettingAgent | 셋업 산출물 시각 검수·카메라 제어 |`)
-2. **`SettingAgent/README.md`**: "빠른 시작"에 `http://localhost:13020/viewer/` 접속 1줄, "설정" 표에 `viewer`/`cameraSources` 키 1~2줄 추가 제안. (현재 README 설정 키 목록에 viewer 미기재.)
-
-> 위 2건은 **제안만**. 승인 시 최소 1~2줄 가산으로 반영. 미승인 시 본 docs 2종으로 충분.
-</content>
+## 최종 영향도 결론
+- 파급 범위 = SettingAgent 내부 + SettingViewer 국한. **Action/DM 무영향**(공유 계약 불변).
+- 회귀 0·좌표 불변식 충족·결함 0(재작업 불필요).
+- 미수행: 실서버/실기기 스모크(시뮬레이터로 별도 동작확인 권장), better-sqlite3 타 환경 프리빌트 재확인.

@@ -1,336 +1,325 @@
-# SettingViewer 웹 뷰어 — 구현 계획 (01_architect_plan)
+# 01. 구현 계획 — 장기 관측·반복 수집 → SQLite 누적 → LLM 정밀 주차면 확보
 
-- 작성일: 2026-06-25
-- 작성자: architect (ParkAgent 설계자)
-- 기준 문서(single source of truth): `SettingAgent/docs/20260625_170811_SettingViewer_웹뷰어_설계서.md` (rev3)
-- 구현 범위: 설계서 §10.1 **1~10단계** (11단계 RTSP→WebRTC 제외)
-- 구현자(developer)는 이 문서를 그대로 따라 코딩한다. 과설계 금지 — 설계서 범위 밖 추상화/기능 추가 금지.
+- 작성: 설계자(architect) · 2026-06-25
+- 기준 설계서(단일 기준): `SettingAgent/docs/20260625_224842_장기관측_반복수집_SQLite_LLM정밀주차면_설계서.md`
+- 범위: 설계서 §10 1~7단계(SettingAgent 측 전부) + SettingViewer 프록시/UI(6단계). §10-8 동작확인은 QA가 시뮬레이터로 수행.
+- 불변 계약(절대 변경 금지): `@parkagent/types`(SetupArtifact/ParkingSlot/NormalizedRect/GlobalSlotIndex), 기존 `/setup/*`·`/mapping`, 기존 81 테스트.
+- 원칙: ParkSimMgr 컨벤션(ESM `.js` import, 1-based cam/preset/positionIdx, `fetchWithTimeout`/`withRetry` 재사용, 외과적·단순함 우선). 과설계 금지 — 설계서 범위만.
 
 ---
 
-## 0. 핵심 결정 요약 (설계서 §11 확정 사항 반영)
+## 0. 핵심 설계 결정(설계서에서 확정, 구현자가 따를 것)
 
-| 항목 | 결정 |
+1. **방식 C(체크포인트 하이브리드)**: 결정형 누적이 정확도의 뼈대, LLM은 전략·판정 보조. LLM 호출은 `(N/K)+1` 수준.
+2. **정지조건 = 횟수 기본 + 언제든 수동 정지**. 수렴은 LLM **자문 표시만**(자동 정지 아님).
+3. **1차 체크포인트는 텍스트 요약만**(비전 썸네일 제외 — 설계서 §11-4, 사용자 확정). 비전은 후속 옵션.
+4. **좌표 불변식**: 좌표는 검출+집계만 생성/수정. LLM은 클러스터 병합/라벨/수용·거부 **판정**과 수렴 **자문**만. bbox 좌표를 만들거나 바꾸지 않는다.
+5. **LLM 비활성(`llm.enabled=false`) 강등**: 체크포인트·최종 LLM 생략 → 결정형 집계만으로 `SetupArtifact` 산출(방식 A 강등). 무LLM에서도 동작.
+6. **better-sqlite3**(동기·프리빌트). DB 경로는 **주입 가능**(`:memory:`/임시파일 테스트).
+7. **SetupArtifact 계약·`/setup/*`·`/mapping` 불변. 모두 가산적.**
+
+---
+
+## 1. 파일별 신규/수정 목록
+
+### 1.1 SettingAgent — 신규
+
+| 파일 | 책임 |
 |------|------|
-| 프런트 스택 | 빌드리스 바닐라 ESM + Canvas (번들러 없음) |
-| 정적 서빙 | `@fastify/static` (신규 의존성 1개), `SettingAgent/web/` |
-| 단일 출처 프록시 | 브라우저는 `:13020`(SettingAgent)만 호출. 카메라 주소는 서버만 보유 |
-| 수동 라이브 | `/req_img {cam,preset,pan,tilt,zoom}` PTZ override 연속 폴링 (해석 A 확정) |
-| 영상 | 스냅샷 폴링 ≈3fps, 프록시가 base64→`image/jpeg` 바이너리 변환 |
-| 보안 | `viewer.allowMove`(기본 true), `controlToken`(선택). 실카메라 자격증명은 UI 입력→프록시 통과(서버 영구저장 금지) |
-| 소스 추상화 | `CameraSource` 인터페이스 + `SimulatorSource`(기존 CameraClient 래핑) + `RealPtzSource`(Hucoms CGI) |
+| `src/capture/SqliteStore.ts` | better-sqlite3 DAO. 6테이블 스키마 보장(`CREATE IF NOT EXISTS`)·DAO 메서드. 생성자에 **dbPath 주입**(`:memory:` 또는 파일). 순수 동기. 좌표·통계 read/write 만, 비즈니스 로직 없음. |
+| `src/capture/Aggregator.ts` | **결정형 순수함수**: 누적 detection → 프리셋별 클러스터(clusterDist)·지지(clusterMinSupport)·대표 bbox(중앙값)·occupancyRate·plateRoi. DB·IO 의존 없음(입력=평면 행 배열, 출력=AggregatedSlot 배열). 합성 데이터 테스트 가능. |
+| `src/capture/CaptureJob.ts` | 상태머신(idle→running→stopping→finalizing→done\|stopped\|error)·count·수동정지·주기 러너. 캡처 1라운드 = 프리셋 순회 → CameraClient/req_img → VPD(+LPD) → SqliteStore 적재. 주기 타이머·sleep·now **주입**(fake timers). 중복 시작 거부. K라운드마다 집계+(LLM 체크포인트). |
+| `src/capture/CheckpointReviewer.ts` | 집계 텍스트 요약 → AgentRuntime.reviewCheckpoint → `{merges,labels,rejects,coverage,convergence}` 반영(메타만, 좌표 불변). 결과를 `checkpoint` 행 저장. LLM 비활성 시 no-op(null 반환). |
+| `src/capture/Finalizer.ts` | 전체 집계 + 체크포인트 컨텍스트 → (LLM 활성 시) AgentRuntime.finalizeCapture 보조판정 → AggregatedSlot → `IndexableSlot`/`ParkingSlot`/`Preset` 조립 → `buildGlobalIndex`/`validateCoverage` → `SetupArtifact` → `Repository.saveArtifact` + `artifact_snapshot` 기록. LLM 비활성 시 결정형 강등. |
+| `src/capture/types.ts` | capture 모듈 내부 타입(`CaptureRunRow`/`ObservationRow`/`DetectionRow`/`AggregatedSlot`/`CaptureStatus`/`CheckpointSummary`). **@parkagent/types 와 분리**(공유 계약 오염 금지). |
+| `src/api/captureRoutes.ts` | `/capture/*` 라우트 등록 함수(`registerCaptureRoutes(app, deps)`) + zod 스키마. server.ts 가 호출(라우트 순서 보존). |
 
-### MCP 도구 vs LLM 두뇌 경계
-- **전부 결정형(도구) 영역**. 뷰어는 스냅샷 폴링·좌표변환·PTZ 절대이동 등 **수치/REST 반복**만 수행한다. LLM 두뇌 호출 없음(셋업 검토는 기존 `/brain/*`가 담당, 뷰어 범위 밖).
-- 따라서 신규 코드는 전부 ParkSimMgr 결정형 컨벤션(타임아웃·zod·1-based 인덱스)을 따른다.
+### 1.2 SettingAgent — 수정(가산만, 외과적)
 
----
-
-## 1. 파일별 변경/신규 목록
-
-### 신규 — 서버 소스 (`SettingAgent/src/viewer/`)
-| 파일 | 구분 | 핵심 책임 |
-|------|------|-----------|
-| `src/viewer/CameraSource.ts` | 신규 | `CameraSource` 인터페이스 + 공유 타입(`Ptz`, `CameraList`, `SnapshotResult`) 정의. 구현체 없음(계약만). |
-| `src/viewer/SimulatorSource.ts` | 신규 | `SimulatorSource implements CameraSource`. 기존 `CameraClient` 위임(snapshot=requestImage, move, list=listCameras). 단위변환 항등. `kind='sim'`. |
-| `src/viewer/RealPtzSource.ts` | 신규 | `RealPtzSource implements CameraSource`(Hucoms CGI). login.cgi 세션·snapshot·move. CGI 경로/원시단위 범위는 **상수로 분리**(파일 상단 `HUCOMS_*` 상수 블록). `kind='hucoms'`. |
-| `src/viewer/sourceRegistry.ts` | 신규 | `cameraSources[]` 설정 → `Map<sourceId, CameraSource>` 빌드. 하위호환: `cameraSources` 미설정 시 `camera`(단일 sim) 1개 등록. |
-| `src/viewer/routes.ts` | 신규 | `registerViewerRoutes(app, deps)` — `/viewer/api/*` 5개 라우트 + zod 스키마 + `@fastify/static` 등록(순서 보장). |
-
-### 신규 — 프런트 (`SettingAgent/web/`)
-| 파일 | 구분 | 핵심 책임 |
-|------|------|-----------|
-| `web/index.html` | 신규 | SPA 진입점. 탭2개(제어·모니터링/주차면 검수), `.viewport>img+canvas`, 제어 패널 마크업. `<script type="module" src="./app.js">`. |
-| `web/app.css` | 신규 | 레이아웃(좌 뷰포트+우 패널). letterbox 오차 방지 CSS(§5.2): `.viewport{position:relative;display:inline-block} img{display:block;max-width:100%} canvas{position:absolute;left:0;top:0;pointer-events:none}`. |
-| `web/app.js` | 신규 | DOM 결선·이벤트·스트림 루프 오케스트레이션(환경 의존). 순수 로직은 `core.js`에서 import. |
-| `web/core.js` | 신규 | **환경 비의존 순수 함수 모듈**(테스트 대상): `toPixel`, `presetKey`, `slotLabel`(slotId→globalIdx+폴백), `fpsToInterval`, `clampZoom`, `stepPtz`. DOM/fetch 미참조. |
-
-> `web/core.js`는 vitest가 직접 import(브라우저 API 불필요). `web/app.js`는 jsdom 없이도 테스트 가능하도록, 폴링 루프 핵심(백프레셔/revoke/stop)을 **주입형 팩토리 함수**(`createStreamLoop({fetch, createObjectURL, revokeObjectURL, setImage})`)로 `core.js`에 두고 app.js는 실제 의존성만 주입한다.
-
-### 수정 — 기존 서버 소스
-| 파일 | 구분 | 변경 내용 |
-|------|------|-----------|
-| `src/clients/CameraClient.ts` | 수정(가산) | `listCameras(): Promise<CameraList>` 메서드 추가. 기존 `requestImage/move/health/clampZoom` **시그니처 불변**. |
-| `src/config/toolsConfig.ts` | 수정(가산) | `viewer` 섹션 + `cameraSources` 옵셔널 스키마/기본값 추가. 기존 섹션 불변. |
-| `src/api/server.ts` | 수정(가산) | `ApiDeps`에 `viewer`·`sources`(또는 `cameraSources` 설정) 추가, `registerViewerRoutes(app, ...)` 호출(`viewer.enabled`일 때만). 기존 라우트 불변. |
-| `src/index.ts` | 수정(가산) | `buildSourceRegistry(tools)` → `buildServer`에 주입. `@fastify/static`은 routes.ts 내부 등록이라 index 변경 최소. |
-| `package.json` | 수정 | `dependencies`에 `@fastify/static` 추가. |
-| `config/tools.config.json` | 수정(가산) | `viewer` 섹션 추가(`cameraSources`는 하위호환 위해 미기재 — sim 단일 폴백). |
-
-### 신규 — 테스트 (`SettingAgent/test/`)
-| 파일 | 대상 |
+| 파일 | 수정 |
 |------|------|
-| `test/cameraClientList.test.ts` | `CameraClient.listCameras()` mock 응답 파싱(2단계). |
-| `test/viewerRoutes.test.ts` | `fastify.inject`로 `/viewer/api/*` 라우트·상태코드·헤더 검증(3·4단계, allowMove 403). |
-| `test/simulatorSource.test.ts` | `SimulatorSource` 위임(snapshot/move/list)·항등 변환(1단계). |
-| `test/realPtzSource.test.ts` | `RealPtzSource` Hucoms CGI 모킹(login 세션·snapshot·move·단위매핑 왕복·자격증명 미노출)(9단계). |
-| `test/sourceRegistry.test.ts` | `cameraSources` 파싱·하위호환(미설정→sim 1개)·소스 선택(10단계). |
-| `test/viewerCore.test.ts` | 프런트 순수 로직: `toPixel`/`presetKey`/`slotLabel`/`fpsToInterval`/`createStreamLoop`(백프레셔·revoke·stop)(6·7·8단계, G2·G3). |
+| `src/config/toolsConfig.ts` | `CaptureSchema` 추가 + `ToolsConfigSchema.capture` + `DEFAULT_TOOLS_CONFIG.capture` + `loadToolsConfig` 섹션 병합 루프에 자동 포함(키 기반 루프라 추가 불필요 — 검증만). |
+| `src/brain/SetupBrain.ts` | `CheckpointInput`/`CheckpointResultSchema`/`FinalizeCaptureInput`/`FinalizeCaptureResultSchema` 타입·zod 추가 + `SetupBrain` 인터페이스에 `reviewCheckpoint?`/`finalizeCapture?` **옵셔널** 메서드 추가(기존 구현 무영향). |
+| `src/brain/AgentRuntime.ts` | `reviewCheckpoint`/`finalizeCapture` 메서드 추가(기존 `chatJson` 재사용, 텍스트 요약 입력). 비활성 시 null. 기존 메서드 불변. |
+| `src/api/server.ts` | `ApiDeps`에 `captureJob`/`finalizer`/`sqlite` 옵셔널 추가 + `registerCaptureRoutes(app, ...)` 호출 1줄. 기존 라우트 불변. |
+| `src/index.ts` | SqliteStore/CaptureJob/CheckpointReviewer/Finalizer 조립 + buildServer 주입. 기존 조립 불변. |
+| `package.json` | `dependencies`에 `better-sqlite3` + `devDependencies`에 `@types/better-sqlite3`. |
+| `config/tools.config.json` | `capture` 섹션 추가(설계서 §7 값). |
+
+### 1.3 SettingViewer — 신규/수정
+
+| 파일 | 신규/수정 | 책임 |
+|------|----------|------|
+| `src/server.ts` | 수정 | `/viewer/api/capture/*` 프록시 추가(기존 `/viewer/api/mapping` 프록시와 동일 `fetchWithTimeout` 패턴, GET/POST 모두). `registerViewerRoutes` 호출 **전**에 등록(정적 와일드카드보다 앞). |
+| `web/core.js` | 수정 | 순수 로직 추가: `captureProgress(status)`(진행률 %), `mapAdvisory(checkpoint)`(자문 표시 매핑), `pollPlan`(폴링 간격). DOM/fetch 미참조. |
+| `web/index.html` | 수정 | "정밀 수집" 탭 마크업(반복횟수·주기·체크포인트 입력, 시작/정지/최종화 버튼, 진행바, 자문 패널). |
+| `web/app.js` | 수정 | 탭 핸들러 + core.js 순수로직에 fetch/DOM 주입(폴링 시작/정지). |
+| `web/core.d.ts` | 수정 | 신규 순수함수 타입 선언 추가. |
+
+> SettingViewer는 **얇은 제어·모니터 UI + 프록시**만. 집계·DB·LLM 로직은 SettingAgent 소유(설계서 §3).
 
 ---
 
-## 2. `CameraSource` 인터페이스 시그니처 (설계서 §13.2 확정)
+## 2. SQLite 스키마 · DAO 시그니처 (설계서 §5)
 
-`src/viewer/CameraSource.ts`:
+### 2.1 스키마(SqliteStore 생성자에서 `CREATE TABLE IF NOT EXISTS`로 보장)
+6테이블: `capture_run`, `observation`, `detection`, `aggregated_slot`, `checkpoint`, `artifact_snapshot` — 컬럼은 설계서 §5 그대로.
+인덱스: `CREATE INDEX IF NOT EXISTS idx_det_obs ON detection(observation_id)`, `idx_obs_run_preset ON observation(run_id, preset_idx)`.
+
+### 2.2 DAO 시그니처(`src/capture/SqliteStore.ts`)
 ```ts
-export interface Ptz { pan: number; tilt: number; zoom: number; }
+export class SqliteStore {
+  constructor(dbPath: string);                 // ':memory:' | 파일경로. 생성 시 스키마/인덱스 보장.
+  close(): void;
 
-/** /viewer/api/cameras 응답(A타입 그대로). presetProvider.ts 의 UnityCamerasResponse 와 동일 형태. */
-export interface CameraList {
-  cameras: Array<{
-    camIdx: number;
-    name: string;
-    enabled: boolean;
-    presets: Array<{ presetIdx: number; label: string; pan?: number; tilt?: number; zoom?: number }>;
-  }>;
-}
+  // 런
+  createRun(p: { plannedCount: number; intervalMs: number; startedAt: string }): number; // → run_id
+  updateRunProgress(runId: number, doneCount: number): void;
+  endRun(runId: number, p: { status: 'done'|'stopped'|'error'; stopReason: 'count'|'manual'|'error'; endedAt: string }): void;
+  getRun(runId: number): CaptureRunRow | undefined;
+  listRuns(limit?: number): CaptureRunRow[];
 
-export interface SnapshotResult { jpeg: Buffer; ptz: Ptz; }
+  // 관측·검출(라운드 단위)
+  insertObservation(o: { runId: number; roundIdx: number; camIdx: number; presetIdx: number; capturedAt: string; pan: number; tilt: number; zoom: number; imgName: string }): number; // → observation_id
+  insertDetections(observationId: number, camIdx: number, presetIdx: number, dets: Array<{ kind:'vehicle'|'plate'; x:number; y:number; w:number; h:number; conf:number }>): void; // 트랜잭션 일괄
 
-export interface SnapshotOpts {
-  presetIdx?: number;
-  ptz?: Ptz;
-  mode: 'preset' | 'manual';
-}
+  // 집계 입력·출력
+  getDetectionsForRun(runId: number): DetectionRow[];   // Aggregator 입력(평면 배열)
+  replaceAggregatedSlots(runId: number, slots: AggregatedSlot[]): void; // run 기준 delete+insert(멱등)
+  getAggregatedSlots(runId: number): AggregatedSlot[];
 
-export interface CameraSource {
-  readonly kind: 'sim' | 'hucoms';            // (onvif 는 후속, 이번 범위 제외)
-  listCameras(): Promise<CameraList>;
-  snapshot(cam: number, opt: SnapshotOpts): Promise<SnapshotResult>;
-  move(cam: number, ptz: Ptz): Promise<boolean>;
-  streamUrl?(cam: number): string | null;     // 이번 라운드 미사용(11단계용 선택 시그니처만)
-  toNativePtz(viewerPtz: Ptz): unknown;        // 뷰어 단위 → 소스 원시 단위
-  fromNativePtz(native: unknown): Ptz;         // 소스 원시 단위 → 뷰어 단위
+  // 체크포인트·스냅샷
+  insertCheckpoint(runId: number, atRound: number, createdAt: string, summaryJson: string): void;
+  getLatestCheckpoint(runId: number): CheckpointRow | undefined;
+  insertArtifactSnapshot(runId: number, createdAt: string, artifactJson: string): void;
 }
 ```
-
-### 책임 분해
-- **`SimulatorSource`** (`kind='sim'`)
-  - 생성자: `constructor(private camera: CameraClient)` — 기존 CameraClient 재사용.
-  - `listCameras()` → `camera.listCameras()`.
-  - `snapshot(cam, opt)`:
-    - `mode==='preset'` → `camera.requestImage(cam, opt.presetIdx!)` (PTZ 미동봉).
-    - `mode==='manual'` → `camera.requestImage(cam, opt.presetIdx!, opt.ptz)` (PTZ override 동봉).
-    - 반환: `{ jpeg: captured.jpg, ptz: {pan,tilt,zoom} }`.
-  - `move(cam, ptz)` → `camera.move(cam, ptz.pan, ptz.tilt, ptz.zoom)`.
-  - `toNativePtz`/`fromNativePtz` = **항등**(`(p)=>p`).
-- **`RealPtzSource`** (`kind='hucoms'`)
-  - 생성자: `constructor(private cfg: CameraSourceConfig)` (host/port/loginPath/snapshotUrl/ptz 범위).
-  - 내부 세션 상태: `private session: string | null`(쿠키/토큰). `login(user, pass)` 메서드로 갱신, 만료 시 재로그인.
-  - `snapshot(cam, opt)` → 인증 세션으로 `snapshotUrl` GET → JPEG Buffer + 현재 PTZ(가능 시 CGI 조회, 없으면 마지막 명령 PTZ 반환).
-  - `move(cam, ptz)` → `toNativePtz(ptz)`로 원시 단위 변환 → PTZ CGI 호출.
-  - `toNativePtz`/`fromNativePtz`: `panRange/tiltRange/zoomRange`로 뷰어 단위↔원시 정수 선형 매핑. **왕복 일치**(테스트 §13.6).
-  - **상수 분리(파일 상단)**: `const HUCOMS_LOGIN_PATH`, `HUCOMS_SNAPSHOT_PATH`, `HUCOMS_PTZ_PATH`, 기본 원시 범위 등 → 실기기 확인 후 보정 용이. CGI 정확 경로/파라미터 **미상은 상수로 흡수**(리스크 §8).
-  - `listCameras()` → 설정 1소스를 단일 카메라/프리셋 없는 `CameraList`로 매핑(라이브 뷰).
-
-> 명명 규약(설계서 §6.2): 프런트 URL `cam`/`preset` → 서버 핸들러 `camIdx`/`presetIdx` → CameraClient 호출 시 Unity `cam_idx`/`preset_idx` 변환(이미 CameraClient 내부 처리). `CameraSource.snapshot/move`의 인자명은 `cam`(number)으로 통일.
+- 모든 좌표 정규화 0~1. 1-based cam/preset.
+- `replaceAggregatedSlots`는 트랜잭션(`db.transaction`)으로 원자적.
 
 ---
 
-## 3. 프록시 라우트 명세 (`src/viewer/routes.ts`)
+## 3. Aggregator 결정형 알고리즘 (설계서 §4.2, §8)
 
-`registerViewerRoutes(app, { sources, viewer })` — `sources: Map<string, CameraSource>`, `viewer: ToolsConfig['viewer']`.
-
-### 라우트 등록 순서 (설계서 §6.2 — 필수)
-1. `/viewer/api/cameras`, `/snapshot`, `/move`, `/camera/login`, `/health` (정확 경로) **먼저** 등록.
-2. `@fastify/static` (root=`web/`, prefix=`/viewer/`, 와일드카드) **나중**에 등록.
-3. `GET /viewer` → `/viewer/` redirect(@fastify/static `redirect:true` 옵션).
-
-### 라우트별 명세
-| 메서드/경로 | 입력(zod) | 처리 | 응답 |
-|-------------|-----------|------|------|
-| `GET /viewer/api/cameras` | query `{ source?: string }`(기본 첫 소스) | `source.listCameras()` | `CameraList` JSON |
-| `GET /viewer/api/snapshot` | query `{ source?, cam: int>0, preset: int>0, mode: 'preset'\|'manual', pan?, tilt?, zoom?, t? }` | mode 분기: preset→`snapshot(cam,{presetIdx,mode:'preset'})`; manual→`snapshot(cam,{presetIdx,ptz:{pan,tilt,zoom},mode:'manual'})` | `Content-Type: image/jpeg` 바이너리 + 헤더 `X-PTZ-Pan/Tilt/Zoom`, `Cache-Control: no-store` |
-| `POST /viewer/api/move` | body `{ source?, cam: int>0, pan: number, tilt: number, zoom: number }` | `viewer.allowMove===false` → **403**; `controlToken` 설정 시 `X-Viewer-Token` 불일치 → **403**; 통과 시 `source.move(cam, {pan,tilt,zoom})` | `{ ok: boolean }` |
-| `POST /viewer/api/camera/login` | body `{ source: string(필수), user: string, pass: string }` | hucoms 소스의 `login(user,pass)` 호출. **자격증명 미저장·응답/로그 미노출** | `{ ok: boolean }` (성공/실패만) |
-| `GET /viewer/api/health` | — | 기존 `/health` 와 동일 정보 alias(또는 단순 `{status:'ok'}` 배지) | JSON |
-
-- zod 스키마 명: `CamerasQuery`, `SnapshotQuery`, `MoveBody`, `LoginBody`. `coerce`로 query 문자열→number 변환.
-- zoom 클램프: snapshot/move 진입 시 `CameraClient.clampZoom`(또는 소스 범위) 재사용. manual snapshot의 ptz.zoom도 클램프.
-- **명명 변환은 핸들러 1곳에서만**: query `cam`/`preset` → `camIdx`/`presetIdx`(지역 변수) → `source.snapshot(cam, ...)`. Unity의 `cam_idx`/`preset_idx`는 CameraClient 내부에서만 처리.
-- 에러: zod 실패 → 400 `{error,detail}`. 소스 호출 실패(CameraApiError 등) → 502 `{error}`. (기존 server.ts 패턴 준수.)
-- login 라우트는 **hucoms 소스가 하나도 없으면** 등록은 하되 해당 source가 sim이면 400 `{error:'login unsupported'}`.
-
----
-
-## 4. 설정 스키마 (`src/config/toolsConfig.ts`)
-
-### `viewer` 섹션 (신규, 옵셔널+기본값 → 기존 config 호환)
+`src/capture/Aggregator.ts` — **순수함수**(DB 비의존):
 ```ts
-const ViewerSchema = z.object({
-  enabled: z.boolean(),
-  allowMove: z.boolean(),
-  defaultFps: z.number().int().positive(),
-  staticDir: z.string().min(1),
-  controlToken: z.string(),      // 빈 문자열 = 미사용
+export interface AggregateOptions { clusterDist: number; clusterMinSupport: number; minConfidence: number; }
+export function aggregate(dets: DetectionRow[], opts: AggregateOptions): AggregatedSlot[];
+```
+알고리즘(설계서 + 기존 `RoiAccumulator.buildSlotsAccumulated` 패턴 차용·확장):
+1. `kind==='vehicle'` 검출만 클러스터 대상. `conf < minConfidence` 제외.
+2. **프리셋별로** 분리(`presetKey = camIdx:presetIdx`). 같은 프리셋 내에서만 클러스터링(다른 프리셋 좌표계 혼합 금지).
+3. 그리디 클러스터링: 중심 거리 `clusterDist` 이내면 같은 클러스터(기존 `dist`/`center` 재사용). 
+4. `support`(관측 수) `< clusterMinSupport` 클러스터는 `status:'rejected'`(노이즈), 이상은 `status:'candidate'`.
+5. 대표 bbox = 멤버 **중앙값**(median x/y/w/h — 지터에 평균보다 강건. 설계서 §4.2 "중앙값/대표 bbox" 명시). 별도 `median()` 헬퍼.
+6. `occupancyRate` = (해당 클러스터에 차량 검출이 있었던 관측 라운드 수) / (해당 프리셋 총 관측 라운드 수). 관측 라운드 수는 별도 인자 또는 dets 의 distinct observation_id 로 산출 → **`aggregate`에 프리셋별 총 라운드 맵을 함께 전달**(`presetRounds: Map<string, number>`).
+7. `plateRoi`: `kind==='plate'` 검출을 같은 방식으로 클러스터링 후 각 vehicle 클러스터에 귀속(기존 `matchPlatesToSlots` 규칙 — 번호판 중심이 vehicle 대표 ROI 내부 + 겹침 최대). 매칭된 클러스터의 `plate_x/y/w/h` 채움.
+8. 출력: `AggregatedSlot[]`(preset_key·cluster_id·좌표·support·occupancy_rate·plate_*·status). 좌표는 정규화, positionIdx는 Finalizer에서 `orderByPosition`으로 부여(집계는 좌표·통계만).
+
+> 재사용: `domain/geometry`(center/dist/median 없으면 추가), `setup/ordering.orderByPosition`(Finalizer에서), `setup/plateMatch` 규칙. **새 클러스터 로직은 RoiAccumulator와 중복되나 입력 형태(평면 DetectionRow vs frames)·median·occupancy가 달라 별도 함수가 단순**(과한 추상화로 통합하지 않음).
+
+---
+
+## 4. CaptureJob 상태머신 (설계서 §4.1)
+
+`src/capture/CaptureJob.ts`:
+```ts
+export type CaptureState = 'idle'|'running'|'stopping'|'finalizing'|'done'|'stopped'|'error';
+export interface CaptureJobDeps {
+  camera: CameraClient; vpd: VpdClient; lpd?: LpdClient;
+  store: SqliteStore; aggregator: typeof aggregate; reviewer?: CheckpointReviewer;
+  cfg: ToolsConfig['capture']; lpdEnabled: boolean;
+  setTimer?: (fn:()=>void, ms:number)=>NodeJS.Timeout; clearTimer?: (h:NodeJS.Timeout)=>void; // 주입(fake timers)
+  sleep?: (ms:number)=>Promise<void>; now?: ()=>string;
+}
+export class CaptureJob {
+  start(p: { count:number; intervalMs:number; checkpointEvery:number; targets: SetupTarget[] }): { runId:number };
+  stop(): void;            // running→stopping(현재 라운드까지만 마치고 stopped)
+  getStatus(): CaptureStatus; // {state, runId?, round, done, planned, latestAdvisory?}
+  getRunId(): number | undefined;
+}
+```
+상태전이:
+- `idle --start--> running`. **중복 시작 거부**(running/stopping/finalizing 중 start → 에러 `{error:'capture already running'}`).
+- 매 라운드: 프리셋 순회 캡처·검출·DB 적재 → `done++` → `updateRunProgress`. `done % checkpointEvery === 0` 이고 reviewer 있으면 집계 후 체크포인트.
+- `running --stop--> stopping`: 진행 중 라운드 마치면 `stopped`(stop_reason='manual'). 타이머 다음 발화 취소.
+- `done === planned` 도달 시 자동 종료(stop_reason='count') → `done` 상태(여기서는 finalize는 별도 호출 — 설계서 §6.1 "정지/완료 후 호출").
+- 라운드 중 예외 → `error`(런 status='error', stop_reason='error'). 개별 프리셋 캡처 실패는 경고로 흡수(잡 중단 아님 — 기존 detectPlates 패턴).
+- 주기 러너는 `setTimer` 주입으로 fake timers 테스트. 단일 잡(인메모리 1개 인스턴스).
+
+---
+
+## 5. 체크포인트 / 최종화 + AgentRuntime 가산 (설계서 §4.3·4.4·8)
+
+### 5.1 SetupBrain 인터페이스 가산(옵셔널 — 기존 구현 무영향)
+```ts
+export interface CheckpointInput {
+  atRound: number; plannedCount: number;
+  presets: Array<{ key:string; slotCount:number; expected?:number; avgOccupancy:number }>;
+  newFacesRecentK: number; // 최근 K회 신규 면 수(수렴 신호 입력)
+}
+export const CheckpointResultSchema = z.object({
+  merges: z.array(z.array(z.string())).default([]),     // 같은 면으로 볼 cluster_id 그룹
+  labels: z.record(z.string(), z.string()).default({}), // preset_key/cluster_id → zone 라벨
+  rejects: z.array(z.string()).default([]),             // 노이즈 cluster_id
+  coverage: z.array(z.object({ preset:z.string(), expected:z.number(), got:z.number(), short:z.boolean() })).default([]),
+  convergence: z.object({ converged:z.boolean(), advice:z.string() }).default({ converged:false, advice:'' }),
 });
-```
-기본값:
-```ts
-viewer: { enabled: true, allowMove: true, defaultFps: 3, staticDir: 'web', controlToken: '' }
-```
-
-### `cameraSources` (신규, **옵셔널**, 하위호환 핵심)
-```ts
-const CameraSourceConfigSchema = z.object({
-  id: z.string().min(1),
-  kind: z.enum(['sim', 'hucoms']),
-  baseUrl: z.string().url().optional(),          // sim
-  host: z.string().optional(),                   // hucoms
-  port: z.number().int().positive().optional(),
-  loginPath: z.string().optional(),
-  snapshotUrl: z.string().optional(),
-  ptz: z.object({
-    panRange: z.tuple([z.number(), z.number()]),
-    tiltRange: z.tuple([z.number(), z.number()]),
-    zoomRange: z.tuple([z.number(), z.number()]),
-  }).optional(),
+export const FinalizeCaptureResultSchema = z.object({
+  duplicates: z.array(z.array(z.string())).default([]), // 프리셋 간 중복 cluster_id 그룹
+  zoneLabels: z.record(z.string(), z.string()).default({}),
+  rejects: z.array(z.string()).default([]),
+  report_ko: z.string().default(''),
 });
-// ToolsConfigSchema 에 추가:
-viewer: ViewerSchema,
-cameraSources: z.array(CameraSourceConfigSchema).optional(),
+// SetupBrain 에 옵셔널 추가:
+//   reviewCheckpoint?(input: CheckpointInput): Promise<CheckpointResult | null>;
+//   finalizeCapture?(input: FinalizeCaptureInput): Promise<FinalizeCaptureResult | null>;
 ```
 
-### 로더 하위호환 처리 (`loadToolsConfig`)
-- 현재 로더는 `DEFAULT_TOOLS_CONFIG` 키를 순회하며 섹션 병합한다. `viewer`는 default에 포함 → 기존과 동일하게 병합.
-- `cameraSources`는 **옵셔널 배열**이라 default 키에 넣지 않는다(배열은 섹션병합 부적합). 로더에서 `raw.cameraSources`가 있으면 그대로 통과, 없으면 `undefined`.
-  - 구현 주의: 현재 병합 루프는 `DEFAULT_TOOLS_CONFIG`의 키만 순회 → `cameraSources`를 별도로 `merged.cameraSources = raw.cameraSources`로 명시 대입한 뒤 `ToolsConfigSchema.parse`. (외과적: 루프 뒤 한 줄 추가.)
-- **소스 빌드(`buildSourceRegistry`)**:
-  - `cameraSources`가 있으면 각 항목을 kind별로 인스턴스화(`sim`→`new SimulatorSource(new CameraClient({...baseUrl}))`, `hucoms`→`new RealPtzSource(cfg)`).
-  - **미설정 시**: `camera` 단일 설정으로 `SimulatorSource(new CameraClient(tools.camera))` 1개를 `id='sim'`로 등록(하위호환).
+### 5.2 AgentRuntime 메서드(텍스트 요약 입력, 기존 `chatJson` 재사용, 비활성 시 null)
+- `reviewCheckpoint(input)`: 집계 텍스트 요약을 user 프롬프트로 → CheckpointResultSchema 파싱. 프롬프트는 llm.config의 신규 `capturePrompts.checkpoint.{system,user}`(없으면 인라인 기본 프롬프트로 폴백 — 단순함 위해 1차는 **인라인 한글 프롬프트** 사용, 프롬프트 파일화는 후속).
+- `finalizeCapture(input)`: 전체 집계 + 체크포인트 누적 요약 → FinalizeCaptureResultSchema.
+- **이미지 미전달**(§11-4 텍스트만). `chatJson(system, user, parse)` 그대로.
 
-### `config/tools.config.json` 추가
-```jsonc
-"viewer": { "enabled": true, "allowMove": true, "defaultFps": 3, "staticDir": "web", "controlToken": "" }
+### 5.3 CheckpointReviewer 적용 범위(좌표 불변)
+- `merges`/`rejects` → `aggregated_slot.status`를 `merged`/`rejected`로 갱신(좌표 불변). `labels` → 후속 Finalizer에서 zone 부여.
+- `coverage`/`convergence` → `checkpoint.summary_json` 저장 + `getStatus().latestAdvisory`로 노출(자동 정지 아님 — 표시만).
+
+### 5.4 Finalizer 결정형 강등 경로
+- LLM 활성: `finalizeCapture` 결과로 프리셋 간 중복 제거·zone 라벨·노이즈 제외 반영 → ParkingSlot/Preset 조립.
+- LLM 비활성/실패: 결정형만 — `status!=='rejected'` 클러스터만 채택, zone=`cam{N}` 기본, 중복 제거 생략. `report` 생략.
+- **공통(좌표 불변식)**: ParkingSlot.roi = AggregatedSlot 대표 bbox 그대로. positionIdx = `orderByPosition`. slotId = `c{cam}p{preset}s{pos}`(기존 `slotIdOf` 규칙 동일). `buildGlobalIndex`/`validateCoverage` 재사용. `SetupArtifact` shape 기존과 동일.
+
+---
+
+## 6. `/capture/*` REST 명세 + zod (설계서 §6.1)
+
+`src/api/captureRoutes.ts` — 기존 `/setup/*` 불변, 가산:
+
+| 메서드 | 경로 | body/zod | 응답 |
+|--------|------|----------|------|
+| POST | `/capture/start` | `{count:int>0, intervalMs?:int>0, checkpointEvery?:int>0, targets?:Target[]}` | `{ok, runId}` / 409 `{error:'capture already running'}` |
+| GET | `/capture/status` | — | `{state, runId?, round, done, planned, latestAdvisory?}` |
+| POST | `/capture/stop` | — | `{ok, state}` (running 아니면 400) |
+| POST | `/capture/finalize` | `{runId?}` (미지정 시 최근 종료 런) | `{ok, slots, globalCount}` / 409 if running |
+| GET | `/capture/runs` | — | `CaptureRunRow[]`(메타) |
+| GET | `/capture/runs/:id/aggregate` | params id:int | `AggregatedSlot[]` / 404 |
+
+- `targets` 미지정 시 기존 `loadSetupTargets(mapFiles)`/discovery 재사용(server.ts의 run-from-map 로직 차용).
+- zod 스키마는 `TargetSchema`(server.ts 기존) 재export/재사용.
+- `intervalMs`/`checkpointEvery` 미지정 시 `cfg.capture` 기본값.
+
+---
+
+## 7. SettingViewer 프록시 + UI (설계서 §6.2)
+
+### 7.1 프록시(`src/server.ts`, 기존 `/viewer/api/mapping` 패턴 복제)
+- `GET /viewer/api/capture/status`, `GET /viewer/api/capture/runs`, `POST /viewer/api/capture/start`, `POST /viewer/api/capture/stop`, `POST /viewer/api/capture/finalize` → `${settingAgentUrl}/capture/*` 중계.
+- 동일 에러 처리: 404 패스스루, 5xx→502, 미가동→502 `unreachable`. body 패스스루(POST는 `req.body` JSON 전달).
+- **단순화**: 개별 라우트 5개 대신 prefix 기반 1개 핸들러(`/viewer/api/capture/*`)로 메서드·경로 패스스루 가능하나, 기존 코드가 명시 라우트 스타일 → **명시 라우트로 일관**(외과적).
+
+### 7.2 UI(`web/index.html` 탭 + `web/app.js` + `web/core.js`)
+- 탭: 기존 `control`/`inspect`에 `precise`("정밀 수집") 추가(기존 `data-tab` 패턴).
+- 입력: 반복 횟수(기본 정지조건), 주기(초), 체크포인트 간격. 버튼: 시작/정지/최종화. 진행: 진행바(done/planned)·라운드·검출 수·체크포인트 자문(수렴됨/부족 프리셋)·경고. 완료 후 검수 탭이 `/viewer/api/mapping` 표시(정밀 결과).
+- **순수 로직(`core.js`, 테스트 분리)**:
+  - `captureProgress(status)` → `{percent, label}`(done/planned, 0 division 방어).
+  - `mapAdvisory(checkpoint)` → 표시 문자열 배열(coverage short/convergence).
+  - `pollPlan(state)` → 폴링 계속 여부·간격(running 중만 폴링).
+- `app.js`는 fetch/DOM을 core 순수함수에 주입(기존 `createStreamLoop` 주입 패턴 동일).
+
+---
+
+## 8. 설정 스키마(capture 섹션) · 기본값 · 하위호환 (설계서 §7)
+
+`toolsConfig.ts`에 추가:
+```ts
+const CaptureSchema = z.object({
+  defaultCount: z.number().int().positive(),
+  intervalMs: z.number().int().positive(),
+  checkpointEvery: z.number().int().positive(),
+  dbFile: z.string().min(1),
+  clusterDist: z.number().min(0).max(1),
+  clusterMinSupport: z.number().int().positive(),
+  minConfidence: z.number().min(0).max(1),  // 집계용(setup 과 독립값 허용)
+});
+// DEFAULT_TOOLS_CONFIG.capture:
+{ defaultCount: 50, intervalMs: 30000, checkpointEvery: 10, dbFile: 'data/observations.sqlite',
+  clusterDist: 0.06, clusterMinSupport: 3, minConfidence: 0.5 }
 ```
-`cameraSources`는 **미기재**(sim 단일 폴백으로 기존 동작 보존). 실 PTZ 테스트는 설정 주입으로만 검증(자격증명은 config에 두지 않음 — §13.5).
+- **하위호환**: `loadToolsConfig`는 `DEFAULT_TOOLS_CONFIG`의 키를 루프 병합 → `capture` 키 자동 포함. 기존 `tools.config.json`(capture 없음)도 기본값으로 채워져 파싱 성공(기존 config.test.ts 회귀 없음 — DEFAULT에 capture 추가되므로 `toEqual(DEFAULT)` 테스트는 자동 정합).
+- `config/tools.config.json`에 `capture` 섹션 추가(명시값).
 
 ---
 
-## 5. 프런트 구조 (`SettingAgent/web/`, 바닐라 ESM)
-
-### 모듈 분리 (테스트 용이성)
-- **`core.js` (순수, vitest 직접 import)**:
-  - `toPixel(rect, imgW, imgH)` → `{px,py,pw,ph}` (설계서 §5.2). `imgW/imgH = img.clientWidth/clientHeight` 전제.
-  - `presetKey(camIdx, presetIdx)` → `` `${camIdx}:${presetIdx}` ``.
-  - `slotLabel(slotId, globalIndex)` → globalIndex에서 slotId 매칭 시 `globalIdx`, 없으면 `slotId` 폴백(G3 라벨 매핑).
-  - `fpsToInterval(fps)` → `Math.round(1000/fps)`.
-  - `clampZoom(z, min=1, max=36)`, `stepPtz(cur, dir, step)` → 절대 PTZ 환산.
-  - `createStreamLoop(deps)` → `{start(fps), stop()}`. deps 주입: `{fetchFn, makeUrl(seq), createObjectURL, revokeObjectURL, setImage(url), decode(), onPtz(headers), onFrame()}`. 내부에 `inflight` 백프레셔 가드, `lastUrl` revoke, `AbortController` 정지. **DOM/브라우저 전역 미참조** → 테스트에서 mock 주입.
-- **`app.js` (환경 의존, 결선)**:
-  - `/mapping`·`/viewer/api/cameras` fetch → 카메라/프리셋 트리 렌더(G1).
-  - 탭 전환, cam/preset 선택, 모드(preset/manual) 토글.
-  - ROI canvas 렌더: `core.toPixel` + `ResizeObserver`로 리사이즈 시 재draw. 차량=시안/번호판=노랑, `slotLabel` 텍스트. `plateRoiByPreset` 없으면 차량 ROI만(테스트 §10.2-5).
-  - 스트림: `core.createStreamLoop` 실제 의존성 주입(`fetch`, `URL.createObjectURL/revokeObjectURL`, `img.decode()`). manual 모드에서 현재 PTZ 상태 보존→URL 동봉(프리셋 복귀 방지).
-  - PTZ 버튼/절대이동 → `POST /viewer/api/move` 후 `tick()` 1회 갱신. zoom in/out=±1 클램프, step 기본=`viewer.defaultFps`와 무관(기본 500).
-  - login UI: hucoms 소스 선택 시 user/pass 입력 → `POST /viewer/api/camera/login`. **자격증명 미저장·URL 미노출**(POST body로만).
-
-### ROI 정렬 (letterbox 방지 — 설계서 §5.2 필수)
-- `<img>` 자체 크기에 canvas 일치(`.viewport` inline-block). `object-fit` 미사용. `toPixel`은 `img.clientWidth/clientHeight` 사용.
-
----
-
-## 6. 의존성
-
-- **추가**: `@fastify/static` (`package.json` dependencies). 버전은 fastify 5.x 호환(`^7` 또는 설치 시점 최신 메이저 — developer가 `npm i` 후 lockfile 확인).
-- **그 외 신규 의존성 없음**: Node 내장 `fetch`/`Buffer`/`AbortController` 활용. 프런트는 번들러 없음(브라우저 네이티브 ESM).
-
----
-
-## 7. 단계별 작업 순서 + 검증 기준 (설계서 §10.1 1~10 매핑)
+## 9. 단계별 작업 순서 + vitest 검증 기준 (설계서 §10 / G1~G5 매핑)
 
 ```
-1. CameraSource 인터페이스 + SimulatorSource(CameraClient 래핑)
-   → 검증: simulatorSource.test.ts — snapshot(preset/manual 인자 위임)·move·list 위임, 항등 변환
-
-2. CameraClient.listCameras() 추가 (GET /cameras, A타입 파싱)
-   → 검증: cameraClientList.test.ts — fetch mock 응답 → CameraList 파싱(enabled=false 포함 여부·presets 매핑)
-
-3. /viewer/api/* 프록시 라우트(cameras/snapshot/move/health/login)+zod
-   → 검증: viewerRoutes.test.ts — fastify.inject 라우트별 mock 소스, zod 400, allowMove=false→403, controlToken 불일치→403
-
-4. snapshot 프록시: base64→image/jpeg + X-PTZ-* 헤더, mode 분기
-   → 검증: viewerRoutes.test.ts — content-type=image/jpeg, X-PTZ-Pan/Tilt/Zoom 값, preset/manual 시 소스 인자 차이
-
-5. /viewer 정적 서빙(@fastify/static, web/) + SPA(index/app.js/css/core.js)
-   → 검증: viewerRoutes.test.ts — GET /viewer/index.html 200·content-type text/html, /viewer/api/* 우선순위(정적보다 먼저 매칭)
-
-6. ROI 좌표 변환·오버레이(toPixel, slotLabel)
-   → 검증: viewerCore.test.ts — toPixel(0~1×크기) 환산(G2), slotLabel globalIdx 매칭+폴백
-
-7. 스트림 폴링·백프레셔·정지·Blob revoke (createStreamLoop)
-   → 검증: viewerCore.test.ts — inflight 가드(겹침 스킵), 새 프레임 시 이전 URL revoke(G3-4), stop() 시 timer 해제+abort(G3-1)
-
-8. PTZ 제어(절대/스텝/zoom 클램프)+수동모드 PTZ 동봉 폴링
-   → 검증: viewerCore.test.ts(stepPtz·clampZoom) + viewerRoutes.test.ts(move 인자·클램프); manual URL에 pan/tilt/zoom 동봉 확인(G3-2·G4)
-
-9. [실 PTZ] RealPtzSource(Hucoms CGI): login.cgi 세션·snapshot·move·단위매핑
-   → 검증: realPtzSource.test.ts — CGI 모킹: login→세션, snapshot image/jpeg, move 원시단위, toNative/fromNative 왕복일치, 자격증명 미노출(§13.6)
-
-10. [실 PTZ] cameraSources 설정 로딩(하위호환) + POST /viewer/api/camera/login
-   → 검증: sourceRegistry.test.ts(미설정→sim 1개, 다중소스 선택) + viewerRoutes.test.ts(login 라우트 자격증명 미반환)
-── 이번 라운드 종료 ──
+1. SqliteStore (better-sqlite3 + 6테이블·DAO)
+   → 검증(G2): :memory: store 에 run/observation/detection 적재 후 getDetectionsForRun/listRuns 조회 일치.
+     replaceAggregatedSlots 멱등(2회 호출 → 중복 없음). 스키마 IF NOT EXISTS 재생성 무해.
+2. Aggregator (순수함수: 클러스터·지지·점유·plateRoi)
+   → 검증(G3): 합성 DetectionRow 배열 입력 →
+     - 같은 위치 반복 검출 → 1 클러스터·support=N·중앙값 bbox.
+     - support<minSupport → status:'rejected'.
+     - 점유/미점유 라운드 혼합 → occupancyRate 정확.
+     - plate 검출이 vehicle ROI 내부 → 해당 클러스터 plate_* 채움.
+     - 프리셋 분리: 다른 preset_key 검출은 별도 클러스터.
+3. CaptureJob (상태머신·count·수동정지·주기 — fake timers)
+   → 검증(G1): fake setTimer 주입.
+     - start→running, 중복 start 거부(에러).
+     - count 라운드 도달 → done 상태(stop_reason='count'), DB done_count 일치.
+     - 수동 stop → 현재 라운드 마치고 stopped(stop_reason='manual').
+     - 캡처 1프레임 실패 → 잡 미중단(경고 흡수). 라운드 예외 → error.
+     - fake camera/vpd 주입(기존 setupOrchestratorBrain.test 패턴).
+4. /capture/* REST + zod (fastify.inject)
+   → 검증: app.inject 로 start(200,runId)/status/stop/finalize/runs/runs/:id/aggregate.
+     잘못된 body → 400. running 중 finalize → 409. 기존 /setup/* 라우트 200 회귀 확인.
+5. CheckpointReviewer + Finalizer (브레인 모킹)
+   → 검증(G4): fake brain(reviewCheckpoint/finalizeCapture) 주입.
+     - merges/labels/rejects 반영(status 갱신, zone 라벨). 좌표 불변(대표 bbox 그대로) 검증.
+     - finalize → SetupArtifact shape(presets/slots/globalIndex/createdAt) + repo.saveArtifact 호출 + artifact_snapshot 행.
+     - LLM off 강등: brain 미주입 → 결정형 산출(rejected 제외, zone=cam{N}, report 없음).
+     - globalIndex validateCoverage ok.
+6. SettingViewer /viewer/api/capture/* 프록시 + core 순수로직
+   → 검증(G5): mappingProxy.test 패턴(stub upstream) — status/start/stop/finalize 패스스루·404·502·unreachable.
+     core.js: captureProgress/mapAdvisory/pollPlan 단위테스트(viewerCore.test 패턴).
+7. 설정(capture) · 문서 · 영향도
+   → 검증: config.test — loadToolsConfig 에 capture 기본값 존재, 기존 tools.config.json 파싱 성공.
+     문서화 에이전트가 한글 .md(yyyyMMdd_hhmmss) 작성.
+8. 동작확인(QA): 시뮬레이터(:13100) N=소수·짧은 주기 → 수집→집계→(LLM)→/mapping 정밀 결과 확인.
 ```
-
-각 단계 완료 시 `npm run typecheck` + 해당 test 통과. 전 단계 후 `npm test` 전체 그린.
-
----
-
-## 8. 테스트 계획 개요 (vitest, 외부 서버 모킹)
-
-### 서버 (`fastify.inject` + fetch/소스 mock)
-- `viewerRoutes.test.ts`:
-  - mock `CameraSource`(인메모리) 주입 → 라우트 동작만 격리 검증.
-  - allowMove=false → POST move 403 / controlToken 설정+헤더 누락·불일치 → 403.
-  - snapshot: `Content-Type: image/jpeg`, `X-PTZ-Pan/Tilt/Zoom` 헤더 존재·값, `Cache-Control: no-store`.
-  - login: 응답 body에 user/pass **미포함**(자격증명 미노출 검증).
-  - 라우트 우선순위: `/viewer/api/cameras`가 정적보다 먼저 매칭.
-- `cameraClientList.test.ts`: 전역 `fetch`를 vi.fn으로 stub(기존 테스트 패턴 — 없으면 `globalThis.fetch` mock), A타입 응답 파싱.
-
-### 프런트 순수 로직 (`viewerCore.test.ts`)
-- `toPixel`/`presetKey`/`slotLabel`/`fpsToInterval`/`clampZoom`/`stepPtz` 단위.
-- `createStreamLoop`: 주입 mock(fetchFn 지연 Promise)로 백프레셔(겹침 스킵)·revoke 호출 횟수·stop abort 검증. fake timers(`vi.useFakeTimers`).
-
-### 실 PTZ (`realPtzSource.test.ts`, Hucoms CGI 모킹)
-- `globalThis.fetch` mock으로 login.cgi/snapshot/PTZ CGI 응답 시뮬레이션.
-- 세션 만료→재로그인, 단위 왕복 일치, 클램프, 자격증명 미노출(mock 호출 인자 검사 — URL에 평문 없음).
-
-> 모든 외부 REST(`Unity :13100`, Hucoms `:80`)는 모킹. 실서버 통합 동작확인은 12단계(문서화/동작확인 라운드)·실기기는 §13.6 보류.
+- 테스트: vitest, 외부 서버·LLM 모킹. SQLite는 `:memory:`/임시파일.
+- 각 단계는 독립 통과 가능(앞 단계 산출물에만 의존).
 
 ---
 
-## 9. 영향도 사전분석
+## 10. 영향도 사전분석 (설계서 §9)
 
-| 대상 | 변경 | 영향/리스크 | 완화 |
-|------|------|-------------|------|
-| `CameraClient.requestImage/move/health/clampZoom` | **불변**(listCameras만 가산) | 기존 호출부(SetupOrchestrator/presetProvider/discover) 무영향 | 시그니처 동결, 회귀 테스트 |
-| `presetProvider.ts UnityPresetProvider` | 불변 | `/cameras` 파싱 중복? — listCameras는 **전체 A타입 구조**(presets 중첩) 반환, presetProvider는 **flatten된 CameraView**. 용도 다름 → 중복 아님 | 두 파서 공존(외과적). 필요 시 후속 통합(이번 범위 밖) |
-| `toolsConfig.ts` | viewer/cameraSources 가산 | 기존 config 파일 호환(옵셔널+기본값) | 누락 시 기본값/sim 폴백. config.test.ts 회귀 |
-| `server.ts`/`index.ts` | 라우트·소스 주입 가산 | 기존 라우트 prefix 충돌 없음(`/viewer` 격리) | `viewer.enabled=false` 시 미등록 |
-| `package.json` | `@fastify/static` | 셋업/MCP 경로 무관, 번들영향 미미 | — |
-| 셋업 파이프라인·`SetupArtifact`·`/mapping` | **불변**(읽기 전용 소비) | 산출물 계약 무영향 | 뷰어는 `/mapping` GET만 |
-| `@parkagent/types` | **불변** | 공유 계약 무영향(Preset/ParkingSlot/GlobalSlotIndex/NormalizedRect 소비만) | — |
-| ActionAgent / DMAgent | **무영향** | 뷰어는 SettingAgent 단독 | — |
-
-> 핵심: 모든 변경은 **가산적·prefix 격리·옵셔널 기본값**. 기존 동작 경로(셋업·MCP·공유 타입)는 한 줄도 의미 변경 없음.
+| 대상 | 영향 | 확인 포인트 |
+|------|------|------------|
+| `@parkagent/types`(SetupArtifact 등) | **변경 없음** | capture/types.ts는 별도 정의. Action/DM 무영향. |
+| `/setup/*`·`/mapping` | **불변** | captureRoutes는 가산. server.ts 기존 라우트 미수정. |
+| 기존 81 테스트 | **회귀 없음** | 단 `config.test`의 `toEqual(DEFAULT_TOOLS_CONFIG)`는 DEFAULT에 capture 추가로 자동 정합(테스트 수정 불필요). 기타 영향 없음. |
+| `better-sqlite3` | 신규 의존성(네이티브) | **Windows 프리빌트 설치 확인**: `npm i better-sqlite3` 후 `node -e "require('better-sqlite3')"` 빌드 없이 로드되는지. 실패 시 `node:sqlite`(Node22+) 대안 검토(설계서 §11-2). 프리빌트 가용 Node 버전 확인. |
+| AgentRuntime/SetupBrain | 가산(옵셔널 메서드) | 기존 judgePreset/dedupeAndLabel/finalReport·reviewSetup 불변. 옵셔널이라 기존 fake brain 테스트 무영향. |
+| SettingViewer | 가산(프록시+탭) | `/viewer/api/mapping`·기존 탭·`createStreamLoop` 불변. |
+| 운영 | 두 서비스(13020/13030) 동시 운영·장시간 잡·DB 증가 | DB 파일 위치(`store.dataDir`/`capture.dbFile`). 보존/정리 정책 후속. |
 
 ---
 
-## 10. 리스크 / 미확정 사항
+## 11. 리스크 / 미확정 (설계서 §11)
 
-1. **Hucoms CGI 실제 경로·파라미터 미상** (login.cgi 외 snapshot/PTZ CGI 경로·인증 방식·원시 PTZ 범위). → `RealPtzSource` 상단 `HUCOMS_*` 상수 + `cameraSources[].ptz` 범위로 흡수. 단위테스트는 모킹, **실기기 통합확인은 장비 연결 후 보류**(§13.6).
-2. **`@fastify/static` 버전**: fastify 5.x 호환 메이저 확인 필요(developer가 설치 후 typecheck로 확정).
-3. **`X-PTZ-*` 헤더의 manual 모드 값**: Unity `/req_img`가 override PTZ를 응답에 반영하는지(설계서 §1.4 해석 A 전제). 시뮬레이터 응답 PTZ를 그대로 헤더에 실음 — 실서버 동작확인(12단계)에서 검증.
-4. **`listCameras` vs `UnityPresetProvider` 파서 중복**: 의도적 공존(반환 형태 상이). 통합은 이번 범위 밖.
-5. **프런트 jsdom 미도입**: `app.js`(DOM 결선)는 단위테스트 제외, 순수 로직(`core.js`)만 테스트. DOM 동작은 12단계 브라우저 수동확인(G1~G4 스크린샷).
-6. **controlToken**: 기본 빈 문자열(미사용). 활성화는 운영 설정 — 이번 구현은 "설정 시 검사" 로직만.
+1. **better-sqlite3 설치(Windows 프리빌트)** — 1순위 리스크. 1단계 시작 시 즉시 설치·로드 실측. 프리빌트 미가용 시 리더에 보고 후 `node:sqlite` 대안 결정.
+2. **집계 임계 튜닝값**(`clusterDist`/`clusterMinSupport`/`intervalMs`/`minConfidence`) — 시뮬 기준 잠정값. 실데이터 튜닝은 후속(설정으로 노출하여 조정 가능).
+3. **장시간 잡 운영·DB 증가** — 1차는 런 단위 보존. 정리 정책 범위 밖.
+4. **재기동 복구**(running 중 프로세스 종료) — **범위 밖**. 상태만 DB 기록(런 status='running'으로 남음). 재기동 시 정리 로직 없음(후속).
+5. **체크포인트/최종 프롬프트 위치** — 1차 인라인 한글 프롬프트(단순함 우선). 프롬프트 파일화(llm.config capturePrompts)는 후속. → 구현자가 인라인으로 시작하되 리더 확인 권장.
+6. **occupancyRate 분모(프리셋 총 라운드 수)** — Aggregator에 `presetRounds` 맵을 함께 전달하는 설계. observation 테이블에서 `COUNT(DISTINCT round_idx) GROUP BY preset` 으로 SqliteStore가 제공.
 
 ---
 
-## 11. 구현자(developer)에게 — 시작점
+## 12. 구현자/문서화 전달 요약
 
-- 1단계부터 순차 진행. 각 단계 후 `npm run typecheck` + 해당 vitest.
-- 1-based 인덱스(cam/preset) 전 구간 준수. 외부 호출은 `fetchWithTimeout` 재사용(타임아웃).
-- 외과적 변경: 기존 파일은 명시된 가산만. 인접 코드 리팩토링 금지.
-- 순수 로직은 `web/core.js`로 분리(테스트 가능). 과설계 금지(설계서 §10.1 1~10 범위 한정).
-- 문서화(documenter)는 구현 완료 후 §9 영향도 표를 기준으로 한글 `.md` 작성.
+- **구현자(developer)**: §1 파일목록 순서대로(§9 단계) 구현. 좌표 불변식(§0-4)·ESM `.js` import·1-based·주입형 의존성(timer/sleep/now/dbPath) 필수. RoiAccumulator/ordering/plateMatch/geometry/GlobalIndexer 재사용. 1단계에서 better-sqlite3 설치 실측 먼저.
+- **문서화(documenter)**: 영향 범위 = SettingAgent capture 모듈 신규 + AgentRuntime/server/index/config 가산, SettingViewer 프록시+탭. @parkagent/types·/setup/*·기존 81테스트 불변. 한글 .md(yyyyMMdd_hhmmss) 작성.
+- **미해결 → 리더 확인 권장**: (a) 체크포인트 프롬프트 인라인 vs 파일화(§11-5), (b) better-sqlite3 프리빌트 가용성(§11-1) — 1단계 실측 결과 보고.

@@ -63,5 +63,12 @@
   "store": {
     "dataDir": "data",
     "captureDir": "data/captures"
+  },
+  "viewer": {
+    "enabled": true,
+    "allowMove": true,
+    "defaultFps": 3,
+    "staticDir": "web",
+    "controlToken": ""
   }
 }

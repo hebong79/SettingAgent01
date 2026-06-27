@@ -1,5 +1,5 @@
 import { CameraClient } from '../clients/CameraClient.js';
-import type { ViewerConfig } from '../config/viewerConfig.js';
+import type { ToolsConfig } from '../config/toolsConfig.js';
 import type { CameraSource } from './CameraSource.js';
 import { SimulatorSource } from './SimulatorSource.js';
 import { RealPtzSource } from './RealPtzSource.js';
@@ -8,7 +8,7 @@ import { RealPtzSource } from './RealPtzSource.js';
  * cameraSources 설정 → Map<sourceId, CameraSource> 빌드(설계서 §13.5).
  * 하위호환: cameraSources 미설정 시 camera(단일 sim) 1개를 id='sim' 으로 등록.
  */
-export function buildSourceRegistry(cfg: ViewerConfig): Map<string, CameraSource> {
+export function buildSourceRegistry(cfg: Pick<ToolsConfig, 'camera' | 'cameraSources'>): Map<string, CameraSource> {
   const sources = new Map<string, CameraSource>();
 
   if (!cfg.cameraSources || cfg.cameraSources.length === 0) {

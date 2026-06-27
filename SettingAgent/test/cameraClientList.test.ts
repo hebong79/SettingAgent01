@@ -2,13 +2,13 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import { AddressInfo } from 'node:net';
 import { CameraClient } from '../src/clients/CameraClient.js';
-import type { ViewerConfig } from '../src/config/viewerConfig.js';
+import type { ToolsConfig } from '../src/config/toolsConfig.js';
 
 let server: Server;
 let baseUrl: string;
 let lastPath: string | undefined;
 
-const camCfg = (): ViewerConfig['camera'] => ({
+const camCfg = (): ToolsConfig['camera'] => ({
   baseUrl,
   imageTimeoutMs: 7000,
   moveTimeoutMs: 3000,

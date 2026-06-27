@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { registerViewerRoutes } from '../src/viewer/routes.js';
 import type { CameraSource, SnapshotOpts, Ptz } from '../src/viewer/CameraSource.js';
-import type { ViewerConfig } from '../src/config/viewerConfig.js';
+import type { ToolsConfig } from '../src/config/toolsConfig.js';
 
 /** 호출 인자를 기록하는 가짜 소스. login 보유=hucoms 흉내. */
 function spySource(kind: 'sim' | 'hucoms' = 'sim') {
@@ -39,7 +39,7 @@ function spySource(kind: 'sim' | 'hucoms' = 'sim') {
   return src;
 }
 
-const viewerCfg = (over: Partial<ViewerConfig['viewer']> = {}): ViewerConfig['viewer'] => ({
+const viewerCfg = (over: Partial<ToolsConfig['viewer']> = {}): ToolsConfig['viewer'] => ({
   enabled: true,
   allowMove: true,
   defaultFps: 3,
@@ -51,7 +51,7 @@ const viewerCfg = (over: Partial<ViewerConfig['viewer']> = {}): ViewerConfig['vi
 /** 임시 staticDir(최소 SPA 파일)로 fastify 앱 구성. */
 async function mkApp(opts: {
   sources: Map<string, CameraSource>;
-  viewer?: Partial<ViewerConfig['viewer']>;
+  viewer?: Partial<ToolsConfig['viewer']>;
 }): Promise<{ app: FastifyInstance; dir: string }> {
   const dir = mkdtempSync(join(tmpdir(), 'viewer-static-'));
   writeFileSync(join(dir, 'index.html'), '<!doctype html><html><body>SPA</body></html>');

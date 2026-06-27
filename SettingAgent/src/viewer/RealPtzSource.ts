@@ -1,4 +1,4 @@
-import type { CameraSourceConfig } from '../config/viewerConfig.js';
+import type { CameraSourceConfig } from '../config/toolsConfig.js';
 import { fetchWithTimeout } from '../util/http.js';
 import type { CameraList, CameraSource, Ptz, SnapshotOpts, SnapshotResult } from './CameraSource.js';
 

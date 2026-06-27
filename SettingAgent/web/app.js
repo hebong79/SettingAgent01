@@ -259,7 +259,7 @@ let capPollTimer = null;
 
 async function capFetchStatus() {
   try {
-    const res = await fetch(api('/capture/status'));
+    const res = await fetch('/capture/status');
     return res.ok ? await res.json() : null;
   } catch {
     return null;
@@ -298,7 +298,7 @@ async function capStart() {
     intervalMs: (Number($('cap-interval').value) || 30) * 1000,
     checkpointEvery: Number($('cap-checkpoint').value) || 10,
   };
-  const res = await fetch(api('/capture/start'), {
+  const res = await fetch('/capture/start', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
@@ -309,14 +309,14 @@ async function capStart() {
 }
 
 async function capStop() {
-  const res = await fetch(api('/capture/stop'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+  const res = await fetch('/capture/stop', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
   const data = await res.json().catch(() => ({}));
   $('cap-msg').textContent = res.ok ? '정지 요청됨' : `정지 실패: ${data.error ?? res.status}`;
   capPoll();
 }
 
 async function capFinalize() {
-  const res = await fetch(api('/capture/finalize'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+  const res = await fetch('/capture/finalize', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
   const data = await res.json().catch(() => ({}));
   if (res.ok) {
     $('cap-msg').textContent = `최종화 완료: 슬롯 ${data.slots}, 전역 ${data.globalCount}`;

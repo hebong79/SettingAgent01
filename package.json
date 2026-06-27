@@ -6,7 +6,6 @@
   "type": "module",
   "workspaces": [
     "packages/*",
-    "SettingAgent",
-    "SettingViewer"
+    "SettingAgent"
   ]
 }

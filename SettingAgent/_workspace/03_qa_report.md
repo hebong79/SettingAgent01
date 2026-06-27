@@ -1,103 +1,106 @@
-# 03. QA 검증 리포트 — 장기 관측·반복 수집 → SQLite 누적 → LLM 정밀 주차면
+# 03 · 검증자(qa-tester) 리포트 — SettingViewer → SettingAgent 재통합 검증
 
-- 작성: 검증자(qa-tester) · 2026-06-25
-- 기준: `_workspace/02_developer_changes.md`(인계 포인트 8개) + `01_architect_plan.md` + 설계서 §0.3(G1~G5)·§8(좌표 불변식)
-- 방법: vitest, 외부 서버·LLM·카메라·VPD/LPD 모킹, SQLite `:memory:`/임시파일, 타이머 주입.
-- 결론: **양쪽 전부 통과 · 회귀 0 · 좌표 불변식 충족. 구현 결함 0(재작업 불필요).**
+작성: 검증자(qa-tester) · 대상: SettingAgent · 분류: 리팩토링(통합) 검증
+입력: `01_architect_plan.md`(§8·§10 검증 기준) + `02_developer_changes.md` + 변경 소스
 
 ---
 
-## 0. 실행 결과 (수치 그대로)
+## 0. 결론
 
-| 대상 | typecheck | 테스트(이전→이후) | 회귀 |
-|------|-----------|--------------------|------|
-| SettingAgent | 통과(0 에러) | **81 → 156** (신규 +75, 24 파일) | **0** |
-| SettingViewer | 통과(0 에러) | **62 → 84** (신규 +22, 9 파일) | **0** |
+**재작업 불필요. 통과.** 구현 결함 0건. 설계서의 모든 검증 항목 충족(회귀 0).
 
-- `cd SettingAgent && npm run typecheck && npm test` → **24 files / 156 tests passed**.
-- `cd SettingViewer && npm run typecheck && npm test` → **9 files / 84 tests passed**.
-- CaptureJob/Finalizer 의 흡수·예외 경로에서 출력되는 warn/error 로그는 **의도된 결함 주입 테스트**(흡수/error 전이 검증)로, 모두 통과한 케이스다.
+- `npm run typecheck` → **오류 0**.
+- `npm test`(vitest) → **36 파일 / 239 테스트 전부 통과**(02 보고 수치와 일치, 회귀 0).
+- 토글·프록시제거·계약불변·중복제거·라우트순서 전부 코드/inject 로 교차 검증됨.
 
 ---
 
-## 1. 작성한 테스트 목록
+## 1. 양쪽 테스트 결과(수치 그대로)
 
-### SettingAgent (`SettingAgent/test/`)
-| 파일 | 케이스 수 | 매핑 | 핵심 검증 |
-|------|----------|------|-----------|
-| `geometry.test.ts`(가산) | +4 | median | 홀/짝 길이, 정렬·원본 불변, 빈 배열=0 |
-| `sqliteStore.test.ts`(신규) | 16 | G2 | 스키마 보장, 런 CRUD, 관측·검출 적재→`getDetectionsForRun`(round 조인), `getPresetRounds`(DISTINCT round), `replaceAggregatedSlots` 멱등(replace), snake↔camel round-trip, `updateAggregatedStatus`(좌표 불변), checkpoint/snapshot, 파일경로 디렉터리 자동생성·재오픈 |
-| `aggregator.test.ts`(신규) | 14 | G3 | 안정 클러스터(support↑→candidate), 노이즈(support<min→rejected), minConfidence 필터, **중앙값 대표 bbox**, occupancyRate(distinct round 분자·0 division), 프리셋 분리, 멀리 떨어진 2클러스터, plate 귀속(내부/외부), 결정형 동일 출력, plate-only/빈 입력 |
-| `captureJob.test.ts`(신규) | 9 | G1 | start→running·DB 생성, 중복 start throw, count 도달→done(stop_reason=count)·done_count·적재 4건, 라운드 사이 stop→stopped(manual)·다음 미예약, stop no-op, 프리셋 일부 실패 흡수, 라운드 예외→error, LPD 적재·LPD 실패 흡수 |
-| `captureRoutes.test.ts`(신규) | 19 | 라우트 | start(200/zod 400/409), status/stop(400), finalize(409/404/200), runs/aggregate(200/404/400), **기존 /health·/mapping·/setup/* 회귀**, 의존성 미주입 시 라우트 미등록(가산 보장) |
-| `checkpointFinalizer.test.ts`(신규) | 13 | G4·§8 | clusterRef/advisoryLines 순수헬퍼, **체크포인트 좌표 불변**(merges/rejects→status, bbox 동일), LLM off/미주입/예외 no-op, Finalizer 결정형 강등(candidate 채택·zone=cam{N}·report 없음·rejected 제외), **Finalizer 좌표 불변**(roi=대표 bbox), LLM zoneLabels/report 반영, LLM rejects 제외, finalizeCapture 예외 강등, 체크포인트 status 보존 |
+| 항목 | 결과 |
+|------|------|
+| `cd SettingAgent && npm run typecheck` | 오류 0 |
+| `cd SettingAgent && npm test` | **Test Files 36 passed (36) / Tests 239 passed (239)**, Duration 2.12s |
+| 신규/대체 테스트 통과 | `mappingDirect.test.ts`(2) ✓, `viewerEnabled.test.ts`(2) ✓ |
+| 이관 테스트 통과 | viewerRoutes(14)·cameraClientList(6)·realPtzSource(8)·sourceRegistry(4)·simulatorSource(6)·viewerCore(19)·analyzeArtifact(5)·findPresetPtz(4)·panelResize(4)·captureCore(9) 전부 ✓ |
+| 삭제 확인 | `mappingProxy.test.ts`·`captureProxy.test.ts` 부재(Glob 0) ✓ |
+| 루트 workspaces | `["packages/*","SettingAgent"]` — SettingViewer 제거 반영 ✓ |
+| `@fastify/static` | `node_modules/@fastify/static@9.1.3` 설치 확인(fastify 5.8.5 호환) ✓ |
 
-### SettingViewer (`SettingViewer/test/`)
-| 파일 | 케이스 수 | 매핑 | 핵심 검증 |
-|------|----------|------|-----------|
-| `captureProxy.test.ts`(신규) | 13 | G5 | status/runs/aggregate(GET)·start/stop/finalize(POST) 패스스루, 경로·메서드·**본문 전달**, :id 치환, 200/400/409/404 패스스루, 5xx→502, unreachable→502, 기존 /mapping 회귀 |
-| `captureCore.test.ts`(신규) | 9 | G5 | captureProgress(percent·label·**0 division 방어**·100 클램프·undefined), mapAdvisory(배열 복사·없음→[]), pollPlan(running/stopping/finalizing 만 폴링·간격) |
+> captureJob.test 의 로그(`preset2 캡처 실패`/`DB 적재 폭발`/`LPD down`)는 **의도된 에러 흡수 경로 테스트**(레벨 40/50 logger 출력)로 통과에 영향 없음. 전부 ✓.
 
 ---
 
-## 2. 좌표 불변식(§8) 검증 결과 — **충족**
+## 2. viewer.enabled 토글 검증 (inject, 라이브 서버 미사용)
 
-설계 핵심: "좌표는 검출+집계만 생성/수정, LLM 은 메타(status/zone/report)만". 다음을 명시적으로 단언했고 모두 통과:
+`viewerEnabled.test.ts` 가 `app.inject` 로 검증(포트 점유 없음):
 
-1. **CheckpointReviewer**(`checkpointFinalizer.test.ts` "rejects/merges → status 갱신, ROI 좌표는 입력=출력 동일"):
-   - `merges`(2번째부터)→`merged`, `rejects`→`rejected` 로 **status 만** 변경. 입력 슬롯의 `{x,y,w,h}` 와 DB 조회 결과 bbox 가 **정확히 동일**(`toEqual`).
-2. **SqliteStore.updateAggregatedStatus**(`sqliteStore.test.ts`): status 컬럼만 UPDATE, 좌표 4필드 불변 단언.
-3. **Finalizer**(`checkpointFinalizer.test.ts` "ROI 좌표는 집계 대표 bbox 그대로"):
-   - LLM `zoneLabels`/`report_ko` 는 반영되되, `slot.roiByPreset['1:1']` = 집계 대표 bbox `{0.3,0.3,0.1,0.1}`(roiPadding=0) 와 동일. LLM 은 좌표를 만들거나 바꾸지 않음.
-   - LLM `rejects`/`duplicates` 는 **채택 여부 메타**로만 작용(좌표 미생성).
+- **enabled=false** → `/viewer/api/health` **404**(헤드리스 강등), `/health`(루트) 200, `/setup/status` 200. ✓
+- **enabled=true** → `/viewer/api/health` **200** + `{status:'ok', sources:['sim']}`, `/health`(루트) 200(경로 충돌 없음). ✓
 
----
+서버 코드(`server.ts` L201) 이중 가드 `if (deps.viewer?.enabled && deps.sources)` 확인 — enabled=false 또는 sources 미주입 시 뷰어 라우트·정적 블록 자체가 `app.register` 되지 않음(미등록 → 404). 헤드리스 보존 정합.
 
-## 3. 경계면(snake/camel·1-based·조인) 교차 비교 결과
-
-| 경계 | 검증 | 결과 |
-|------|------|------|
-| detection(테이블, round 없음) ↔ DetectionRow(roundIdx 보유) | `getDetectionsForRun` 가 observation 조인으로 round_idx 부여 | OK(`sqliteStore.test.ts`) |
-| aggregated_slot(snake: occupancy_rate/plate_x) ↔ AggregatedSlot(camel) | replace→get round-trip `toEqual` | OK |
-| Aggregator presetKey `${cam}:${preset}` ↔ getPresetRounds 키 | 동일 포맷·occupancy 분모 일치 | OK |
-| clusterRef `presetKey#clusterId` ↔ LLM merges/rejects 입력 | reviewer/finalizer 가 동일 ref 로 매칭 | OK |
-| Finalizer slotId `c{cam}p{preset}s{pos}` ↔ FinalizeCaptureResult.zoneLabels 키 | `c1p1s1` 라벨 적용 확인 | OK |
-| globalIndex.globalIdx | 1-based 부여 확인 | OK |
-| Viewer 프록시 경로 `/viewer/api/capture/runs/:id/aggregate` → `/capture/runs/{id}/aggregate` | :id 치환·메서드·본문 패스스루 | OK |
+`mappingDirect.test.ts` 가 enabled=true + 임시 staticDir 로 `/viewer/`(SPA 200 경로) 등록을 간접 증명(static root 존재 시 register 성공, inject 통과).
 
 ---
 
-## 4. 성공 기준(G1~G5) 매핑
+## 3. 프록시 제거 정합
 
-- **G1**(반복 N + 수동 정지 잡): `captureJob.test.ts` — 상태머신 전이·count/manual/error·중복 거부·흡수. **충족**.
-- **G2**(SQLite 적재/조회): `sqliteStore.test.ts` 16케이스. **충족**.
-- **G3**(결정형 시공간 집계): `aggregator.test.ts` 14케이스(합성 데이터). **충족**.
-- **G4**(체크포인트/최종 LLM + artifact): `checkpointFinalizer.test.ts` — 메타 반영·좌표 불변·강등·shape/saveArtifact/snapshot. **충족**.
-- **G5**(Viewer 프록시·순수로직): `captureProxy.test.ts`/`captureCore.test.ts`. **충족**.
-
----
-
-## 5. 발견 결함·수정
-
-- **구현 결함: 0건.** 모든 신규 테스트가 구현을 수정 없이 통과. 통과 위장·테스트 느슨화 없음.
-- 테스트 작성 중 자체 보정 1건(구현 무관): `captureCore.test.ts` 의 `@ts-expect-error` 지시문 제거 — `core.d.ts` 가 이미 타입을 제공하므로 불필요(미사용 지시문은 typecheck 에러). 직접 수정.
+- **`/viewer/api/mapping` = `repo.loadArtifact()` 직접**(server.ts L206–213): 산출물 → 200 패스스루, null → 404 `{error:'no setup artifact'}`. `mappingDirect.test.ts` 2케이스로 검증(content-type application/json, body.slots[0].slotId 패스스루 확인). HTTP 자기호출(1홉·502·타임아웃) 소멸 확인. ✓
+- **`/viewer/api/capture/*` 라우트 부재**: src 전역 grep `viewer/api/capture` → 0건. alias 미신설 확인. ✓
+- **app.js capture 직접 호출**(grep 교차): L262 `/capture/status`, L301 `/capture/start`, L312 `/capture/stop`, L319 `/capture/finalize` — 모두 접두 없는 직접 호출. `api('/capture` 잔존 0. ✓
+- **mapping/cameras/snapshot/move/login/health 는 `/viewer/api/*` 유지**(app.js): `api('/mapping')`(L47·L336)·`api('/cameras...')`(L38)·`api('/snapshot...')`(L188·L238)·`api('/move')`(L210)·`api('/camera/login')`(L564)·`api('/health')`(L56·L113) — `const api=(p)=>`/viewer/api${p}`` 접두 유지. ✓
 
 ---
 
-## 6. 미커버(범위 밖) — 명시
+## 4. 계약 불변
 
-다음은 유닛/모킹으로 커버하지 않았으며 별도 동작확인이 필요(삭제·통과 위장 아님):
-
-1. **실 PTZ·Unity 실서버 스모크**(설계서 §10-8, 인계 §8): 시뮬레이터(:13100) N=소수·짧은 주기 → 수집→집계→`/capture/finalize`→`/mapping` 정밀 결과. **미수행(외부 서비스 미가동)** — 유닛(모킹)만 완료.
-2. **장시간 잡·DB 증가**(설계서 §11-3): 보존/정리 정책 범위 밖.
-3. **재기동 복구**(running 중 프로세스 종료, §11-5): 범위 밖. 런 status='running' 으로만 남음, 정리 로직 미검증.
-4. **브라우저 DOM/app.js 통합**(탭 전환·진행바·폴링 와이어링): core.js 순수로직만 검증. DOM 결합·실폴링 미커버.
-5. **better-sqlite3 네이티브 로드**: 구현자 실측(프리빌트 로드 성공) 신뢰. 본 검증은 `:memory:`/임시파일 동작으로 간접 확인.
-6. **newFacesRecentK 정교화**(인계 §2): 1차 단순화(현재 후보 면 수)를 그대로 전달하는 동작만 검증. 라운드별 신규 면 추적 로직은 미구현(후속).
+- `/health`(루트)·`/setup/*`·루트 `/mapping`·`/capture/*` shape·동작 유지 — 기존 테스트(apiRefresh·captureRoutes 19개·setupOrchestrator 등) 전부 통과로 회귀 0 확인. server.ts 의 기존 라우트 핸들러 무수정(가산만). ✓
+- **CameraClient 시그니처 불변 + listCameras 가산만**(CameraClient.ts 정독):
+  - `health()`·`requestImage(camIdx,presetIdx,ptz?)`·`move(camIdx,pan,tilt,zoom)`·`clampZoom(zoom)` 본문·시그니처 불변. `CapturedImage` 출처 `../domain/types.js` 유지.
+  - `listCameras(): Promise<CameraList>` 재추가. A타입 파싱: `name ?? 'C{idx}'`, `label ?? 'C{idx}-P{idx}'` 폴백, **`enabled: c.enabled !== false`(false 보존)**, presets 중첩 PTZ(pan/tilt/zoom) 보존. `CameraList` 출처 `../viewer/CameraSource.js`. cameraClientList.test(6) 통과. ✓
 
 ---
 
-## 7. 재작업 필요 여부
+## 5. 중복 제거
 
-**불필요.** 구현 결함 0, 양쪽 회귀 0, 좌표 불변식 충족. 문서화 에이전트로 인계 가능.
-미커버 항목(특히 §6-1 실서버 스모크)은 동작확인 단계에서 시뮬레이터로 별도 수행 권장.
+- `src/` 내 `buildViewerServer`/`settingAgentUrl`/`loadViewerConfig`/`DEFAULT_VIEWER_CONFIG` 라이브 참조 **0건**. `viewerConfig`·`SettingViewer` 언급은 toolsConfig.ts/index.ts/server.ts 의 **의도적 통합 주석 3건뿐**(라이브 코드 아님). ✓
+- 중복 파일 부재: `src/viewer/` = {CameraSource, SimulatorSource, RealPtzSource, sourceRegistry, routes}.ts 5개만(viewer 복제 CameraClient 없음). `viewerConfig.ts` 부재(Glob 0). `src/util/http.ts` 단일(상위집합, viewer 복제본 미이동). ✓
+- SettingViewer 소스 import 0: `git ls-files SettingViewer` = 0, 작업트리 파일 0(빈 폴더만 잔존). ✓
+
+---
+
+## 6. 라우트 등록 순서
+
+- `routes.ts`: `/viewer/api/{cameras,snapshot,move,camera/login,health}`(정확 경로) 전부 등록 후 **마지막에** `@fastify/static`(prefix `/viewer/`, 와일드카드) register. server.ts 는 그 앞에 `/viewer/api/mapping` 등록. 정확 경로가 와일드카드보다 우선 → 충돌 없음.
+- inject 검증: `viewerEnabled.test.ts` 의 `/viewer/api/health` → 200 JSON `{status:'ok',sources:['sim']}` 반환(정적 index.html 이 아님) = 정확 경로가 static 보다 먼저 매칭됨을 실증. ✓
+
+---
+
+## 7. 발견 결함 / 수정
+
+- **구현 결함: 0건.** 테스트 작성 실수: 0건(직접 수정 없음). 통과 위장 없음.
+
+---
+
+## 8. 미커버(명시)
+
+1. **라이브 기동(`npm start`) 미수행**: 포트 13020 점유 가능성으로 마스터 지시대로 inject 만 사용. 실제 `listen()` 후 `/viewer/`(SPA HTML 200)·정적 자산 서빙은 별도 스모크 필요.
+2. **브라우저 DOM 동작 미커버**: 카메라 선택/스냅샷 렌더/PTZ 이동/프리셋 이동(gotoPreset)/정밀수집 탭/분석 탭의 실제 DOM·fetch 왕복은 web 테스트(core.js 순수 로직 단위테스트)로만 부분 커버. 엔드투엔드 브라우저 검증은 범위 외.
+3. **실 PTZ(HNR-2036LA) 스모크 미수행**: RealPtzSource CGI/PTZ 범위는 미확인 가정값(설계 §13.6). 실 장비 연결 후 실측 보정 필요. realPtzSource.test(8)는 모킹 기반.
+4. **SettingViewer 빈 폴더 잠금**: `git ls-files` 0·작업트리 파일 0 이나 디렉터리 핸들 잠금으로 빈 폴더 자체 삭제 실패(다른 프로세스가 cwd 점유 추정). git 추적상 영향 없음. 프로세스 종료 후 `Remove-Item -Recurse -Force SettingViewer` 1회 필요(02 §8-1과 동일).
+
+---
+
+## 9. 검증 항목 요약표
+
+| 검증 항목 | 결과 |
+|-----------|------|
+| 1. 양쪽 테스트(typecheck/test) | ✓ 0 오류 / 36파일·239테스트 통과 |
+| 2. viewer.enabled 토글(inject) | ✓ false→404·true→200, 헤드리스 보존 |
+| 3. 프록시 제거 정합 | ✓ mapping 직접·capture alias 부재·app.js 직접호출 |
+| 4. 계약 불변 | ✓ 기존 라우트·CameraClient 시그니처 불변 |
+| 5. 중복 제거 | ✓ 복제 CameraClient/http/viewerConfig 잔존 0 |
+| 6. 라우트 등록 순서 | ✓ 정확경로 우선(inject 실증) |
+
+이상 — 통과. 재작업 불필요.

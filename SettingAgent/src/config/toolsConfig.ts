@@ -80,6 +80,40 @@ const ServerSchema = z.object({
   apiKeyEnv: z.string().optional(),
 });
 
+/**
+ * 웹 뷰어(SPA + /viewer/api/*) 설정. enabled=false 면 뷰어 라우트·정적 미등록(헤드리스).
+ * (SettingViewer 통합 — 기존 viewerConfig.ts 의 ViewerSchema 를 흡수.)
+ */
+const ViewerSchema = z.object({
+  enabled: z.boolean(),
+  allowMove: z.boolean(),
+  defaultFps: z.number().int().positive(),
+  staticDir: z.string().min(1),
+  controlToken: z.string(),
+});
+
+/**
+ * 카메라 소스 설정(다중 소스). 미설정 시 camera(단일 sim)로 폴백(하위호환).
+ * 자격증명은 여기 두지 않는다(UI 입력 → 통과).
+ */
+const CameraSourceConfigSchema = z.object({
+  id: z.string().min(1),
+  kind: z.enum(['sim', 'hucoms']),
+  baseUrl: z.string().url().optional(), // sim
+  host: z.string().optional(), // hucoms
+  port: z.number().int().positive().optional(),
+  loginPath: z.string().optional(),
+  snapshotUrl: z.string().optional(),
+  ptz: z
+    .object({
+      panRange: z.tuple([z.number(), z.number()]),
+      tiltRange: z.tuple([z.number(), z.number()]),
+      zoomRange: z.tuple([z.number(), z.number()]),
+    })
+    .optional(),
+});
+export type CameraSourceConfig = z.infer<typeof CameraSourceConfigSchema>;
+
 const StoreSchema = z.object({
   dataDir: z.string().min(1),
   captureDir: z.string().min(1),
@@ -129,6 +163,9 @@ export const ToolsConfigSchema = z.object({
   capture: CaptureSchema,
   server: ServerSchema,
   store: StoreSchema,
+  viewer: ViewerSchema,
+  /** 다중 카메라 소스(옵셔널). 미설정 시 단일 sim 폴백. */
+  cameraSources: z.array(CameraSourceConfigSchema).optional(),
 });
 
 export type ToolsConfig = z.infer<typeof ToolsConfigSchema>;
@@ -150,6 +187,8 @@ export const DEFAULT_TOOLS_CONFIG: ToolsConfig = {
   },
   server: { port: 13020, apiKeyEnv: 'SETTING_API_KEY' },
   store: { dataDir: 'data', captureDir: 'data/captures' },
+  viewer: { enabled: true, allowMove: true, defaultFps: 3, staticDir: 'web', controlToken: '' },
+  // cameraSources 는 기본값 미설정(undefined → sourceRegistry 가 단일 sim 으로 폴백).
 };
 
 /** tools.config.json 을 로드한다. 파일이 없으면 기본값을 검증해 반환. 섹션 단위 병합. */
@@ -160,6 +199,8 @@ export function loadToolsConfig(path = 'config/tools.config.json'): ToolsConfig 
     for (const key of Object.keys(DEFAULT_TOOLS_CONFIG) as Array<keyof ToolsConfig>) {
       merged[key] = { ...DEFAULT_TOOLS_CONFIG[key], ...(raw[key] ?? {}) };
     }
+    // cameraSources 는 옵셔널 배열(DEFAULT 에 없어 위 순회에서 누락) → 있으면 그대로 통과.
+    if (raw.cameraSources !== undefined) merged.cameraSources = raw.cameraSources;
     return ToolsConfigSchema.parse(merged);
   }
   return ToolsConfigSchema.parse(DEFAULT_TOOLS_CONFIG);

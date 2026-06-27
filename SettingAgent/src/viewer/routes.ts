@@ -2,13 +2,13 @@ import type { FastifyInstance } from 'fastify';
 import fastifyStatic from '@fastify/static';
 import { resolve } from 'node:path';
 import { z } from 'zod';
-import type { ViewerConfig } from '../config/viewerConfig.js';
+import type { ToolsConfig } from '../config/toolsConfig.js';
 import { CameraApiError } from '../clients/CameraClient.js';
 import type { CameraSource } from './CameraSource.js';
 
 export interface ViewerDeps {
   sources: Map<string, CameraSource>;
-  viewer: ViewerConfig['viewer'];
+  viewer: ToolsConfig['viewer'];
 }
 
 const ZOOM_MIN = 1;
@@ -43,7 +43,7 @@ const LoginBody = z.object({
 });
 
 /**
- * SettingViewer 프록시 라우트 등록(설계서 §6.2).
+ * 뷰어 라우트 등록(설계서 §6.2).
  * 라우트 순서 필수: /viewer/api/* (정확 경로) 먼저 → @fastify/static (와일드카드) 나중.
  */
 export async function registerViewerRoutes(app: FastifyInstance, deps: ViewerDeps): Promise<void> {

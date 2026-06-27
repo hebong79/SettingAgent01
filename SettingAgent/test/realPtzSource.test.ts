@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import { AddressInfo } from 'node:net';
 import { RealPtzSource } from '../src/viewer/RealPtzSource.js';
-import type { CameraSourceConfig } from '../src/config/viewerConfig.js';
+import type { CameraSourceConfig } from '../src/config/toolsConfig.js';
 
 let server: Server;
 let host: string;

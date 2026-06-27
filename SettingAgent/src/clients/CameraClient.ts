@@ -1,5 +1,6 @@
 import type { CapturedImage } from '../domain/types.js';
 import type { ToolsConfig } from '../config/toolsConfig.js';
+import type { CameraList } from '../viewer/CameraSource.js';
 import { fetchWithTimeout } from '../util/http.js';
 
 /** Unity REST 서버가 반환하는 오류. */
@@ -62,6 +63,25 @@ export class CameraClient {
       imgName: body.img_name,
       jpg: Buffer.from(body.img_bytes ?? '', 'base64'),
     };
+  }
+
+  /** GET /cameras → 카메라/프리셋(+PTZ) 목록(A타입). enabled=false 포함, presets 중첩 보존. */
+  async listCameras(): Promise<CameraList> {
+    const res = await fetchWithTimeout(`${this.baseUrl}/cameras`, { method: 'GET' }, this.cfg.moveTimeoutMs);
+    const body = await parseOrThrow(res);
+    const cameras = (Array.isArray(body.cameras) ? body.cameras : []).map((c: any) => ({
+      camIdx: c.camIdx,
+      name: c.name ?? `C${c.camIdx}`,
+      enabled: c.enabled !== false,
+      presets: (Array.isArray(c.presets) ? c.presets : []).map((p: any) => ({
+        presetIdx: p.presetIdx,
+        label: p.label ?? `C${c.camIdx}-P${p.presetIdx}`,
+        pan: p.pan,
+        tilt: p.tilt,
+        zoom: p.zoom,
+      })),
+    }));
+    return { cameras };
   }
 
   /** POST /req_move → PTZ 절대 이동. success 반환. */

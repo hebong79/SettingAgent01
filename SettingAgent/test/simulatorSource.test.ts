@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { SimulatorSource } from '../src/viewer/SimulatorSource.js';
-import type { CameraClient, CapturedImage } from '../src/clients/CameraClient.js';
+import type { CameraClient } from '../src/clients/CameraClient.js';
+import type { CapturedImage } from '../src/domain/types.js';
 import type { CameraList } from '../src/viewer/CameraSource.js';
 
 /** requestImage/move/listCameras 호출 인자를 기록하는 가짜 CameraClient. */
