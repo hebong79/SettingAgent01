@@ -77,6 +77,22 @@ export function registerCaptureRoutes(app: FastifyInstance, deps: CaptureRouteDe
 
   app.get('/capture/status', async () => deps.job.getStatus());
 
+  // 최근 캡처 프레임(수집 과정 관찰용). 카메라 재명령 없이 잡이 방금 찍은 JPEG 그대로.
+  app.get('/capture/frame', async (_req, reply) => {
+    const f = deps.job.getLastFrame();
+    if (!f) {
+      reply.code(404);
+      return { error: 'no frame' };
+    }
+    reply
+      .header('Content-Type', 'image/jpeg')
+      .header('Cache-Control', 'no-store')
+      .header('X-Cap-Cam', String(f.camIdx))
+      .header('X-Cap-Preset', String(f.presetIdx))
+      .header('X-Cap-Round', String(f.roundIdx));
+    return reply.send(f.jpeg);
+  });
+
   app.post('/capture/stop', async (_req, reply) => {
     const st = deps.job.getStatus();
     if (st.state !== 'running') {

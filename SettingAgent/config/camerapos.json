@@ -8,46 +8,25 @@
           "cam_id": 1,
           "preset_id": 1,
           "sname": "Preset 1",
-          "pan": 151.9,
-          "tilt": 16.5,
-          "zoom": 1.7
+          "pan": 22,
+          "tilt": 6.8,
+          "zoom": 1.6
         },
         {
           "cam_id": 1,
           "preset_id": 2,
           "sname": "Preset 2",
-          "pan": 125.2,
-          "tilt": 12,
-          "zoom": 1.8
-        }
-      ]
-    },
-    {
-      "cam_id": 2,
-      "datas": [
-        {
-          "cam_id": 2,
-          "preset_id": 1,
-          "sname": "Preset 1",
-          "pan": 53.9,
-          "tilt": 14.5,
-          "zoom": 1.7
-        },
-        {
-          "cam_id": 2,
-          "preset_id": 2,
-          "sname": "Preset 2",
-          "pan": 28.7,
-          "tilt": 10.3,
+          "pan": 56.6,
+          "tilt": 7.4,
           "zoom": 1.9
         },
         {
-          "cam_id": 2,
+          "cam_id": 1,
           "preset_id": 3,
           "sname": "Preset 3",
-          "pan": 92.6,
-          "tilt": 40.5,
-          "zoom": 1
+          "pan": 43.5,
+          "tilt": 18.8,
+          "zoom": 1.4
         }
       ]
     }

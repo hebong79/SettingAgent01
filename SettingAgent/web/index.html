@@ -72,11 +72,6 @@
             <label class="field">프리셋 <select id="sel-preset"></select></label>
             <button id="btn-goto" class="primary">이동</button>
           </div>
-          <div class="mode-row">
-            <span>모드</span>
-            <label><input type="radio" name="mode" value="preset" checked /> 프리셋 보기</label>
-            <label><input type="radio" name="mode" value="manual" /> 수동 제어</label>
-          </div>
         </section>
 
         <section class="panel-section">
@@ -137,6 +132,7 @@
           <div class="cap-progress">
             <progress id="cap-bar" max="100" value="0"></progress>
             <span id="cap-label">idle 0/0 (0%)</span>
+            <span id="cap-elapsed" class="cap-elapsed"></span>
           </div>
           <div id="cap-advisory" class="cap-advisory"></div>
           <div id="cap-msg" class="cap-msg"></div>

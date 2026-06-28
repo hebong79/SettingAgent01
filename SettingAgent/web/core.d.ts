@@ -33,6 +33,8 @@ export interface CaptureStatus {
   round: number;
   done: number;
   planned: number;
+  startedAt?: string;
+  endedAt?: string;
   latestAdvisory?: string[];
 }
 
@@ -40,6 +42,8 @@ export function captureProgress(status: Partial<CaptureStatus> | null | undefine
   percent: number;
   label: string;
 };
+export function captureElapsedMs(status: Partial<CaptureStatus> | null | undefined, nowMs: number): number | null;
+export function formatElapsed(ms: number | null | undefined): string;
 export function mapAdvisory(status: Partial<CaptureStatus> | null | undefined): string[];
 export function pollPlan(state: string, intervalMs?: number): { poll: boolean; intervalMs: number };
 

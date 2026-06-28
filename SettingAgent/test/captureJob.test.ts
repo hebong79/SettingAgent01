@@ -104,6 +104,26 @@ describe('CaptureJob 시작/중복 (G1)', () => {
   });
 });
 
+describe('CaptureJob 프레임/시각 (수집 관찰·경과)', () => {
+  it('라운드 후 getLastFrame = 마지막 타깃 프레임, status에 startedAt/endedAt', async () => {
+    const { job, store, timers } = makeJob();
+    openStores.push(store);
+    expect(job.getLastFrame()).toBeUndefined();
+    job.start({ count: 1, intervalMs: 1000, checkpointEvery: 99, targets });
+    expect(job.getStatus().startedAt).toBe('T');
+    await timers.fireNext(); // 라운드1(두 타깃) → count=1 도달 → done
+    const f = job.getLastFrame();
+    expect(f).toBeDefined();
+    expect(f!.camIdx).toBe(1);
+    expect(f!.presetIdx).toBe(2); // 마지막 타깃(순회 마지막 프리셋)
+    expect(f!.roundIdx).toBe(1);
+    expect(f!.jpeg.toString()).toBe('img');
+    const st = job.getStatus();
+    expect(st.state).toBe('done');
+    expect(st.endedAt).toBe('T');
+  });
+});
+
 describe('CaptureJob count 종료 (G1)', () => {
   it('count 라운드 도달 → done(stop_reason=count), DB done_count 일치, 적재 검증', async () => {
     const { job, store, timers } = makeJob();

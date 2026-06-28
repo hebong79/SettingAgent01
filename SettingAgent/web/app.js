@@ -8,6 +8,8 @@ import {
   stepPtz,
   createStreamLoop,
   captureProgress,
+  captureElapsedMs,
+  formatElapsed,
   mapAdvisory,
   pollPlan,
   clampPanelWidth,
@@ -22,8 +24,7 @@ const state = {
   source: '',
   cam: 1,
   preset: 1,
-  mode: 'preset',
-  ptz: { pan: 0, tilt: 0, zoom: 1 },
+  ptz: { pan: 0, tilt: 0, zoom: 1 }, // 현재 카메라 위치(명령 기준: 프리셋 이동·PTZ 제어로 갱신)
   cameras: [], // CameraList.cameras
   mapping: null, // SetupArtifact
   isHucoms: false,
@@ -178,13 +179,12 @@ function renderSlotList() {
 // --- 스트림 루프 ---------------------------------------------------------
 const loop = createStreamLoop({
   makeUrl: (seq) => {
-    const p = new URLSearchParams({ cam: state.cam, preset: state.preset, mode: state.mode, t: seq });
+    // 항상 '현재 PTZ'(state.ptz) 기준으로 캡처. 프리셋은 '이동' 이 state.ptz 를 프리셋 PTZ 로 맞춘다.
+    const p = new URLSearchParams({ cam: state.cam, preset: state.preset, mode: 'manual', t: seq });
     if (state.source) p.set('source', state.source);
-    if (state.mode === 'manual') {
-      p.set('pan', state.ptz.pan);
-      p.set('tilt', state.ptz.tilt);
-      p.set('zoom', state.ptz.zoom);
-    }
+    p.set('pan', state.ptz.pan);
+    p.set('tilt', state.ptz.tilt);
+    p.set('zoom', state.ptz.zoom);
     return api(`/snapshot?${p.toString()}`);
   },
   fetchFn: (url, opt) => fetch(url, { ...opt, cache: 'no-store' }),
@@ -256,6 +256,7 @@ async function gotoPreset() {
 
 // --- 정밀 수집(장기 관측·반복 수집) ------------------------------------
 let capPollTimer = null;
+let lastCapStatus = null; // 경과 시간 1초 틱 갱신용
 
 async function capFetchStatus() {
   try {
@@ -266,10 +267,18 @@ async function capFetchStatus() {
   }
 }
 
+/** 경과 시간 표시(서버 startedAt~endedAt 기준, 진행 중엔 now 까지). */
+function renderElapsed() {
+  const ms = captureElapsedMs(lastCapStatus, Date.now());
+  $('cap-elapsed').textContent = ms == null ? '' : `경과 ${formatElapsed(ms)}`;
+}
+
 function renderCaptureStatus(status) {
+  lastCapStatus = status;
   const { percent, label } = captureProgress(status ?? {});
   $('cap-bar').value = percent;
   $('cap-label').textContent = label;
+  renderElapsed();
   const adv = mapAdvisory(status ?? {});
   $('cap-advisory').innerHTML = '';
   for (const line of adv) {
@@ -280,10 +289,62 @@ function renderCaptureStatus(status) {
   }
 }
 
+// 1초 틱: 진행 중이면 경과 시간을 부드럽게 갱신(폴링은 2초라 그 사이도 갱신).
+setInterval(() => {
+  const st = lastCapStatus?.state;
+  if (st === 'running' || st === 'stopping' || st === 'finalizing') renderElapsed();
+}, 1000);
+
+// 캡처 중 Live View 에 '최근 캡처 프레임'을 표시(카메라 재명령 없이 잡이 찍은 프레임을 관찰).
+let capFrameTimer = null;
+let capFrameUrl = null;
+
+async function capFrameTick() {
+  try {
+    const res = await fetch('/capture/frame', { cache: 'no-store' });
+    if (!res.ok) return;
+    const url = URL.createObjectURL(await res.blob());
+    frame.src = url;
+    if (frame.decode) await frame.decode().catch(() => {});
+    if (capFrameUrl) URL.revokeObjectURL(capFrameUrl);
+    capFrameUrl = url;
+    const c = res.headers.get('X-Cap-Cam');
+    if (c != null) {
+      $('cap-msg').textContent = `수집 중 — cam${c} 프리셋${res.headers.get('X-Cap-Preset')} (라운드 ${res.headers.get('X-Cap-Round')})`;
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+function startCapFramePolling() {
+  if (capFrameTimer) return;
+  loop.stop(); // 라이브 스트림 중지 — 카메라를 캡처와 다투지 않게.
+  capFrameTimer = setInterval(capFrameTick, 700);
+  capFrameTick();
+}
+
+function stopCapFramePolling() {
+  if (capFrameTimer) {
+    clearInterval(capFrameTimer);
+    capFrameTimer = null;
+  }
+}
+
 async function capPoll() {
   const status = await capFetchStatus();
   renderCaptureStatus(status);
-  const plan = pollPlan(status?.state ?? 'idle');
+  const st = status?.state ?? 'idle';
+  const active = st === 'running' || st === 'stopping' || st === 'finalizing';
+  if (active) {
+    startCapFramePolling();
+  } else {
+    stopCapFramePolling();
+    if (st === 'done') {
+      $('cap-msg').textContent = `수집 완료 (${status.done}/${status.planned} 라운드) — '최종화'를 누르면 주차면이 그려집니다`;
+    }
+  }
+  const plan = pollPlan(st);
   if (capPollTimer) {
     clearTimeout(capPollTimer);
     capPollTimer = null;
@@ -533,11 +594,6 @@ function wire() {
     syncPtzFromPreset();
     renderSlotList();
   });
-  document.querySelectorAll('input[name="mode"]').forEach((r) =>
-    r.addEventListener('change', (e) => {
-      state.mode = e.target.value;
-    }),
-  );
 
   $('btn-start').addEventListener('click', () => loop.start(Number($('fps').value) || 3));
   $('btn-stop').addEventListener('click', () => loop.stop());

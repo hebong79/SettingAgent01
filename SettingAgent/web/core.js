@@ -104,6 +104,29 @@ export function clampPanelWidth(px, min = 260, max = 720) {
 }
 
 /**
+ * 정밀 수집 경과 시간(ms). startedAt~(endedAt 또는 now). 없으면 null.
+ * 종료(endedAt) 후엔 총 소요로 고정.
+ */
+export function captureElapsedMs(status, nowMs) {
+  if (!status || !status.startedAt) return null;
+  const start = Date.parse(status.startedAt);
+  if (Number.isNaN(start)) return null;
+  const endParsed = status.endedAt ? Date.parse(status.endedAt) : nowMs;
+  const end = Number.isNaN(endParsed) ? nowMs : endParsed;
+  return Math.max(0, end - start);
+}
+
+/** ms → 경과 표기. 1시간 미만 "M:SS", 이상 "H:MM:SS". */
+export function formatElapsed(ms) {
+  const s = Math.floor((ms ?? 0) / 1000);
+  const hh = Math.floor(s / 3600);
+  const mm = Math.floor((s % 3600) / 60);
+  const ss = s % 60;
+  const p = (n) => String(n).padStart(2, '0');
+  return hh > 0 ? `${hh}:${p(mm)}:${p(ss)}` : `${mm}:${p(ss)}`;
+}
+
+/**
  * 카메라 목록에서 (camIdx, presetIdx) 프리셋의 PTZ 조회.
  * pan/tilt/zoom 이 모두 있으면 { pan, tilt, zoom }, 아니면 null(→ 호출측 폴백).
  * '프리셋 이동' 이 현재 모드와 무관하게 프리셋 위치로 가게 하는 근거값.

@@ -615,6 +615,12 @@ body.resizing {
   white-space: nowrap;
 }
 
+.cap-elapsed {
+  color: var(--accent) !important;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
 .cap-advisory {
   margin-top: 8px;
   color: var(--warn);

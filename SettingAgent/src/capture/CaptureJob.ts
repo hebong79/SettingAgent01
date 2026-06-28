@@ -49,6 +49,10 @@ export class CaptureJob {
   private done = 0;
   private planned = 0;
   private latestAdvisory: string[] = [];
+  private startedAt?: string;
+  private endedAt?: string;
+  /** 최근 캡처 프레임(뷰어가 수집 과정을 관찰용으로 표시 — 카메라 재명령 없이). */
+  private lastFrame?: { jpeg: Buffer; camIdx: number; presetIdx: number; roundIdx: number };
   private timer?: NodeJS.Timeout;
   private params?: CaptureStartParams;
   private roundRunning = false;
@@ -69,6 +73,11 @@ export class CaptureJob {
     return this.runId;
   }
 
+  /** 최근 캡처 프레임(없으면 undefined). 뷰어 /capture/frame 용. */
+  getLastFrame(): { jpeg: Buffer; camIdx: number; presetIdx: number; roundIdx: number } | undefined {
+    return this.lastFrame;
+  }
+
   /** 현재 상태(타입 협소화 우회 — await 사이 stop() 변경 반영). */
   private currentState(): CaptureState {
     return this.state;
@@ -81,6 +90,8 @@ export class CaptureJob {
       round: this.round,
       done: this.done,
       planned: this.planned,
+      ...(this.startedAt ? { startedAt: this.startedAt } : {}),
+      ...(this.endedAt ? { endedAt: this.endedAt } : {}),
       ...(this.latestAdvisory.length > 0 ? { latestAdvisory: [...this.latestAdvisory] } : {}),
     };
   }
@@ -95,7 +106,9 @@ export class CaptureJob {
     this.done = 0;
     this.planned = p.count;
     this.latestAdvisory = [];
-    this.runId = this.deps.store.createRun({ plannedCount: p.count, intervalMs: p.intervalMs, startedAt: this.now() });
+    this.startedAt = this.now();
+    this.endedAt = undefined;
+    this.runId = this.deps.store.createRun({ plannedCount: p.count, intervalMs: p.intervalMs, startedAt: this.startedAt });
     this.state = 'running';
     // 첫 라운드는 즉시 발화(주기 0 대기), 이후 intervalMs.
     this.timer = this.setTimer(() => void this.runRound(), 0);
@@ -115,8 +128,9 @@ export class CaptureJob {
   }
 
   private finishRun(status: 'done' | 'stopped' | 'error', reason: 'count' | 'manual' | 'error'): void {
+    this.endedAt = this.now();
     if (this.runId !== undefined) {
-      this.deps.store.endRun(this.runId, { status, stopReason: reason, endedAt: this.now() });
+      this.deps.store.endRun(this.runId, { status, stopReason: reason, endedAt: this.endedAt });
     }
     this.state = status;
   }
@@ -175,6 +189,7 @@ export class CaptureJob {
 
   private async captureTarget(runId: number, roundIdx: number, t: SetupTarget): Promise<void> {
     const cap = await this.deps.camera.requestImage(t.camIdx, t.presetIdx, t.ptz);
+    this.lastFrame = { jpeg: cap.jpg, camIdx: t.camIdx, presetIdx: t.presetIdx, roundIdx };
     const obsId = this.deps.store.insertObservation({
       runId,
       roundIdx,

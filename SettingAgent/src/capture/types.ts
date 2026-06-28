@@ -80,6 +80,10 @@ export interface CaptureStatus {
   round: number;
   done: number;
   planned: number;
+  /** 시작 시각(ISO8601). 경과 시간 표시용. */
+  startedAt?: string;
+  /** 종료 시각(ISO8601). 종료 후 총 소요 표시용. */
+  endedAt?: string;
   /** 최근 체크포인트 자문(수렴/커버리지 표시용 문자열 배열). */
   latestAdvisory?: string[];
 }
