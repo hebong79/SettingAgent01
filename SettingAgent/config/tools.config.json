@@ -56,6 +56,19 @@
     "clusterMinSupport": 3,
     "minConfidence": 0.5
   },
+  "calibrate": {
+    "targetPlateWidth": 0.2,
+    "centerTol": 0.03,
+    "widthTol": 0.02,
+    "maxIterations": 15,
+    "probeStepDeg": 1.0,
+    "maxStepDeg": 5.0,
+    "fallbackGainPanDeg": 20,
+    "fallbackGainTiltDeg": 15,
+    "settleMs": 300,
+    "outFile": "data/slot_ptz.json",
+    "llmAdvise": true
+  },
   "server": {
     "port": 13020,
     "apiKeyEnv": "SETTING_API_KEY"

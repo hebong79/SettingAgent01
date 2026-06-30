@@ -4,7 +4,9 @@ import type { CaptureJob } from '../capture/CaptureJob.js';
 import type { Finalizer } from '../capture/Finalizer.js';
 import type { SqliteStore } from '../capture/SqliteStore.js';
 import type { SetupTarget } from '../setup/SetupOrchestrator.js';
-import { loadSetupTargets, type MapFiles } from '../setup/mapTargets.js';
+import { loadSetupTargets, viewsToTargets, type MapFiles } from '../setup/mapTargets.js';
+import { writeCamerapos } from '../setup/cameraposWriter.js';
+import type { PresetProvider } from '../setup/presetProvider.js';
 import type { ToolsConfig } from '../config/toolsConfig.js';
 
 const TargetSchema = z.object({
@@ -28,8 +30,13 @@ export interface CaptureRouteDeps {
   finalizer: Finalizer;
   store: SqliteStore;
   cfg: ToolsConfig['capture'];
-  /** targets 미지정 시 camerapos 파일에서 로드. */
+  /** targets 미지정 시 camerapos 파일에서 로드(공급자 없을 때의 폴백). */
   mapFiles?: MapFiles;
+  /**
+   * 라이브 프리셋 공급자(A=unity-api 등). 주입되면 start 시 캐시(camerapos.json) 대신
+   * 항상 새로 받아 사용한다(이전 프리셋 순서 캐싱 제거). cameraposFile 이 있으면 받은 목록으로 갱신도 한다.
+   */
+  presetProvider?: PresetProvider | null;
 }
 
 /**
@@ -46,6 +53,17 @@ export function registerCaptureRoutes(app: FastifyInstance, deps: CaptureRouteDe
     let targets: SetupTarget[];
     if (parsed.data.targets && parsed.data.targets.length > 0) {
       targets = parsed.data.targets;
+    } else if (deps.presetProvider) {
+      // 항상 라이브 갱신: 공급자(Unity /cameras 등)에서 새 프리셋 목록을 받아 사용한다.
+      // → 캐시된 camerapos.json 의 옛 프리셋 순서를 쓰지 않는다. cameraposFile 이 있으면 함께 갱신.
+      try {
+        const views = await deps.presetProvider.listViews();
+        if (deps.mapFiles?.cameraposFile) writeCamerapos(views, deps.mapFiles.cameraposFile);
+        targets = viewsToTargets(views);
+      } catch (err) {
+        reply.code(400);
+        return { error: 'live preset refresh failed', detail: err instanceof Error ? err.message : String(err) };
+      }
     } else if (deps.mapFiles) {
       try {
         targets = loadSetupTargets(deps.mapFiles);
@@ -55,7 +73,7 @@ export function registerCaptureRoutes(app: FastifyInstance, deps: CaptureRouteDe
       }
     } else {
       reply.code(400);
-      return { error: 'targets 미지정 + mapFiles 미설정' };
+      return { error: 'targets 미지정 + presetProvider/mapFiles 미설정' };
     }
     if (targets.length === 0) {
       reply.code(400);

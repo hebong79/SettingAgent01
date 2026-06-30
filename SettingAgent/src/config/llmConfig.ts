@@ -59,11 +59,18 @@ const FloorRoiSchema = z.object({
   prompt: z.string().min(1),
 });
 
+/** PTZ 캘리브레이션 자문(adviseCentering) 설정(옵셔널 — 미설정 시 기본 yaml 사용). */
+const CenteringSchema = z.object({
+  /** system/user 를 담은 단일 yaml 프롬프트 파일 경로. */
+  prompt: z.string().min(1),
+});
+
 export const LlmConfigSchema = z.object({
   llm: LlmSchema,
   mcp: McpSchema,
   setupPrompts: SetupPromptsSchema,
   floorRoi: FloorRoiSchema.optional(),
+  centering: CenteringSchema.optional(),
 });
 
 export type LlmConfig = z.infer<typeof LlmConfigSchema>;
@@ -98,6 +105,9 @@ export const DEFAULT_LLM_CONFIG: LlmConfig = {
     maxPerCheckpoint: 12,
     prompt: 'config/prompts/floor_roi.yaml',
   },
+  centering: {
+    prompt: 'config/prompts/ptz_centering.yaml',
+  },
 };
 
 /** llm.config.json 을 로드한다. 파일이 없으면 기본값을 검증해 반환. `_comment` 등 부가 키는 무시. */
@@ -109,6 +119,7 @@ export function loadLlmConfig(path = 'config/llm.config.json'): LlmConfig {
       mcp: { ...DEFAULT_LLM_CONFIG.mcp, ...(raw.mcp as object) },
       setupPrompts: { ...DEFAULT_LLM_CONFIG.setupPrompts, ...(raw.setupPrompts as object) },
       floorRoi: { ...DEFAULT_LLM_CONFIG.floorRoi, ...(raw.floorRoi as object) },
+      centering: { ...DEFAULT_LLM_CONFIG.centering, ...(raw.centering as object) },
     };
     return LlmConfigSchema.parse(merged);
   }

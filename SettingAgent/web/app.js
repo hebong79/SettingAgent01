@@ -581,6 +581,75 @@ async function capFinalize() {
   }
 }
 
+// --- PTZ 캘리브레이션(주차면별 번호판 중심정렬·줌 → slot_ptz.json) ------
+// capPoll 패턴 차용(pollPlan 재사용). 절대경로 /calibrate/* 직접 폴링.
+let calPollTimer = null;
+let prevCalState = 'idle';
+
+async function calStart() {
+  $('cal-msg').textContent = '';
+  $('cal-summary').innerHTML = '';
+  const res = await fetch('/calibrate/ptz', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: '{}',
+  });
+  const data = await res.json().catch(() => ({}));
+  $('cal-msg').textContent = res.ok ? `시작됨 (대상 ${data.total} 슬롯)` : `시작 실패: ${data.error ?? res.status}`;
+  calPoll();
+}
+
+async function calPoll() {
+  let status = null;
+  try {
+    const res = await fetch('/calibrate/status', { cache: 'no-store' });
+    status = res.ok ? await res.json() : null;
+  } catch {
+    status = null;
+  }
+  const st = status?.state ?? 'idle';
+  const done = status?.done ?? 0;
+  const total = status?.total ?? 0;
+  const percent = total > 0 ? Math.round((done / total) * 100) : 0;
+  $('cal-bar').value = percent;
+  $('cal-label').textContent = `${st} ${done}/${total}` + (status?.current ? ` — ${status.current.slotId}` : '');
+
+  // 활성 → 완료 전환 시 결과 요약 1회 렌더.
+  if (prevCalState === 'running' && st !== 'running') {
+    if (st === 'done') await renderCalResult();
+    else $('cal-msg').textContent = `종료(${st})`;
+  }
+  prevCalState = st;
+
+  const plan = pollPlan(st);
+  if (calPollTimer) {
+    clearTimeout(calPollTimer);
+    calPollTimer = null;
+  }
+  if (plan.poll) calPollTimer = setTimeout(calPoll, plan.intervalMs);
+}
+
+async function renderCalResult() {
+  try {
+    const res = await fetch('/calibrate/result', { cache: 'no-store' });
+    if (!res.ok) return;
+    const art = await res.json();
+    const items = art.items ?? [];
+    const conv = items.filter((i) => i.centered && i.converged).length;
+    const unconv = items.filter((i) => !(i.centered && i.converged));
+    $('cal-msg').textContent = `완료 — 수렴 ${conv}/${items.length}`;
+    $('cal-summary').innerHTML = '';
+    for (const i of unconv.slice(0, 20)) {
+      const div = document.createElement('div');
+      div.className = 'adv-line';
+      div.textContent = `미수렴: ${i.slotId} (${i.camIdx}:${i.presetIdx})${i.reason ? ' — ' + i.reason : ''}`;
+      $('cal-summary').appendChild(div);
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
 // --- 분석(최종 셋업 산출물) --------------------------------------------
 let lastArtifact = null;
 
@@ -861,7 +930,7 @@ function setTab(tab) {
   $('panel').hidden = analyze;
   $('analyze-view').hidden = !analyze;
   $('precise-box').hidden = tab !== 'precise';
-  if (tab === 'precise') capPoll();
+  if (tab === 'precise') { capPoll(); calPoll(); }
   if (analyze) renderAnalysis();
 }
 
@@ -964,6 +1033,7 @@ function wire() {
   $('cap-start').addEventListener('click', capStart);
   $('cap-stop').addEventListener('click', capStop);
   $('cap-finalize').addEventListener('click', capFinalize);
+  $('cal-start').addEventListener('click', calStart);
   $('cap-result-close').addEventListener('click', () => {
     $('cap-result-modal').hidden = true;
   });

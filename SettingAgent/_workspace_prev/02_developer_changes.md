@@ -1,106 +1,113 @@
-# 02 · 구현 노트 — LLM 비전 기반 차량 바닥 점유 영역(floor ROI · 4점 사변형)
+# 02 구현 변경 노트 — 주차면(ROI) 편집 + 전역 인덱스 수동 매핑 + 프리셋3 진단
 
-작성: 구현자(developer) · 대상: SettingAgent · 분류: 기능 추가(가산 · 기존 계약 무영향)
-검증자(qa-tester)·문서화(documenter) 인계용. 설계서 `01_architect_plan.md` 11단계를 그대로 구현.
-
----
-
-## 0. 결과 요약
-
-- **typecheck**: `npm run typecheck` 통과(SettingAgent + @parkagent/types 둘 다).
-- **test**: `npm test` → **42 파일 / 278 테스트 통과**. 기존 248 + 신규 30 = 278. **기존 회귀 0**.
-- **라이브 서버 미기동**(마스터 수동 관리). 검증은 typecheck + vitest(브레인/카메라/스토어 모킹)로만.
-- floor ROI 는 **항상 존재**(LLM 실패·무효·프레임부재 외 모든 채택 슬롯). 폴백은 bbox 유도 결정형 사변형.
+작성: 구현자(developer) · 입력: `01_architect_plan.md` · 대상: SettingAgent(SettingViewer + 영속화 엔드포인트)
+원칙: ParkSimMgr(ESM·1-based·정규화 0~1·외과적·단순함 우선), 계약 불변, 기존 281 테스트 회귀 0.
 
 ---
 
-## 1. 신규 파일
+## 결과 요약
 
-| 파일 | 내용 |
-|------|------|
-| `SettingAgent/src/capture/floorRoi.ts` | 결정형 순수 모듈. `fallbackQuadFromRect`/`normalizeQuad`/`resolveFloorQuad`. 외부 의존 0. |
-| `SettingAgent/src/capture/FloorRoiReviewer.ts` | 체크포인트 cadence 로 채택 슬롯의 floor quad (재)계산·저장. LLM 비활성 no-op, 실패 폴백, maxPerCheckpoint 상한. |
-| `SettingAgent/config/prompts/floor_roi.system.md` | system 프롬프트(접지면 4점·순서 규약·JSON-only). |
-| `SettingAgent/config/prompts/floor_roi.user.md` | user 템플릿(`{{camIdx}}`/`{{presetIdx}}`/`{{vehicle}}`/`{{plate}}`). |
-| 테스트 5종 | `floorRoi.test.ts`(10) `floorRoiStore.test.ts`(3) `agentRuntimeFloor.test.ts`(3) `floorRoiReviewer.test.ts`(8) `finalizerFloor.test.ts`(2). |
+- **typecheck**: 통과(`npm run typecheck`, 에러 0).
+- **test**: 315 통과 = 기존 281 + 신규 34 (회귀 0). `npm test` 46 파일.
+- 계약(@parkagent/types, SetupArtifact shape)·GET 라우트·`/setup/*`·`/capture/*` 불변. 가산만.
 
-## 2. 수정 파일(가산)
+---
+
+## 단계별 변경
+
+### 단계 1 — #4 진단·보강
+- **순수 `diffArtifactVsCameras(artifact, cameras)`**(`web/core.js`): 산출물 presetKey 집합 ↔ 카메라 드롭다운 presetKey 집합 비교 → `{ artifactOnly, camerasOnly }`. `artifactOnly` = 산출물엔 있으나 드롭다운에 없어 **선택 불가(=미표시 원인)**.
+- **분석 탭 경고 렌더**(`web/app.js renderAnalysis`): `artifactOnly` 각 키를 "산출물에는 있으나 카메라 드롭다운에 없음 → 검수 탭에서 선택 불가(미표시)" 경고로 표시.
+- **검수 탭 빈 상태 안내**(`renderSlotList`): 현재 프리셋 key 에 슬롯 0개면 "이 프리셋에 주차면 없음 — 다른 프리셋 선택 또는 분석 탭 확인" 1줄.
+- **버그 수정(핵심)**: `sel-preset`·`sel-cam` change 핸들러에 **`drawRoiOverlay()` 호출 추가**. 기존엔 프리셋/카메라 전환 시 `renderSlotList()`만 호출하고 오버레이를 다시 그리지 않아, 프리셋3 선택 후에도 ROI 오버레이가 갱신되지 않을 수 있었음. `state.roiHidden` 가드는 유지(초기화/수집 중 비표시 보존). 전환 시 `state.selectedSlotId=null`(선택 해제)도 추가.
+
+### 단계 2 — #1 주차면 선택(히트테스트)
+- **순수 함수**(`web/core.js`): `pointInRect(nx,ny,rect)`(경계 포함), `pointInQuad(nx,ny,quad)`(ray casting), `hitTestSlots({nx,ny,slots,key,layers})` → 차량 rect 우선·floor quad 차선, 배열 끝(상단)이 우선, `layers.vehicle/floor=false` 시 해당 레이어 히트 제외(현재 그리는 것과 정합).
+- **app.js**: overlay `mousedown` → `eventToNorm`(오버레이 표시크기 기준, 히트테스트와 동일 분모) → `hitTestSlots` → `state.selectedSlotId`. 빈 곳 클릭 시 해제. 선택 슬롯은 `drawRoiOverlay`에서 굵은 대비색(빨강, lineWidth 4) 하이라이트 + 라벨. 슬롯 목록 클릭으로도 선택 가능(`.selected` 강조).
+
+### 단계 3 — #2 선택 슬롯 삭제(영속화)
+- **순수 함수**(`web/core.js`):
+  - `rebuildGlobalIndex(slots, presets)`: **coveredSlotIds 배열 순서를 position 진실**로 사용(설계 §positionIdx). slotId 의 sN 파싱 금지. 정렬 camIdx→presetIdx→coveredSlotIds 내 위치, `globalIdx=i+1`. coveredSlotIds 에 없는 slot 은 안전망으로 뒤에 부여.
+  - `removeSlot(artifact, slotId)`: slots·각 preset.coveredSlotIds 에서 제거 → `rebuildGlobalIndex` 재생성. createdAt 등 보존. 불변(새 artifact 반환).
+- **app.js**: "삭제" 버튼(선택 시 활성) → `removeSlot` → `state.mapping` 갱신(미저장) → `markDirty`. "저장"으로 PUT.
+
+### 단계 4 — #3 크기 조정(핸들 드래그)
+- **순수 함수**(`web/core.js`): `clamp01Rect`(x,y∈[0,1], w,h≥0.001, x+w≤1, y+h≤1), `resizeRect(rect, handle, ndx, ndy)`(nw/ne/sw/se 모서리 이동 + 좌우/상하 뒤집힘 정규화 + clamp01Rect), `updateSlotRoi(artifact, slotId, key, rect)`(해당 slot roiByPreset[key]만 교체, slot 집합·globalIndex 불변).
+- **app.js**: 선택 슬롯에 4모서리 핸들 렌더(`drawHandles`). overlay mousedown(핸들 히트 `hitTestHandle`) → window mousemove(정규화 델타 → `resizeRect` → `updateSlotRoi` 실시간 미리보기) → mouseup 확정 + `markDirty`.
+- **floor 사변형 편집은 1차 범위 제외**(확정 C). 사각형 ROI 편집만.
+
+### 단계 5 — 영속화 엔드포인트 `PUT /mapping`
+- **`src/api/server.ts`**(가산):
+  - zod `SetupArtifactSchema`(presets/slots/globalIndex/createdAt shape, warnings·report optional). NormalizedRect/Point/Quad·Preset·ParkingSlot·GlobalSlotIndex 스키마.
+  - 공유 핸들러 `saveMappingHandler(repo, body, reply)`: ① zod 검증 실패 → 400 `{error:'invalid artifact', detail}` ② `validateCoverage(globalIndex, slots)`(기존 GlobalIndexer 재사용) 불일치 → 400 `{error:'coverage mismatch', missing, extra}`(미저장) ③ 통과 → `repo.saveArtifact` + `{ok:true, slots, globalCount}`.
+  - 라우트: 헤드리스 `PUT /mapping`, 뷰어 블록 `PUT /viewer/api/mapping`(동일 핸들러). **GET /mapping·/viewer/api/mapping 불변**.
+- **app.js `saveMapping()`**: `PUT /viewer/api/mapping` → 성공 시 `loadMapping()` 재로드·선택 해제·메시지, 실패 시 명시적 에러(coverage mismatch 누락/초과 표시, 네트워크 분기).
+
+### 단계 6 — #7 전역 인덱스 수동 매핑
+- **순수 함수**(`web/core.js`): `validateManualIndex(globalIndex)` → `{ok, duplicates, gaps}`(1..N 연속·중복), `reorderGlobalIndex(artifact, orderedSlotIds)` → 지정 순서로 globalIdx 1..N 재부여, slots 집합과 1:1(누락/초과/중복 입력) 검증 실패 시 `null`. camIdx/presetIdx 는 기존 globalIndex 보존.
+- **분석 탭에 가산**(확정 A, 신규 탭 X): index.html "전역 인덱스 수동 매핑" 섹션(정합 상태 + 저장 버튼 + ▲▼ 재정렬 행). app.js `renderManualIndex`/`drawManualList`/`moveManual`/`saveManualIndex`(같은 PUT 재사용 → 저장 후 검수·분석 재동기화).
+
+---
+
+## PUT /mapping 명세
+
+| 항목 | 값 |
+|---|---|
+| 경로 | `PUT /mapping`(헤드리스), `PUT /viewer/api/mapping`(뷰어). 동일 로직 |
+| 본문 | 완전한 SetupArtifact JSON(`{presets, slots, globalIndex, createdAt, warnings?, report?}`) |
+| 200 | `{ ok:true, slots, globalCount }` + `repo.saveArtifact` 1회 |
+| 400(shape) | `{ error:'invalid artifact', detail }` — 미저장 |
+| 400(정합) | `{ error:'coverage mismatch', missing, extra }` — 미저장(파일 보호) |
+| 게이트 | `validateCoverage(globalIndex, slots)`(GlobalIndexer 재사용) |
+
+---
+
+## 순수 함수 목록(core.js — 전부 vitest 대상, DOM/fetch 미참조)
+
+`diffArtifactVsCameras`, `pointInRect`, `pointInQuad`, `hitTestSlots`, `rebuildGlobalIndex`, `removeSlot`, `clamp01Rect`, `resizeRect`, `updateSlotRoi`, `validateManualIndex`, `reorderGlobalIndex`.
+(타입 선언은 `web/core.d.ts` 가산 — `removeSlot/updateSlotRoi/reorderGlobalIndex` 는 제네릭 `T extends ArtifactLike` 로 입력 형태 보존.)
+
+---
+
+## #4 처리 결론
+
+설계 결론(데이터·키매칭 정상, 원인은 "프리셋3 네비게이션 불가" 가설)을 그대로 반영했다.
+- **진단**: `diffArtifactVsCameras` 로 산출물에만 있는 프리셋 키를 분석 탭 경고로 노출 + 검수 탭 빈 상태 안내.
+- **버그 수정**: 프리셋/카메라 전환 시 `drawRoiOverlay()` 미호출 가능성을 수정(change 핸들러에 호출 추가). 이로써 프리셋3 선택 시 ROI 가 즉시 다시 그려진다.
+- 라이브에서 `/cameras` 에 프리셋3가 실제 노출되는데도 미표시면 설계 가정이 틀린 것 → 리더 에스컬레이션(설계서 §리스크 5).
+
+---
+
+## 변경 파일 목록
 
 | 파일 | 변경 |
-|------|------|
-| `packages/types/src/index.ts` | `NormalizedPoint`/`NormalizedQuad`(고정 4-튜플) 신설, `ParkingSlot.floorRoiByPreset?` 가산. |
-| `SettingAgent/src/domain/types.ts` | 재수출에 `NormalizedPoint`/`NormalizedQuad` 추가. |
-| `SettingAgent/src/brain/SetupBrain.ts` | `FloorRoiInput`/`FloorRoiResultSchema`/`FloorRoiResult` + 인터페이스 옵셔널 `recognizeFloorRoi?`. |
-| `SettingAgent/src/brain/AgentRuntime.ts` | `recognizeFloorRoi` 구현(기존 `chatJson` + image_url 멀티모달 100% 재사용, 신규 HTTP 0). |
-| `SettingAgent/src/config/llmConfig.ts` | `FloorRoiSchema`(옵셔널) + `DEFAULT_LLM_CONFIG.floorRoi`(enabled=false) + merge 1줄. |
-| `SettingAgent/config/llm.config.json` | `floorRoi.enabled=true`(gemma 사용). maxPerCheckpoint=12. |
-| `SettingAgent/src/capture/SqliteStore.ts` | `floor_roi` 테이블(PK run_id+preset_key+cluster_id) + `upsertFloorRoi`/`getFloorRois`. |
-| `SettingAgent/src/capture/CaptureJob.ts` | `lastFrameByPreset` Map(start 시 clear, captureTarget 시 set) + `floorReviewer?` deps + checkpoint 끝 호출. |
-| `SettingAgent/src/capture/Finalizer.ts` | `getFloorRois`→`floorByRef` 맵→`assemble` 가산 인자→`slot.floorRoiByPreset` 세팅. |
-| `SettingAgent/src/index.ts` | `FloorRoiReviewer` 생성·`captureJob` 주입(`maxPerCheckpoint=llm.floorRoi?.maxPerCheckpoint`). |
-| `SettingAgent/web/core.js` | `toPixelQuad` 신설 + `analyzeArtifact` 에 `hasFloor`/`withFloor`. |
-| `SettingAgent/web/core.d.ts` | `NormalizedQuad`/`PixelPoint` 타입 + `toPixelQuad` 선언 + `ArtifactAnalysis` 에 withFloor/hasFloor. |
-| `SettingAgent/web/app.js` | `toPixelQuad` import, `drawRoiOverlay` floor 폴리곤(#39ff14), `roi-floor` 토글 리스너, 분석 '바닥 ROI' 카드. |
-| `SettingAgent/web/index.html` | `roi-floor` 체크박스(기본 checked). |
-| 테스트 3종 수정 | `config.test.ts`(+1) `analyzeArtifact.test.ts`(+2) `viewerCore.test.ts`(+1). |
+|---|---|
+| `web/core.js` | 순수 함수 11개 가산(#1~#4, #7) |
+| `web/core.d.ts` | 신규 함수 타입 선언 + `ArtifactLike`/`SlotLike`/`PresetLike`/`GlobalSlotIndexEntry` |
+| `web/app.js` | 선택·삭제·크기조정 결선, `saveMapping`, #7 UI, #4 drawRoiOverlay 수정, state.selectedSlotId |
+| `web/index.html` | 검수 탭 편집 바(선택정보/삭제/저장/메시지), 분석 탭 수동 매핑 섹션 |
+| `web/app.css` | 선택 슬롯·빈 상태·편집 바·수동 매핑 스타일(가산) |
+| `src/api/server.ts` | `SetupArtifactSchema`(zod), `saveMappingHandler`, `PUT /mapping`·`PUT /viewer/api/mapping`(가산) |
+| `test/roiEdit.test.ts` | 신규 — 히트테스트·resize·removeSlot·rebuildGlobalIndex·diff |
+| `test/manualIndex.test.ts` | 신규 — validateManualIndex/reorderGlobalIndex |
+| `test/mappingPut.test.ts` | 신규 — `app.inject` PUT 200/400(헤드리스·뷰어) |
+
+불변(미수정): `src/setup/GlobalIndexer.ts`, `src/store/Repository.ts`, `packages/types`, `src/domain/types.ts`, GET 라우트.
 
 ---
 
-## 3. 핵심 구현 노트
+## typecheck / test 결과
 
-### 3.1 좌표 규약(전 모듈 공유)
-순서 `[앞왼, 앞오, 뒤오, 뒤왼]`. 앞=이미지 하단/카메라 근접(y 큼), 뒤=상단(y 작음), 시계방향.
-- `normalizeQuad`: y 기준 하(앞)/상(뒤) 2점씩 분리 → 각 쌍 x 기준 좌/우. **LLM 이 순서를 틀려도 뷰어 폴리곤이 꼬이지 않음.**
-- 프롬프트(`floor_roi.system.md`)·`normalizeQuad`·뷰어 `toPixelQuad` 가 동일 규약. 테스트로 고정(`floorRoi.test.ts` 순서 정렬 케이스).
-
-### 3.2 폴백 로직(floor ROI 항상 존재)
-`resolveFloorQuad(llmQuad, vehicle) = normalizeQuad(llmQuad) ?? fallbackQuadFromRect(vehicle)`.
-- `fallbackQuadFromRect`: bbox 하단 35% 밴드를 footprint 근사, 윗변 좌우 inset 10%(원근 근사). 모든 점 0~1 클램프.
-- 무효 케이스(점≠4·NaN·undefined)는 `normalizeQuad`→null→폴백. **결정형이라 LLM 무관하게 항상 그럴듯한 사변형.**
-- 폴백 발동 지점: (a) FloorRoiReviewer 에서 LLM throw/null/무효, (b) maxPerCheckpoint 초과·프레임부재 슬롯은 이번 주기 skip(다음 주기 보유).
-
-### 3.3 LLM 단계(좌표 "생성")
-`AgentRuntime.recognizeFloorRoi`: `this.client` 없거나 `cfg.floorRoi?.enabled !== true` → null.
-- 전용 프롬프트 로드 → `renderTemplate`(vehicle/plate JSON) → `chatJson(system, user, FloorRoiResultSchema.parse, imageBase64)`.
-- 이미지가 `image_url`(data:image/jpeg;base64) 멀티모달로 전송됨을 테스트로 검증(`agentRuntimeFloor.test.ts` 가 mock 서버 body 검사).
-- **경계 일치**: 좌표 "생성"=LLM, "검증·강등·폴백"=결정형(floorRoi.ts). 기존 두뇌 규약(stage reviewer 는 좌표 불변)과 분리해 별 클래스(`FloorRoiReviewer`)로.
-
-### 3.4 저장(별 테이블 근거)
-`aggregated_slot` 은 `replaceAggregatedSlots` 가 run 단위 delete+insert(집계 멱등)라 floor quad 를 같은 행에 두면 소실 → **별 테이블 `floor_roi`**(IF NOT EXISTS, 마이그레이션 불필요). PK=(run_id, preset_key, cluster_id), upsert=ON CONFLICT DO UPDATE(중복 행 없음, 멱등).
-
-### 3.5 체크포인트 통합
-- `CaptureJob.lastFrameByPreset`: 프리셋별 최근 JPEG 보관(기존 `lastFrame` 1장 보존, 가산 1줄). `start()` 에서 clear.
-- `checkpoint()` 끝에 `floorReviewer.review(runId, slots, lastFrameByPreset)` 가산. **미주입 시 기존 동작 그대로**(옵셔널 deps).
-- 같은 cadence(`checkpointEvery`) 재사용 — 별도 주기 신설 없음.
-
-### 3.6 Finalizer 가산
-`getFloorRois(runId)` → `floorByRef: Map<presetKey#clusterId, quad>` → `assemble` 에서 `floorByRef.get(clusterRef(m))` 있으면 `slot.floorRoiByPreset = { [key]: quad }`. 없으면 키 미생성(옵셔널 보존). `roiByPreset`/`plateRoiByPreset` 불변.
-
-### 3.7 설정 머지 주의
-`DEFAULT_LLM_CONFIG.floorRoi` 가 항상 존재(enabled=false)하고 merge 가 `{...DEFAULT.floorRoi, ...raw.floorRoi}` 라 **로드 결과의 `cfg.floorRoi` 는 항상 정의됨**(런타임 안전). 스키마의 `.optional()` 은 config 객체를 코드로 직접 구성하는 경우(기존 agentRuntime.test.ts 의 cfg 리터럴 등) 하위호환용. → 설계서 §8 의 "미설정 시 undefined" 서술과 다르지만, **항상 정의되는 편이 `cfg.floorRoi.enabled` 접근에 더 안전**하여 이 방향으로 구현(아래 4. 설계 대비 차이 참고).
+```
+npm run typecheck  → 에러 0
+npm test           → 46 files, 315 tests passed (기존 281 + 신규 34, 회귀 0)
+```
 
 ---
 
-## 4. 설계 대비 차이(우회 아님 · 합리적 보강)
+## 미해결 / 실측 보정(검증자·문서화 인계)
 
-1. **`loadLlmConfig` 머지**: 설계 §8 검증 문구는 "floorRoi 미설정 → undefined" 였으나, DEFAULT 에 floorRoi 를 두고 항상 머지하도록 구현(런타임 `cfg.floorRoi.enabled` 접근 안전). 스키마는 여전히 `.optional()` 이라 외부에서 floorRoi 없는 config 리터럴도 파싱 가능(기존 테스트 cfg 무수정 통과 확인). 기능·계약 영향 없음.
-2. 그 외 11단계 전부 설계서 그대로. 계획 충돌·기존 코드 막힘 없음.
-
----
-
-## 5. 미해결 / 실측 보정 필요
-
-- **gemma4:12b 좌표 정확도**: 사변형 정밀도·순서 정확도는 **실 LLM 호출로만** 검증 가능(vitest 는 mock). `normalizeQuad`(순서 강제·클램프) + 폴백으로 안전망은 갖췄으나, 실측에서 quad 가 차체(지붕) 윤곽을 찍는 경향이면 프롬프트(접지면 강조 문구) 튜닝 필요. → 마스터 라이브 수집 후 뷰어 폴리곤(#39ff14)으로 육안 확인 권장.
-- **confidence 임계 폴백**: 1차 미적용(유효 quad 면 채택). 실측에서 저신뢰 quad 가 잦으면 `confidence < 임계 → 폴백` 후속 가산 가능(설계 §13-C).
-- **프리셋별 프레임 메모리**: `lastFrameByPreset` = 프리셋 수 × JPEG. 현재 규모(수십 프리셋, 수 MB) 허용. 수백 프리셋이면 재검토.
-
----
-
-## 6. 검증자(qa-tester) 인계 포인트
-
-- 회귀 기준: **기존 248 회귀 0**(현재 278 통과). 신규 테스트가 floor 경로(순수·store·runtime·reviewer·finalizer·뷰어)를 커버.
-- 교차 확인 권장:
-  - `FloorRoiReviewer` → `SqliteStore.upsertFloorRoi` → `Finalizer.getFloorRois` → `ParkingSlot.floorRoiByPreset` 의 quad shape 일관성(8실수, 순서 규약).
-  - 뷰어 `toPixelQuad` 출력이 `drawRoiOverlay` 폴리곤 순회와 일치(closePath 폐곡선).
-  - `analyzeArtifact.totals.withFloor` 카운트 = floorRoiByPreset 보유 슬롯 수.
-- 동작 확인(육안): `roi-floor` 토글 on/off 시 연두 폴리곤 표시/숨김, 분석 탭 '바닥 ROI' 카드 수치.
+- **브라우저 캔버스 상호작용은 수동 확인 필요**: 클릭 선택 하이라이트, 모서리 핸들 드래그 리사이즈, 삭제/저장 후 재로드, #7 ▲▼ 재정렬은 vitest 비대상(환경 의존). 순수 로직은 단위 테스트로 차단했으나 실제 마우스/캔버스 동작은 라이브 뷰어 수동 검증 권장.
+- **#4 라이브 확인**: `/cameras` 응답에 프리셋3 노출 여부 실측은 라이브 필요. 미표시 재현 시 위 진단 경고로 1차 구분, 그래도 노출되는데 미표시면 리더 에스컬레이션.
+- **동시성**: 편집 미저장 중 `/capture/finalize` 가 artifact 를 덮으면 편집 유실 가능(설계 §리스크 1). 1차는 저장 성공 시 `loadMapping` 재동기화로 단순 처리(finalize 잠금 미구현 — 과설계 보류).
+- **저장 경로**: 명시적 "저장" 버튼 모델(확정 B). 자동저장 아님.

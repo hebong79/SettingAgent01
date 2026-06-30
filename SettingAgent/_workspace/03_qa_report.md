@@ -1,94 +1,111 @@
-# 03 검증 리포트 — 주차면(ROI) 편집 + 전역 인덱스 수동 매핑 + 프리셋3 진단/수정
+# 03 검증 리포트 — 주차면별 번호판 중심정렬·줌 PTZ 캘리브레이션 → `slot_ptz.json`
 
-검증자(qa-tester) · 입력: `02_developer_changes.md`, `01_architect_plan.md`, 변경 소스 + 설계 §5/§6
-판정: **통과(PASS) — 재작업 불필요.** 회귀 0, 신규 34 전부 통과, PUT 정합·#4·계약 검증 통과.
-
----
-
-## 1. 전체 테스트 결과(수치 그대로)
-
-| 항목 | 결과 |
-|---|---|
-| `node --check web/app.js web/core.js` | `NODE_CHECK_OK` (구문 오류 0) |
-| `npm run typecheck` (tsc --noEmit) | 에러 0 |
-| `npm test` | **46 files, 315 tests passed** (기존 281 + 신규 34, **회귀 0**) |
-| 신규 3파일(`roiEdit`·`manualIndex`·`mappingPut`) 단독 | 3 files, **34 tests passed** |
-
-신규 34 = roiEdit 22 + manualIndex 7(파일 표기) + mappingPut 5. (developer 노트의 "34" 수치 일치.)
+작성: 검증자(qa-tester) · 대상: 구현자(developer)·문서화(documenter)
+근거: `_workspace/01_architect_plan.md` + `_workspace/02_developer_changes.md` + 실측 코드/테스트 실행.
 
 ---
 
-## 2. 순수함수 정확성(core.js — 단위 테스트 + 추가 엣지 직접 검증)
+## 0. 결론
 
-기존 테스트(roiEdit/manualIndex)에 더해 **미커버 엣지 10건을 직접 실행**(전부 통과)하여 교차 확인:
+- **typecheck**: `tsc -p tsconfig.json --noEmit` **무오류**.
+- **test**: `npm test` → **55 파일 / 372 테스트 전부 통과, 실패 0, 회귀 0**.
+- **★ 명령추적·순서·폴백·라우트·계약 전부 검증 통과.**
+- **재작업 필요 없음.** 발견된 구현 결함 없음. 테스트 작성 결함 없음(통과 위장 없음).
 
-- `pointInRect`/`pointInQuad`: 내부·경계·외부·null 방어 ✔. ray casting quad 내부/외부 ✔.
-- `hitTestSlots`: 단일/겹침(배열 끝=상단 우선)/빈곳 null/`layers.vehicle=false` 제외/floor quad 차선 ✔. **추가 검증**: 한 slot 에 rect+floor 동시 존재 시 1회 hit, `layers.floor=false` 시 rect 밖 floor 영역 제외 ✔ — **그리는 순서·레이어 토글과 정합**.
-- `rebuildGlobalIndex`: cam→preset→coveredSlotIds 위치 순 1..N ✔. **slotId sN 파싱 안 함**(`['b','a']` 순서 그대로) ✔. **추가 검증**: coveredSlotIds 에 없는 orphan slot 안전망으로 뒤에 부여(globalIdx 연속) ✔.
-- `removeSlot`: 삭제 후 `validateCoverage.ok`, globalIdx 연속, 해당 preset.coveredSlotIds 에서 제거, 타 슬롯 ROI 불변, 원본 불변(불변 갱신) ✔. **추가 검증**: 멀티 카메라(cam1·cam2)에서 cam 정렬 보존 ✔.
-- `clamp01Rect`/`resizeRect`/`updateSlotRoi`: se +δ 증가, 1 초과 클램프, 음수폭 붕괴 방지·좌우 뒤집힘 정규화, 음수좌표→0 ✔. **추가 검증**: nw 핸들이 우하단 고정(좌상단만 이동), updateSlotRoi 새 key 추가 시 기존 key 보존·globalIndex 동일 참조 유지 ✔.
-- `validateManualIndex`: ok / 중복(duplicates+gaps) / gap 감지 ✔. **추가 검증**: 빈 배열 → ok ✔.
-- `reorderGlobalIndex`: 정상 재정렬(coverage ok·순서 반영), 누락/미존재/중복 입력 → null ✔. **추가 검증**: camIdx/presetIdx 기존 globalIndex 에서 보존 ✔.
-- `diffArtifactVsCameras`: artifact 1:3 보유 + cameras 1:1,1:2 → `artifactOnly:['1:3']`, 빈 입력 방어, camerasOnly 산출 ✔.
-
-**판정: 순수함수 11개 전부 설계 규약대로 동작.**
+베이스라인 확인: 전체 372 − 신규 41 = **331 = 기존 베이스라인**. (구현 노트 "330 + config +1" 과 일치 — config 가산 1건이 기존 config.test.ts 파일에 들어가 기존 카운트에 포함됨. 설계서의 "331" 은 신규 41 제외한 실측 기존치와 정확히 일치.)
 
 ---
 
-## 3. PUT 영속화 정합(핵심) — `app.inject`
+## 1. 테스트 실행 결과(수치 그대로)
 
-mappingPut.test.ts(5) + **검증자 추가 inject 테스트 3건**(extra·zod·GET404, 실행 후 정리)로 경계 전수 확인:
+### 전체
+```
+Test Files  55 passed (55)
+     Tests  372 passed (372)
+  Duration  2.92s
+```
 
-| 시나리오 | 기대 | 결과 |
-|---|---|---|
-| 유효 SetupArtifact → PUT /mapping | 200 `{ok:true,slots,globalCount}` + `repo.saveArtifact` 1회 | ✔ |
-| 유효 → PUT /viewer/api/mapping(동일 핸들러) | 200 + saveArtifact 호출 | ✔ |
-| coverage **missing**(slots 에 있고 globalIndex 에 없음) | 400 `coverage mismatch` `missing:['b']` + **미저장** | ✔ |
-| coverage **extra**(globalIndex 에 잉여 slotId) | 400 `coverage mismatch` `extra:['ghost']` + 미저장 | ✔(추가검증) |
-| globalIndex=[] (전부 누락) | 400 `missing:['a']` + 미저장 | ✔ |
-| zod shape 위반(`presets:'nope'`) | 400 `invalid artifact` + 미저장 | ✔ |
-| zod shape 위반(roiByPreset rect 필드 누락 `{x,y,w}`) | 400 `invalid artifact` + 미저장 | ✔(추가검증) |
-| GET /mapping (artifact 없음) | 404 불변 | ✔(추가검증) |
-
-게이트 순서 = ① zod → ② `validateCoverage`(기존 GlobalIndexer 재사용) → ③ saveArtifact. **정합 불일치 시 파일 보호(미저장) 동작 확인.** GET /mapping·/viewer/api/mapping 읽기 직접 반환·404 보존(코드+테스트 확인).
-
----
-
-## 4. #4(프리셋3 진단/수정) — 코드 확인(라이브 불가)
-
-- `sel-cam`·`sel-preset` change 핸들러에 **`drawRoiOverlay()` 호출 추가** 확인(app.js L937·L945, grep). 전환 시 `state.selectedSlotId=null`(선택 해제)도 추가됨.
-- `drawRoiOverlay`: `state.roiHidden` 가드 보존(L162), key=`presetKey(cam,preset)` 로 `slot.roiByPreset[key]` 조회 — 설계 진단(키매칭 정상)과 정합.
-- `diffArtifactVsCameras` → 분석 탭 경고(artifactOnly = 드롭다운에 없어 선택 불가) / 검수 탭 빈 상태 안내 결선 확인.
-- **미커버**: `/cameras` 에 프리셋3 실제 노출 여부는 라이브 필요(설계서 §리스크5). 코드상 진단·재그리기는 정상.
+### 신규 5 파일(41 테스트)
+```
+test/controlMath.test.ts          16 tests  ✓
+test/slotPtzWriter.test.ts         4 tests  ✓
+test/ptzCalibrator.test.ts        10 tests  ✓
+test/calibrateRoutes.test.ts       8 tests  ✓
+test/agentRuntimeCentering.test.ts 3 tests  ✓
+                                  ──────────
+                                  41 passed
+```
+(구현 노트의 "+42" 는 config.test.ts 가산 1건 포함. 신규 *파일* 합은 41. 둘 다 정합.)
 
 ---
 
-## 5. 계약·기존기능 불변(영향도)
+## 2. 검증 항목별 결과
 
-- **GlobalIndexer.ts·Repository.ts: diff 0**(불변, 재사용). 계약 게이트는 기존 `validateCoverage` 그대로.
-- **SetupArtifact shape 불변**: PUT 핸들러는 같은 형식 갱신만. zod 스키마는 계약과 동형(필드 추가 없음). `src/domain/types.ts` 의 `NormalizedPoint`/`NormalizedQuad` 재수출은 **선행 floorRoi 작업** 소산이며 본 ROI-편집 과제와 무관(SetupArtifact 필드 불변).
-- floor 채움(직전 변경) 보존: `drawRoiOverlay` 의 floor `fill('rgba(57,255,20,0.22)')` 유지(L193-194). roiHidden/표시초기화 가드 보존.
-- GET 라우트·`/setup/*`·`/capture/*` 무수정(가산만). 캡처/recognizeFloorRoi 경로 무영향(테스트 회귀 0 으로 확인).
-- 오버레이 편집 결선: 히트테스트·리사이즈 모두 `eventToNorm` 동일 분모 사용(설계 §리스크2 — 좌표 일관성 확보), 레이어 토글이 hit-test 와 draw 양쪽에 반영.
+### 2.1 제어수학(순수, controlMath.test.ts) — 통과
+- `plateCenterError`: 정중앙→0, 우하단→errX·errY 양수. ✓
+- `pickNearestPlate`: 다수 중 prior 최근접 선택·빈 배열 null. ✓
+- `estimateGain`: probe 전후 변위로 **부호 포함** 게인(pan +2°/errX +0.1→+20, tilt +1°/errY −0.05→**−20** 부호 반영), 분모≈0→fallback(20/15). ✓
+- `panTiltCorrection`: `newPan = cur − errX*gain` 부호·`±maxStepDeg` 클램프(−10→−5). ✓
+- `zoomCorrection`: 폭>목표 축소·폭<목표 확대·**clamp 1~36**·plateWidth≈0 방어(현재 zoom 반환). ✓
+- `isCentered`/`isWidthConverged`: tol 경계(=tol 포함, +ε 초과 false). ✓
+- `dampGain`: 절반 감쇠. ✓
+- `buildSlotPtzJson`: createdAt·items 스키마 조립. ✓
+- `expandPlateTargets`(slotPtzWriter.test.ts): plateRoi 보유 슬롯만·다중 프리셋 키마다 1항목·미보유 제외·globalIdx 역참조(없으면 null)·**실 setup_artifact.json → 26 항목**. ✓
+
+### 2.2 ★ PTZ 명령값 추적(핵심) — 통과
+모킹 모델이 규약을 정확히 재현·강제한다:
+- 모킹 `camera.requestImage` 는 응답 PTZ 를 **항상 `pan:0,tilt:0,zoom:1`(echo)** 로 반환.
+- 모킹 LPD 는 응답 echo 가 아니라 **명령 PTZ**(ptzCalibrator: `moves[]` 의 마지막 명령값 / calibrateRoutes: jpg 페이로드에 실린 명령값)로 번호판 위치·폭을 생성.
+- **검증 논리**: 만약 구현이 응답 PTZ(0/0/1)로 상태를 재동기화했다면, 명령을 아무리 줘도 화면은 항상 초기(우하단 0.7/0.8·폭 0.05)로 고정 → **영원히 수렴 불가**. 그러나 happy-path 가 `centered:true·converged:true·plateWidth≈0.2` 로 수렴 → 구현이 **명령값(commanded)만 추적**함을 역으로 증명. ✓
+- `calibrateSlot` 소스 확인: 상태 `ptz` 는 내가 명령한 값으로만 갱신, `captureAndDetect` 가 `requestImage(cam,preset,ptz)` 로 명령 override 전달, 응답 객체의 `pan/tilt/zoom` 미참조. 게인은 `probeGain`→`estimateGain`(명령 도 변화↔관측 변위). ✓
+
+### 2.3 순서(pan/tilt 중심 → zoom) — 통과
+`ptzCalibrator.test.ts "순서(중심→줌)"`: 첫 `zoom≠1` 명령 인덱스가 마지막 pan/tilt 변화 인덱스보다 **뒤**여야 함을 move 시퀀스로 단언. `firstZoomChange>0 && lastPanTiltChange < firstZoomChange`. ✓
+소스 확인: zoom 루프(B)는 중심정렬 루프(A) 완료 후 진입. zoom 루프 내 드리프트 재중심은 1회 한정. ✓
+
+### 2.4 하이브리드/폴백 — 통과
+- `brain=undefined` → 결정형만으로 수렴(centered true). ✓
+- `llmAdvise=true` + `adviseCentering=()=>null` → 결정형 폴백 수렴. ✓
+- `adviseCentering occluded=true` → 스킵 `reason:'occluded'`. ✓
+- `agentRuntimeCentering.test.ts`: 정상 JSON→파싱(멀티모달 `image_url`·`data:image/jpeg;base64,` 전송 확인)·잘못된 JSON→재시도 후 null·`llm.enabled=false`→null. ✓
+- `applyCenterAdvice`/`applyZoomAdvice` 소스: 자문 제안을 `±maxStepDeg`·zoomFactor `0.5~2.0` 결정형 클램프 후 적용, 없으면 비례제어/zoom 공식. ✓
+
+### 2.5 잡/라우트(calibrateRoutes.test.ts, app.inject) — 통과
+- `POST /calibrate/ptz`: 정상 200 `{ok,started,total}`·**중복 409**(영원히 보류 sleep 으로 running 유지)·zod 비배열 slotIds **400**. ✓
+- `GET /calibrate/status`: `{state,done,total}` shape. ✓
+- `GET /calibrate/result`: 없음 **404**·완료 후 200 `{createdAt,items}`·outFile 직접 존재 시 200. ✓
+- **가산 보장**: calibrator 미주입 시 `/calibrate/status` **404** + `/setup/status` 200(기존 라우트 무영향). ✓
+- writer 가 별도 outFile(임시 디렉터리)에 기록 → setup_artifact 미오염. ✓
+
+### 2.6 계약 불변 — 통과
+- 소스 diff: `server.ts(+12)·toolsConfig.ts(+34)·AgentRuntime.ts(+19)·SetupBrain.ts(+25)·index.ts(+5)` = **95 삽입 / 0 삭제(전부 가산)**. ✓
+- `/calibrate/*` 등록은 `deps.calibrator && deps.calibrate` 주입 시에만 → 기존 `/setup`·`/capture`·`/mapping`·뷰어 라우트 불변. ✓
+- 캘리브레이션 코드는 `repo.loadArtifact()`(읽기 전용)만 호출. `saveArtifact` 미호출 — setup_artifact·@parkagent/types 무변경, `slot_ptz.json` 별도 파일. ✓
+- `clampZoom` 보존: `zoomCorrection`·`applyZoomAdvice` 가 `camera.clampZoom`(1~36) 경유. ✓
+- 기존 50개 파일 / 331 테스트 회귀 0. ✓
 
 ---
 
-## 6. 발견 결함 / 수정
+## 3. 발견 결함 / 수정
 
-- **발견 결함: 없음.** 모든 단위·inject·엣지 검증 통과. 테스트 느슨화/통과 위장 없음.
-- 검증 중 작성한 임시 inject 테스트(extra/zod/GET404)는 확인 후 삭제 — 저장소 오염 없음.
-
----
-
-## 7. 미커버(명시)
-
-- **브라우저 캔버스 상호작용**(vitest 비대상, 환경 의존): 마우스 클릭 선택 하이라이트, 4모서리 핸들 드래그 리사이즈 실시간 미리보기, 삭제/저장 버튼 후 재로드, #7 ▲▼ 재정렬 UI. → 순수 로직은 단위로 차단했으나 실제 마우스/캔버스 동작은 **라이브 뷰어 수동 검증 권장**.
-- **#4 라이브**: `/cameras` 응답에 프리셋3 실노출 여부 실측(라이브 필요). 미표시 재현 시 진단 경고로 1차 구분, 그래도 미표시면 리더 에스컬레이션.
-- **동시성**: 편집 미저장 중 `/capture/finalize` 덮어쓰기 유실(설계 §리스크1) — 1차 보류(과설계 회피). finalize 잠금 미구현은 설계 결정.
-- 라이브 서버 기동: 본 검증 범위 제외(지시대로 미기동).
+- **구현 결함: 없음.** 모든 검증 항목 통과.
+- **테스트 작성 결함: 없음.** 직접 수정한 테스트 없음.
+- 참고(결함 아님): `data/setup_artifact.json` 이 git 상 수정 상태이나, 이는 **이전 capture 커밋의 산출물**(작업 시작 스냅샷에 이미 존재)이며 본 캘리브레이션 작업과 무관. 캘리브레이션은 이 파일을 읽기만 함(2.6 검증).
+- 참고(설계 대비 차이, 정당): `estimateGain` 시그니처가 설계 표의 3인자 대신 **4번째 `fallback` 인자**를 받음 — fallback 게인을 설정에서 주입하는 합리적 구현(controlMath 순수성 유지). 설계 의도(분모≈0→fallback) 충족, 테스트로 검증됨.
 
 ---
 
-## 최종 판정
+## 4. 미커버 / 라이브 의존(본 단계 범위 외 — 명시)
 
-**PASS — 재작업 불필요.** typecheck 0 / 315 tests passed(회귀 0) / 신규 34 / PUT 정합(missing·extra·zod·미저장·GET404) 전수 통과 / #4 코드 수정·진단 결선 확인 / 계약·기존기능 불변 확인. 잔여는 전부 환경 의존(브라우저·라이브) 수동 항목으로 명시.
+모킹 검증의 한계로 **다음은 검증되지 않음**(삭제·통과 위장 없이 누락 명시):
+
+1. **시뮬 실측 게인(미해결 D)**: pan↔X·tilt↔Y 실제 부호·스케일은 시뮬 라이브에서 probe 응답이 명령 PTZ 와 다른 화면을 실제로 보여줄 때만 검증 가능. 모킹은 규약·수렴 로직만 검증. **시뮬 라이브에서 probe 변위 관측 여부** 확인 필요.
+2. **gemma 자문 신뢰도**: `adviseCentering` 실 LLM 응답 품질은 실 모델 호출 필요. 본 단계는 fake OpenAI 호환 서버로 파싱·클램프·폴백 경로만 검증.
+3. **실 PTZ 단위(미해결 B)**: 본 기능은 시뮬 도(°) 단위 한정. 실 PTZ 매핑 미검증.
+4. **브라우저 UI**: `web/{app.js(+72),index.html(+17)}` 캘리브레이션 버튼·폴링·결과 렌더는 정적 추가만 확인. 실제 브라우저 동작은 미검증(헤드리스 라우트 계약만 app.inject 로 검증).
+
+---
+
+## 5. 최종 판정
+
+**합격.** 372/372 통과, 회귀 0, typecheck 무오류. ★명령추적·순서·폴백·라우트·계약 전부 검증. 재작업 불요. 라이브 의존 4건만 후속 스모크 대상으로 인계.

@@ -14,6 +14,8 @@ import type { CaptureJob } from '../capture/CaptureJob.js';
 import type { Finalizer } from '../capture/Finalizer.js';
 import type { SqliteStore } from '../capture/SqliteStore.js';
 import { registerCaptureRoutes } from './captureRoutes.js';
+import { registerCalibrateRoutes } from './calibrateRoutes.js';
+import type { PtzCalibrator } from '../calibrate/PtzCalibrator.js';
 import { registerViewerRoutes } from '../viewer/routes.js';
 import type { CameraSource } from '../viewer/CameraSource.js';
 import { validateCoverage } from '../setup/GlobalIndexer.js';
@@ -109,6 +111,10 @@ export interface ApiDeps {
   sqlite?: SqliteStore;
   /** capture 라우트 설정·targets 로딩용. */
   capture?: ToolsConfig['capture'];
+  /** 주차면별 번호판 중심정렬·줌 PTZ 캘리브레이션 잡(/calibrate/*). 미주입 시 미등록(가산). */
+  calibrator?: PtzCalibrator;
+  /** calibrate 설정(outFile=GET /calibrate/result 경로). */
+  calibrate?: ToolsConfig['calibrate'];
   /** 웹 뷰어 설정. enabled=true && sources 주입 시에만 뷰어 라우트·정적 등록(헤드리스 보존). */
   viewer?: ToolsConfig['viewer'];
   /** 카메라 소스 레지스트리(뷰어 카메라 라우트용). */
@@ -259,7 +265,13 @@ export function buildServer(deps: ApiDeps): FastifyInstance {
       store: deps.sqlite,
       cfg: deps.capture,
       mapFiles: deps.mapFiles,
+      presetProvider: deps.presetProvider,
     });
+  }
+
+  // 주차면별 번호판 중심정렬·줌 PTZ 캘리브레이션(/calibrate/*). 의존성 주입 시에만 등록(가산).
+  if (deps.calibrator && deps.calibrate) {
+    registerCalibrateRoutes(app, { calibrator: deps.calibrator, outFile: deps.calibrate.outFile });
   }
 
   // 웹 뷰어 통합(SettingViewer). viewer.enabled && sources 주입 시에만 등록(헤드리스 보존, 가산).

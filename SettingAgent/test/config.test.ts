@@ -32,6 +32,18 @@ describe('config 분리', () => {
     expect(() => loadLlmConfig()).not.toThrow();
   });
 
+  it('calibrate: 기본값 + 부분 병합(누락 키는 DEFAULT 보강)', () => {
+    // 미설정 경로 → DEFAULT 의 calibrate.
+    const def = loadToolsConfig('config/__nope__.json');
+    expect(def.calibrate.targetPlateWidth).toBe(0.2);
+    expect(def.calibrate.outFile).toBe('data/slot_ptz.json');
+    expect(def.calibrate.llmAdvise).toBe(true);
+    // 실제 config/tools.config.json → calibrate 섹션 파싱.
+    const real = loadToolsConfig();
+    expect(real.calibrate.centerTol).toBeGreaterThan(0);
+    expect(real.calibrate.maxIterations).toBe(15);
+  });
+
   it('floorRoi: 기본값은 비활성(하위호환), 실제 config 는 활성', () => {
     // 미설정 경로 → DEFAULT 의 floorRoi(enabled=false).
     const def = loadLlmConfig('config/__nope__.json');

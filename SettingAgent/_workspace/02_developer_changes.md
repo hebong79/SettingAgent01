@@ -1,113 +1,142 @@
-# 02 구현 변경 노트 — 주차면(ROI) 편집 + 전역 인덱스 수동 매핑 + 프리셋3 진단
+# 02 구현 노트 — 주차면별 번호판 중심정렬·줌 PTZ 캘리브레이션 → `slot_ptz.json`
 
-작성: 구현자(developer) · 입력: `01_architect_plan.md` · 대상: SettingAgent(SettingViewer + 영속화 엔드포인트)
-원칙: ParkSimMgr(ESM·1-based·정규화 0~1·외과적·단순함 우선), 계약 불변, 기존 281 테스트 회귀 0.
-
----
-
-## 결과 요약
-
-- **typecheck**: 통과(`npm run typecheck`, 에러 0).
-- **test**: 315 통과 = 기존 281 + 신규 34 (회귀 0). `npm test` 46 파일.
-- 계약(@parkagent/types, SetupArtifact shape)·GET 라우트·`/setup/*`·`/capture/*` 불변. 가산만.
+작성: 구현자(developer) · 대상: 검증자(qa-tester)·문서화(documenter)
+근거: `_workspace/01_architect_plan.md` 단계 ①~⑦ + 마스터 확정 결정(A/C·★ PTZ 명령추적).
 
 ---
 
-## 단계별 변경
+## 0. 결과 요약
 
-### 단계 1 — #4 진단·보강
-- **순수 `diffArtifactVsCameras(artifact, cameras)`**(`web/core.js`): 산출물 presetKey 집합 ↔ 카메라 드롭다운 presetKey 집합 비교 → `{ artifactOnly, camerasOnly }`. `artifactOnly` = 산출물엔 있으나 드롭다운에 없어 **선택 불가(=미표시 원인)**.
-- **분석 탭 경고 렌더**(`web/app.js renderAnalysis`): `artifactOnly` 각 키를 "산출물에는 있으나 카메라 드롭다운에 없음 → 검수 탭에서 선택 불가(미표시)" 경고로 표시.
-- **검수 탭 빈 상태 안내**(`renderSlotList`): 현재 프리셋 key 에 슬롯 0개면 "이 프리셋에 주차면 없음 — 다른 프리셋 선택 또는 분석 탭 확인" 1줄.
-- **버그 수정(핵심)**: `sel-preset`·`sel-cam` change 핸들러에 **`drawRoiOverlay()` 호출 추가**. 기존엔 프리셋/카메라 전환 시 `renderSlotList()`만 호출하고 오버레이를 다시 그리지 않아, 프리셋3 선택 후에도 ROI 오버레이가 갱신되지 않을 수 있었음. `state.roiHidden` 가드는 유지(초기화/수집 중 비표시 보존). 전환 시 `state.selectedSlotId=null`(선택 해제)도 추가.
-
-### 단계 2 — #1 주차면 선택(히트테스트)
-- **순수 함수**(`web/core.js`): `pointInRect(nx,ny,rect)`(경계 포함), `pointInQuad(nx,ny,quad)`(ray casting), `hitTestSlots({nx,ny,slots,key,layers})` → 차량 rect 우선·floor quad 차선, 배열 끝(상단)이 우선, `layers.vehicle/floor=false` 시 해당 레이어 히트 제외(현재 그리는 것과 정합).
-- **app.js**: overlay `mousedown` → `eventToNorm`(오버레이 표시크기 기준, 히트테스트와 동일 분모) → `hitTestSlots` → `state.selectedSlotId`. 빈 곳 클릭 시 해제. 선택 슬롯은 `drawRoiOverlay`에서 굵은 대비색(빨강, lineWidth 4) 하이라이트 + 라벨. 슬롯 목록 클릭으로도 선택 가능(`.selected` 강조).
-
-### 단계 3 — #2 선택 슬롯 삭제(영속화)
-- **순수 함수**(`web/core.js`):
-  - `rebuildGlobalIndex(slots, presets)`: **coveredSlotIds 배열 순서를 position 진실**로 사용(설계 §positionIdx). slotId 의 sN 파싱 금지. 정렬 camIdx→presetIdx→coveredSlotIds 내 위치, `globalIdx=i+1`. coveredSlotIds 에 없는 slot 은 안전망으로 뒤에 부여.
-  - `removeSlot(artifact, slotId)`: slots·각 preset.coveredSlotIds 에서 제거 → `rebuildGlobalIndex` 재생성. createdAt 등 보존. 불변(새 artifact 반환).
-- **app.js**: "삭제" 버튼(선택 시 활성) → `removeSlot` → `state.mapping` 갱신(미저장) → `markDirty`. "저장"으로 PUT.
-
-### 단계 4 — #3 크기 조정(핸들 드래그)
-- **순수 함수**(`web/core.js`): `clamp01Rect`(x,y∈[0,1], w,h≥0.001, x+w≤1, y+h≤1), `resizeRect(rect, handle, ndx, ndy)`(nw/ne/sw/se 모서리 이동 + 좌우/상하 뒤집힘 정규화 + clamp01Rect), `updateSlotRoi(artifact, slotId, key, rect)`(해당 slot roiByPreset[key]만 교체, slot 집합·globalIndex 불변).
-- **app.js**: 선택 슬롯에 4모서리 핸들 렌더(`drawHandles`). overlay mousedown(핸들 히트 `hitTestHandle`) → window mousemove(정규화 델타 → `resizeRect` → `updateSlotRoi` 실시간 미리보기) → mouseup 확정 + `markDirty`.
-- **floor 사변형 편집은 1차 범위 제외**(확정 C). 사각형 ROI 편집만.
-
-### 단계 5 — 영속화 엔드포인트 `PUT /mapping`
-- **`src/api/server.ts`**(가산):
-  - zod `SetupArtifactSchema`(presets/slots/globalIndex/createdAt shape, warnings·report optional). NormalizedRect/Point/Quad·Preset·ParkingSlot·GlobalSlotIndex 스키마.
-  - 공유 핸들러 `saveMappingHandler(repo, body, reply)`: ① zod 검증 실패 → 400 `{error:'invalid artifact', detail}` ② `validateCoverage(globalIndex, slots)`(기존 GlobalIndexer 재사용) 불일치 → 400 `{error:'coverage mismatch', missing, extra}`(미저장) ③ 통과 → `repo.saveArtifact` + `{ok:true, slots, globalCount}`.
-  - 라우트: 헤드리스 `PUT /mapping`, 뷰어 블록 `PUT /viewer/api/mapping`(동일 핸들러). **GET /mapping·/viewer/api/mapping 불변**.
-- **app.js `saveMapping()`**: `PUT /viewer/api/mapping` → 성공 시 `loadMapping()` 재로드·선택 해제·메시지, 실패 시 명시적 에러(coverage mismatch 누락/초과 표시, 네트워크 분기).
-
-### 단계 6 — #7 전역 인덱스 수동 매핑
-- **순수 함수**(`web/core.js`): `validateManualIndex(globalIndex)` → `{ok, duplicates, gaps}`(1..N 연속·중복), `reorderGlobalIndex(artifact, orderedSlotIds)` → 지정 순서로 globalIdx 1..N 재부여, slots 집합과 1:1(누락/초과/중복 입력) 검증 실패 시 `null`. camIdx/presetIdx 는 기존 globalIndex 보존.
-- **분석 탭에 가산**(확정 A, 신규 탭 X): index.html "전역 인덱스 수동 매핑" 섹션(정합 상태 + 저장 버튼 + ▲▼ 재정렬 행). app.js `renderManualIndex`/`drawManualList`/`moveManual`/`saveManualIndex`(같은 PUT 재사용 → 저장 후 검수·분석 재동기화).
+- **typecheck**: `tsc -p tsconfig.json --noEmit` 무오류.
+- **test**: `npm test` → **55 파일 / 372 테스트 전부 통과**. 기존 **50 파일 / 330 테스트 회귀 0**(설계서의 "331"은 실측 베이스라인 330 — 기준선 차이는 기존 테스트 수일 뿐 회귀 아님).
+- 신규 테스트 5 파일 / +42: `controlMath`(16)·`slotPtzWriter`(4)·`ptzCalibrator`(10)·`calibrateRoutes`(8)·`agentRuntimeCentering`(3) + `config`(+1).
 
 ---
 
-## PUT /mapping 명세
+## 1. 파일별 변경
 
-| 항목 | 값 |
+### 신규 — `src/calibrate/`
+| 파일 | 내용 |
 |---|---|
-| 경로 | `PUT /mapping`(헤드리스), `PUT /viewer/api/mapping`(뷰어). 동일 로직 |
-| 본문 | 완전한 SetupArtifact JSON(`{presets, slots, globalIndex, createdAt, warnings?, report?}`) |
-| 200 | `{ ok:true, slots, globalCount }` + `repo.saveArtifact` 1회 |
-| 400(shape) | `{ error:'invalid artifact', detail }` — 미저장 |
-| 400(정합) | `{ error:'coverage mismatch', missing, extra }` — 미저장(파일 보호) |
-| 게이트 | `validateCoverage(globalIndex, slots)`(GlobalIndexer 재사용) |
+| `types.ts` | `PlateTarget`·`Ptz`·`SlotPtzItem`·`SlotPtzArtifact`·`CenteringAdvice`·`CalibrateState`·`CalibrateStatus`. **SettingAgent 로컬**(@parkagent/types 미승격, 결정 A). |
+| `controlMath.ts` | 순수 제어수학(외부 의존 0). `plateCenterError`·`pickNearestPlate`·`estimateGain`·`panTiltCorrection`·`zoomCorrection`·`isCentered`·`isWidthConverged`·`dampGain`·`buildSlotPtzJson`. |
+| `slotPtzWriter.ts` | `expandPlateTargets(artifact)`(plateRoiByPreset 키마다 1항목 펼침·globalIdx 역참조)·`writeSlotPtz`(Repository 비오염 별도 파일 I/O). |
+| `PtzCalibrator.ts` | 잡(상태머신·슬롯순회·`calibrateSlot`). CaptureJob 패턴 차용. |
+
+### 신규 — `src/api/`
+- `calibrateRoutes.ts` — `POST /calibrate/ptz`(start·중복 409·zod 400)·`GET /calibrate/status`·`GET /calibrate/result`(없음 404). captureRoutes 패턴.
+
+### 수정(가산만)
+- `src/brain/SetupBrain.ts` — `CenteringAdviceInput`·`CenteringAdviceSchema`·`CenteringAdvice` + `SetupBrain.adviseCentering?` 인터페이스 가산.
+- `src/brain/AgentRuntime.ts` — `adviseCentering` 메서드(인라인 한글 프롬프트·`chatJson` 재사용·이미지 멀티모달). import 가산.
+- `src/config/toolsConfig.ts` — `CalibrateSchema` + `ToolsConfigSchema.calibrate` + `DEFAULT_TOOLS_CONFIG.calibrate`(병합 루프가 자동 처리).
+- `config/tools.config.json` — `calibrate` 섹션.
+- `src/api/server.ts` — `ApiDeps.calibrator?`·`calibrate?` + 주입 시 `registerCalibrateRoutes`(기존 라우트 불변).
+- `src/index.ts` — `PtzCalibrator` 조립·주입(`camera,lpd,brain,repo,cfg`).
+- `web/index.html` — 정밀수집 탭에 "PTZ 캘리브레이션" 영역(시작 버튼·진행바·요약).
+- `web/app.js` — `calStart`·`calPoll`·`renderCalResult` + 버튼 결선 + 탭 진입 시 폴링.
+
+### 신규 테스트
+- `test/{controlMath,slotPtzWriter,ptzCalibrator,calibrateRoutes,agentRuntimeCentering}.test.ts`, `test/config.test.ts` 가산.
 
 ---
 
-## 순수 함수 목록(core.js — 전부 vitest 대상, DOM/fetch 미참조)
+## 2. ★ PTZ 명령추적(결정적 수정) 구현
 
-`diffArtifactVsCameras`, `pointInRect`, `pointInQuad`, `hitTestSlots`, `rebuildGlobalIndex`, `removeSlot`, `clamp01Rect`, `resizeRect`, `updateSlotRoi`, `validateManualIndex`, `reorderGlobalIndex`.
-(타입 선언은 `web/core.d.ts` 가산 — `removeSlot/updateSlotRoi/reorderGlobalIndex` 는 제네릭 `T extends ArtifactLike` 로 입력 형태 보존.)
+시뮬 `/req_img`·`/req_move` 응답 PTZ 가 0/0/1 echo 라 신뢰 불가 → **응답 PTZ 로 재동기화하지 않는다.**
 
----
-
-## #4 처리 결론
-
-설계 결론(데이터·키매칭 정상, 원인은 "프리셋3 네비게이션 불가" 가설)을 그대로 반영했다.
-- **진단**: `diffArtifactVsCameras` 로 산출물에만 있는 프리셋 키를 분석 탭 경고로 노출 + 검수 탭 빈 상태 안내.
-- **버그 수정**: 프리셋/카메라 전환 시 `drawRoiOverlay()` 미호출 가능성을 수정(change 핸들러에 호출 추가). 이로써 프리셋3 선택 시 ROI 가 즉시 다시 그려진다.
-- 라이브에서 `/cameras` 에 프리셋3가 실제 노출되는데도 미표시면 설계 가정이 틀린 것 → 리더 에스컬레이션(설계서 §리스크 5).
+- `PtzCalibrator.calibrateSlot` 내부에서 PTZ 상태(`ptz: Ptz`)는 **내가 명령한 값**으로만 갱신한다. `captureAndDetect(t, ptz)` 가 `camera.requestImage(cam, preset, ptz)` 로 **명령 PTZ override** 를 넘겨 현재 명령 화면을 얻고, 응답 객체의 `pan/tilt/zoom` 은 **읽지 않는다**.
+- 게인은 **명령한 도(°) 변화 ↔ 관측 번호판 정규화 변위**로 측정(`probeGain` → `estimateGain`). 응답 PTZ 무관.
+- 테스트(`ptzCalibrator.test.ts`)의 모킹 LPD 는 응답 PTZ(0/0/1)가 아니라 **명령 PTZ(requestImage 인자)** 에 따라 번호판 위치·폭을 생성해 이 규약을 재현·검증한다.
 
 ---
 
-## 변경 파일 목록
+## 3. 제어 루프·게인(설계서 §1.3 의사코드 구현)
 
-| 파일 | 변경 |
+순서 엄수: **A) pan/tilt 중심정렬(0.5,0.5) → 수렴 후 B) zoom(폭 targetPlateWidth)**.
+
+- **probe 게인**: 시작점에서 `probeStepDeg`(1°) pan·tilt 1회 이동 후 변위로 부호 포함 게인 추정. 변위 미미(분모≈0)면 fallback 게인(`fallbackGainPanDeg/TiltDeg`).
+- **P 제어**: `panTiltCorrection` = `newPan = curPan - errX*gainPan`(부호는 probe 측정 gain 에 흡수), 1스텝 `±maxStepDeg` 클램프.
+  - **설계 의사코드(line 44)의 부호(`- errX*gain`)를 그대로 따름.** 구현 1차에 `+`로 작성했다가 모킹 수렴 실패로 발견 → `-`로 정정(controlMath.ts). 설계 위반 아님(설계서가 명시한 부호).
+- **zoom**: `zoomCorrection` = `clampZoom(curZoom * sqrt(target/cur))`, plateWidth≈0 방어, `clampZoom` 1~36(CameraClient).
+- **진동 감쇠**: 중심정렬 루프에서 오차 크기(유클리드) 개선이 `IMPROVE_EPS`(1e-3) 미만이면 `dampGain`(절반).
+- **zoom→중심 드리프트**: zoom 루프 내 중심 이탈 시 `panTiltCorrection` 1스텝 재중심(과보정 방지 1회).
+- **상한**: pan/tilt·zoom 각 `maxIterations`(15) 루프 상한.
+- **settle**: `captureAndDetect` 내 `requestImage` 직후 `sleep(settleMs)`. sleep/now 주입(테스트 fake).
+
+### 하이브리드(LLM 자문) + 폴백
+- `cfg.llmAdvise && brain.adviseCentering` 존재 시에만 자문 호출. 응답을 **결정형 클램프**(pan/tilt ±maxStepDeg, zoomFactor 0.5~2.0) 후 적용.
+- `null`·검증실패 → **비례제어 폴백**. `occluded=true` → 슬롯 스킵(`reason:'occluded'`).
+- `brain=undefined`·`llmAdvise=false`·`adviseCentering` 미구현/null 모든 경우 **순수 결정형으로 동작**(테스트로 보장).
+
+### 장애 격리(슬롯 단위 흡수)
+- 개별 슬롯 예외는 `run` 루프에서 흡수(경고 + `reason:'error'` 항목, 잡 중단 아님 — CaptureJob `captureTarget` 패턴).
+- 번호판 사유 코드: `no_plate`(초기 미검출)·`plate_lost`(중심정렬 중 소실)·`occluded`(자문 가림 판정)·`error`(예외).
+
+---
+
+## 4. `slot_ptz.json` 포맷(설계서 §2)
+
+```jsonc
+{
+  "createdAt": "ISO8601",
+  "items": [
+    { "camIdx":1, "presetIdx":1, "slotId":"c1p1s1", "globalIdx":1,
+      "ptz":{"pan":12.3,"tilt":-4.5,"zoom":8.2},
+      "plateWidth":0.198, "centered":true, "converged":true,
+      "reason":"no_plate" } // 옵셔널(스킵·미수렴 시만)
+  ]
+}
+```
+- `globalIdx`: `setup_artifact.globalIndex` 에서 `slotId` 역참조(없으면 `null`).
+- plateRoiByPreset 키(`${camIdx}:${presetIdx}`)마다 1 항목으로 펼침(다중 프리셋 슬롯 = 키 수만큼 항목, 결정 E).
+- **setup_artifact 미수정** — 별도 writer(`writeSlotPtz`), Repository 비오염.
+
+---
+
+## 5. 엔드포인트(설계서 §3.1)
+
+| 메서드·경로 | 동작 |
 |---|---|
-| `web/core.js` | 순수 함수 11개 가산(#1~#4, #7) |
-| `web/core.d.ts` | 신규 함수 타입 선언 + `ArtifactLike`/`SlotLike`/`PresetLike`/`GlobalSlotIndexEntry` |
-| `web/app.js` | 선택·삭제·크기조정 결선, `saveMapping`, #7 UI, #4 drawRoiOverlay 수정, state.selectedSlotId |
-| `web/index.html` | 검수 탭 편집 바(선택정보/삭제/저장/메시지), 분석 탭 수동 매핑 섹션 |
-| `web/app.css` | 선택 슬롯·빈 상태·편집 바·수동 매핑 스타일(가산) |
-| `src/api/server.ts` | `SetupArtifactSchema`(zod), `saveMappingHandler`, `PUT /mapping`·`PUT /viewer/api/mapping`(가산) |
-| `test/roiEdit.test.ts` | 신규 — 히트테스트·resize·removeSlot·rebuildGlobalIndex·diff |
-| `test/manualIndex.test.ts` | 신규 — validateManualIndex/reorderGlobalIndex |
-| `test/mappingPut.test.ts` | 신규 — `app.inject` PUT 200/400(헤드리스·뷰어) |
+| `POST /calibrate/ptz` | 백그라운드 잡 시작(본문 옵셔널 `{slotIds?}`). running 중 **409**, no artifact **400**. 응답 `{ok,started,total}`. |
+| `GET /calibrate/status` | `{state,done,total,current?,startedAt?,endedAt?}`. |
+| `GET /calibrate/result` | `slot_ptz.json` 반환(없으면 **404**). |
 
-불변(미수정): `src/setup/GlobalIndexer.ts`, `src/store/Repository.ts`, `packages/types`, `src/domain/types.ts`, GET 라우트.
+- `ApiDeps.calibrator && calibrate` 주입 시에만 등록(가산·미주입 시 미등록 — 테스트로 보장).
+- 헤드리스 본체에 등록 → 뷰어는 절대경로 `/calibrate/*` 직접 폴링(capture 와 동일).
 
 ---
 
-## typecheck / test 결과
+## 6. 설정(`calibrate` 섹션)
 
 ```
-npm run typecheck  → 에러 0
-npm test           → 46 files, 315 tests passed (기존 281 + 신규 34, 회귀 0)
+targetPlateWidth 0.2 · centerTol 0.03 · widthTol 0.02 · maxIterations 15
+probeStepDeg 1.0 · maxStepDeg 5.0 · fallbackGainPanDeg 20 · fallbackGainTiltDeg 15
+settleMs 300 · outFile "data/slot_ptz.json" · llmAdvise true
 ```
+- **`llmAdvise`(결정 C)**: false 면 순수 결정형(자문 호출 안 함). 기본 true.
+- `DEFAULT_TOOLS_CONFIG.calibrate` 추가 → `loadToolsConfig` 섹션 병합 루프가 자동 처리(부분 병합 검증 추가).
 
 ---
 
-## 미해결 / 실측 보정(검증자·문서화 인계)
+## 7. 순수함수 목록(controlMath.ts — vitest 대상, 외부 의존 0)
 
-- **브라우저 캔버스 상호작용은 수동 확인 필요**: 클릭 선택 하이라이트, 모서리 핸들 드래그 리사이즈, 삭제/저장 후 재로드, #7 ▲▼ 재정렬은 vitest 비대상(환경 의존). 순수 로직은 단위 테스트로 차단했으나 실제 마우스/캔버스 동작은 라이브 뷰어 수동 검증 권장.
-- **#4 라이브 확인**: `/cameras` 응답에 프리셋3 노출 여부 실측은 라이브 필요. 미표시 재현 시 위 진단 경고로 1차 구분, 그래도 노출되는데 미표시면 리더 에스컬레이션.
-- **동시성**: 편집 미저장 중 `/capture/finalize` 가 artifact 를 덮으면 편집 유실 가능(설계 §리스크 1). 1차는 저장 성공 시 `loadMapping` 재동기화로 단순 처리(finalize 잠금 미구현 — 과설계 보류).
-- **저장 경로**: 명시적 "저장" 버튼 모델(확정 B). 자동저장 아님.
+`plateCenterError` · `pickNearestPlate` · `estimateGain` · `panTiltCorrection` · `zoomCorrection` · `isCentered` · `isWidthConverged` · `dampGain` · `buildSlotPtzJson` (+ writer 측 `expandPlateTargets`).
+
+---
+
+## 8. 검증자 인계 포인트
+
+- **계약 불변 확인**: `setup_artifact.json`·`@parkagent/types`·`/setup/*`·`/capture/*`·`/mapping`·뷰어 라우트 무변경. 기존 330 회귀 0.
+- **모킹 전략**: camera/lpd/brain 모킹 + sleep/now 주입. **응답 PTZ(0/0/1)와 명령 PTZ 분리 모델**로 ★ 규약 검증(`ptzCalibrator.test.ts`).
+- **라우트**: `app.inject`(라이브 기동 없음). 409 케이스는 영원히 보류되는 sleep 주입으로 running 유지.
+- **백그라운드 잡 대기**: 테스트는 `state!=='running'` 까지 microtask/inject 폴링.
+
+---
+
+## 9. 미해결 / 실측보정 필요(라이브 의존 — 본 단계 범위 외)
+
+- **게인 실측(미해결 D)**: pan↔X·tilt↔Y 부호·스케일은 시뮬 라이브에서 probe 응답이 명령 PTZ 와 다른 화면을 실제로 보여줄 때만 검증 가능. 모킹은 규약·수렴 로직만 검증. **시뮬 라이브에서 probe 변위가 관측되는지** 확인 필요.
+- **gemma 자문 신뢰도(미해결)**: `adviseCentering` 실 LLM 응답 품질은 실 모델 호출 필요. 본 단계는 fake OpenAI 서버로 파싱·클램프·폴백 경로만 검증.
+- **실 PTZ 단위(미해결 B)**: 본 기능은 **시뮬 도(°) 단위** 한정. 실 PTZ 매핑은 후속.
+- **베이스라인 수치**: 설계서 "331"과 실측 "330" 차이는 기존 테스트 카운트일 뿐(회귀 아님).

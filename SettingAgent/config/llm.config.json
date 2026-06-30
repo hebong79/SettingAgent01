@@ -28,5 +28,8 @@
     "enabled": true,
     "maxPerCheckpoint": 12,
     "prompt": "config/prompts/floor_roi.yaml"
+  },
+  "centering": {
+    "prompt": "config/prompts/ptz_centering.yaml"
   }
 }

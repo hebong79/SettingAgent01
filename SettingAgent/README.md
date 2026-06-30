@@ -89,6 +89,7 @@ LLM 서버가 없으면 `config/llm.config.json` 의 `llm.enabled=false` → 결
 | POST | `/brain/review` | 산출물 LLM 검토 |
 | GET | `/viewer/`, `/viewer/api/*` | 웹 뷰어(SPA + 카메라/스냅샷/이동/mapping). `viewer.enabled=true` 일 때만. 접속: `http://localhost:13020/viewer/` |
 | POST | `/capture/start`·`/stop`·`/finalize`, GET `/capture/status`·`/runs` | 정밀 수집(반복 관측→SQLite 누적→집계→LLM 보정→`setup_artifact.json`). 단발 `/setup/*` 보완. 문서: `docs/20260625_233818_정밀주차면_반복수집_구현문서.md` |
+| POST | `/calibrate/ptz`, GET `/calibrate/status`·`/result` | 주차면별 번호판 중심정렬·줌 PTZ 캘리브레이션(setup_artifact 읽기전용 → `data/slot_ptz.json`). 결정형 비례제어 + LLM 자문(폴백). 문서: `docs/20260630_225107_PTZ캘리브레이션_slot_ptz.md`(+`..._영향도분석.md`) |
 
 > 바닥 ROI(floor ROI): `llm.config` 의 `floorRoi.enabled=true` 시 정밀수집 체크포인트마다 LLM 비전이 차량 지면 접지 4점 사변형을 추론해 `slots[].floorRoiByPreset` 에 가산. 뷰어 `바닥` 토글(연두 폴리곤)로 표시. 문서: `docs/20260629_235626_차량바닥ROI_LLM비전_floorRoi.md`
 
@@ -119,6 +120,12 @@ warnings?, report?
 ```
 
 > 뷰어 검수/분석 탭에서 주차면(ROI) **선택·삭제·크기조정**과 **전역 인덱스 수동 재정렬**을 한 뒤 "저장"(`PUT /mapping`)으로 이 파일을 갱신할 수 있다(정합 게이트 통과 시에만 기록).
+
+`data/slot_ptz.json` (= `GET /calibrate/result`, 별도 산출물 — setup_artifact 비오염):
+```
+createdAt, items[] { camIdx, presetIdx, slotId, globalIdx, ptz{pan,tilt,zoom}, plateWidth, centered, converged, reason? }
+```
+> 번호판 ROI 보유 주차면마다 중심정렬·줌 PTZ 를 구해 저장(ActionAgent 센터링 prior 후보). `POST /calibrate/ptz` 로 생성.
 
 ---
 

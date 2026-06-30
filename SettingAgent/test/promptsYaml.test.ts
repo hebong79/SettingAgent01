@@ -23,4 +23,15 @@ describe('loadPromptPair (yaml system/user 프롬프트)', () => {
     // 존재하지 않는 경로 → readFileSync 에러(또는 누락 에러). 어느 쪽이든 throw.
     expect(() => loadPromptPair('config/prompts/__none__.yaml')).toThrow();
   });
+
+  it('ptz_centering.yaml 로드 + 2단계 워크플로·치환', () => {
+    const { system, user } = loadPromptPair('config/prompts/ptz_centering.yaml');
+    expect(system).toContain('pan/tilt'); // center 단계
+    expect(system).toContain('zoom'); // zoom 단계
+    expect(user).toContain('{{phase}}');
+    expect(user).toContain('{{plateWidth}}');
+    const out = renderTemplate(user, { phase: 'center', errX: '0.100', errY: '-0.050', plateWidth: '0.120', targetWidth: '0.2', centerTol: '0.03' });
+    expect(out).toContain('단계=center');
+    expect(out).not.toContain('{{');
+  });
 });

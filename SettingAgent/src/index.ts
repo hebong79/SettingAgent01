@@ -14,6 +14,7 @@ import { CheckpointReviewer } from './capture/CheckpointReviewer.js';
 import { FloorRoiReviewer } from './capture/FloorRoiReviewer.js';
 import { CaptureJob } from './capture/CaptureJob.js';
 import { Finalizer } from './capture/Finalizer.js';
+import { PtzCalibrator } from './calibrate/PtzCalibrator.js';
 import { loadExpectedFaces } from './setup/mapTargets.js';
 import { logger } from './util/logger.js';
 
@@ -52,6 +53,9 @@ async function main(): Promise<void> {
     roiPadding: tools.setup.roiPadding, yBandTolerance: tools.setup.yBandTolerance, expectedByPreset,
   });
 
+  // 주차면별 번호판 중심정렬·줌 PTZ 캘리브레이션(/calibrate/*). 결정형 비례제어 + LLM 자문(toggle).
+  const calibrator = new PtzCalibrator({ camera, lpd, brain, repo, cfg: tools.calibrate });
+
   // 웹 뷰어 통합(SettingViewer). enabled=false 면 sources 미빌드(헤드리스).
   const sources = tools.viewer.enabled ? buildSourceRegistry(tools) : undefined;
 
@@ -59,6 +63,7 @@ async function main(): Promise<void> {
     orchestrator, repo, camera, vpd, brain, mapFiles: tools.map, discovery: tools.discovery,
     presetProvider, refreshOnRun: tools.presetProvider.refreshOnRun,
     captureJob, finalizer, sqlite, capture: tools.capture,
+    calibrator, calibrate: tools.calibrate,
     viewer: tools.viewer, sources,
   });
   await app.listen({ port: tools.server.port, host: '0.0.0.0' });
