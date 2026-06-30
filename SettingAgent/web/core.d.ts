@@ -174,6 +174,19 @@ export interface MappingRow {
   globalIdx: number | null;
 }
 export function buildMappingRows(artifact: ArtifactLike | null | undefined): MappingRow[];
+
+export interface SlotMapBox {
+  slotId: string;
+  label: string;
+  group: string;
+  bad: boolean;
+  selected: boolean;
+}
+export function slotMapModel(
+  rows: MappingRow[] | null | undefined,
+  idBySlot: Record<string, number | string | undefined> | null | undefined,
+  selectedSlotId: string | null | undefined,
+): SlotMapBox[];
 export function applyManualGlobalIds<T extends ArtifactLike>(
   artifact: T,
   idBySlot: Record<string, number | string>,

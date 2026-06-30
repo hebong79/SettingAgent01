@@ -499,6 +499,24 @@ export function applyManualGlobalIds(artifact, idBySlot) {
 }
 
 /**
+ * 슬롯 맵(사각 박스) 모델(순수). 매핑 표 행 + 현재 입력 전역ID + 선택 slotId →
+ * 박스 descriptor 배열. label=전역ID(없으면 '?'), group=프리셋키, bad/selected 플래그.
+ */
+export function slotMapModel(rows, idBySlot, selectedSlotId) {
+  return (rows ?? []).map((r) => {
+    const gid = idBySlot?.[r.slotId];
+    const has = gid !== undefined && gid !== null && String(gid) !== '';
+    return {
+      slotId: r.slotId,
+      label: has ? String(gid) : '?',
+      group: `${r.camIdx}:${r.presetIdx}`,
+      bad: !has,
+      selected: r.slotId === selectedSlotId,
+    };
+  });
+}
+
+/**
  * 스냅샷 폴링 루프(백프레셔·Blob revoke·정지). DOM/브라우저 전역 미참조 → 의존성 주입.
  * deps:
  *   - fetchFn(url, { signal }) → Response(blob() 보유)

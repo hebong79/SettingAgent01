@@ -24,6 +24,7 @@ import {
   updateSlotRoi,
   buildMappingRows,
   applyManualGlobalIds,
+  slotMapModel,
 } from './core.js';
 
 const $ = (id) => document.getElementById(id);
@@ -39,6 +40,7 @@ const state = {
   roiHidden: false, // true 면 ROI/선택 오버레이를 그리지 않음(초기화·수집 시작 시).
   isHucoms: false,
   selectedSlotId: null, // #1 선택된 주차면 slotId(없으면 null).
+  selectedMapSlot: null, // 슬롯 맵↔표 동기화 선택 slotId.
 };
 
 // #3 크기 조정 핸들 드래그 상태(캔버스 좌표 변환은 환경 의존 — 여기에서만 사용).
@@ -721,6 +723,8 @@ function renderManualIndex() {
   const tbody = document.createElement('tbody');
   for (const r of rows) {
     const tr = document.createElement('tr');
+    tr.dataset.slotId = r.slotId;
+    tr.addEventListener('click', () => selectMapSlot(r.slotId)); // 표 행 ↔ 슬롯맵 동기화.
     const idTd = document.createElement('td');
     const input = document.createElement('input');
     input.type = 'number';
@@ -728,7 +732,10 @@ function renderManualIndex() {
     input.className = 'an-manual-input';
     input.dataset.slotId = r.slotId;
     input.value = r.globalIdx ?? '';
-    input.addEventListener('input', validateManualTable);
+    input.addEventListener('input', () => {
+      validateManualTable();
+      renderSlotMap(); // 입력 즉시 박스 번호 갱신.
+    });
     idTd.appendChild(input);
     tr.appendChild(idTd);
     for (const c of [r.camIdx, r.presetIdx, r.positionIdx ?? '-', r.slotId, r.zone]) {
@@ -741,6 +748,46 @@ function renderManualIndex() {
   table.appendChild(tbody);
   box.appendChild(table);
   validateManualTable();
+  renderSlotMap();
+}
+
+/** 슬롯 박스 맵 렌더(우측). 박스=주차면, 내부=전역ID. 클릭 시 표와 동기화. */
+function renderSlotMap() {
+  const box = $('an-slotmap');
+  if (!box) return;
+  box.innerHTML = '';
+  if (!lastArtifact || !Array.isArray(lastArtifact.slots) || lastArtifact.slots.length === 0) return;
+  const boxes = slotMapModel(buildMappingRows(lastArtifact), collectManualIds(), state.selectedMapSlot);
+  for (const b of boxes) {
+    const el = document.createElement('div');
+    el.className = 'slot-box' + (b.selected ? ' selected' : '') + (b.bad ? ' bad' : '');
+    el.dataset.slotId = b.slotId;
+    const gid = document.createElement('div');
+    gid.className = 'gid';
+    gid.textContent = b.label;
+    const sid = document.createElement('div');
+    sid.className = 'sid';
+    sid.textContent = `c${b.group.replace(':', 'p')}`;
+    el.append(gid, sid);
+    el.addEventListener('click', () => selectMapSlot(b.slotId));
+    box.appendChild(el);
+  }
+}
+
+/** 슬롯 선택을 슬롯맵·표 양쪽에 반영(동기화). */
+function selectMapSlot(slotId) {
+  state.selectedMapSlot = slotId;
+  document.querySelectorAll('#an-slotmap .slot-box').forEach((b) =>
+    b.classList.toggle('selected', b.dataset.slotId === slotId),
+  );
+  document.querySelectorAll('#an-manual tr[data-slot-id]').forEach((tr) =>
+    tr.classList.toggle('row-selected', tr.dataset.slotId === slotId),
+  );
+  const input = document.querySelector(`.an-manual-input[data-slot-id="${CSS.escape(slotId)}"]`);
+  if (input) {
+    input.scrollIntoView({ block: 'nearest' });
+    input.focus();
+  }
 }
 
 /** 표의 전역ID 입력값을 {slotId: 값} 으로 수집. */
