@@ -9,6 +9,19 @@ export interface NormalizedRect {
   h: number;
 }
 
+/** 정규화 점 (좌표계 0~1). NormalizedQuad 의 모서리. */
+export interface NormalizedPoint {
+  x: number;
+  y: number;
+}
+
+/**
+ * 정규화 4점 사변형 (좌표계 0~1). 차량 바닥 점유 영역(원근 투영 footprint).
+ * 모서리 순서 규약: [0]=앞왼(frontLeft), [1]=앞오(frontRight), [2]=뒤오(rearRight), [3]=뒤왼(rearLeft).
+ * "앞"=카메라에 가까운 변(이미지 하단 쪽), 시계방향.
+ */
+export type NormalizedQuad = [NormalizedPoint, NormalizedPoint, NormalizedPoint, NormalizedPoint];
+
 /** 카메라: camIdx 는 1-based. Unity m_Cameras 와 매핑. */
 export interface Camera {
   camIdx: number;
@@ -40,6 +53,11 @@ export interface ParkingSlot {
    * ActionAgent 센터라이징의 prior(초기 조준점)로 활용 → 줌/이동 수렴을 가속.
    */
   plateRoiByPreset?: Record<string, NormalizedRect>;
+  /**
+   * key = `${camIdx}:${presetIdx}` → 이 면 차량의 **바닥 점유 영역**(LLM 비전 추론, 정규화 4점 사변형).
+   * roiByPreset(축정렬 차량 bbox)과 별개·가산. 미산출 시 키 없음.
+   */
+  floorRoiByPreset?: Record<string, NormalizedQuad>;
 }
 
 /** 전역 슬롯 인덱스 매핑 (할일 7). 전 카메라·전 프리셋 정렬 결과. */

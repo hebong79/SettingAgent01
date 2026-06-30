@@ -12,6 +12,14 @@ export function toPixel(rect, imgW, imgH) {
   return { px: rect.x * imgW, py: rect.y * imgH, pw: rect.w * imgW, ph: rect.h * imgH };
 }
 
+/**
+ * 정규화 4점 사변형(quad: 4×{x,y}) → 표시 픽셀 점 배열(toPixel 의 폴리곤판).
+ * floor ROI(바닥 점유 영역) 오버레이용. imgW/imgH = 표시 크기.
+ */
+export function toPixelQuad(quad, imgW, imgH) {
+  return quad.map((p) => ({ px: p.x * imgW, py: p.y * imgH }));
+}
+
 /** 결합 키 `${camIdx}:${presetIdx}` (ROI/프리셋 매칭). */
 export function presetKey(camIdx, presetIdx) {
   return `${camIdx}:${presetIdx}`;
@@ -127,6 +135,25 @@ export function formatElapsed(ms) {
 }
 
 /**
+ * 정밀 수집 종료 결과 요약(메시지 박스용). state 별 제목 + 결과 라인 배열.
+ * status: { state, runId?, done, planned, startedAt?, endedAt? }.
+ */
+export function captureResultSummary(status, nowMs) {
+  const st = status?.state ?? 'idle';
+  const title =
+    st === 'done' ? '정밀 수집 완료' :
+    st === 'stopped' ? '정밀 수집 정지됨' :
+    st === 'error' ? '정밀 수집 오류' : '정밀 수집 종료';
+  const lines = [];
+  if (status?.runId != null) lines.push(`수집 #${status.runId}`);
+  lines.push(`완료 라운드: ${status?.done ?? 0} / ${status?.planned ?? 0}`);
+  const ms = captureElapsedMs(status, nowMs);
+  if (ms != null) lines.push(`소요 시간: ${formatElapsed(ms)}`);
+  lines.push("'최종화'를 누르면 누적 결과로 주차면(ROI)이 그려집니다.");
+  return { title, lines };
+}
+
+/**
  * 카메라 목록에서 (camIdx, presetIdx) 프리셋의 PTZ 조회.
  * pan/tilt/zoom 이 모두 있으면 { pan, tilt, zoom }, 아니면 null(→ 호출측 폴백).
  * '프리셋 이동' 이 현재 모드와 무관하게 프리셋 위치로 가게 하는 근거값.
@@ -146,7 +173,7 @@ export function findPresetPtz(cameras, camIdx, presetIdx) {
  * slots 는 globalIdx 오름차순 정렬, presetKey/roi/번호판 보유 여부를 평탄화한다.
  */
 export function analyzeArtifact(artifact) {
-  const empty = { cameras: 0, presets: 0, slots: 0, globalSlots: 0, withPlate: 0, warnings: 0, zones: 0 };
+  const empty = { cameras: 0, presets: 0, slots: 0, globalSlots: 0, withPlate: 0, withFloor: 0, warnings: 0, zones: 0 };
   if (!artifact || typeof artifact !== 'object') {
     return { ok: false, createdAt: null, totals: empty, perPreset: [], slots: [], warnings: [], report: '' };
   }
@@ -158,12 +185,15 @@ export function analyzeArtifact(artifact) {
   const gidBySlot = new Map(globalIndex.map((g) => [g.slotId, g.globalIdx]));
   const zones = new Set();
   let withPlate = 0;
+  let withFloor = 0;
 
   const slots = rawSlots.map((s) => {
     const presetKey = Object.keys(s.roiByPreset ?? {})[0] ?? '';
     const roi = (s.roiByPreset ?? {})[presetKey] ?? null;
     const hasPlate = !!(s.plateRoiByPreset && Object.keys(s.plateRoiByPreset).length);
+    const hasFloor = !!(s.floorRoiByPreset && Object.keys(s.floorRoiByPreset).length);
     if (hasPlate) withPlate += 1;
+    if (hasFloor) withFloor += 1;
     if (s.zone) zones.add(s.zone);
     return {
       globalIdx: gidBySlot.has(s.slotId) ? gidBySlot.get(s.slotId) : null,
@@ -172,6 +202,7 @@ export function analyzeArtifact(artifact) {
       presetKey,
       roi,
       hasPlate,
+      hasFloor,
     };
   });
   slots.sort((a, b) => (a.globalIdx ?? Infinity) - (b.globalIdx ?? Infinity));
@@ -194,6 +225,7 @@ export function analyzeArtifact(artifact) {
       slots: rawSlots.length,
       globalSlots: globalIndex.length,
       withPlate,
+      withFloor,
       warnings: warnings.length,
       zones: zones.size,
     },
@@ -202,6 +234,205 @@ export function analyzeArtifact(artifact) {
     warnings,
     report: artifact.report ?? '',
   };
+}
+
+// ===== 주차면(ROI) 편집 + 전역 인덱스 수동 매핑 순수 로직(#1~#4, #7) =====
+
+/**
+ * #4 진단: 산출물(artifact)의 presetKey 집합과 카메라 드롭다운(cameras)의 presetKey 집합을 비교.
+ * → { artifactOnly, camerasOnly }. artifactOnly = 산출물엔 있으나 드롭다운에 없어 선택 불가(=미표시 원인).
+ * cameras: Array<{ camIdx, presets: Array<{ presetIdx }> }>. artifact: { presets: [{ camIdx, presetIdx }] }.
+ */
+export function diffArtifactVsCameras(artifact, cameras) {
+  const artKeys = new Set(
+    (artifact?.presets ?? []).map((p) => presetKey(p.camIdx, p.presetIdx)),
+  );
+  const camKeys = new Set();
+  for (const c of cameras ?? []) {
+    for (const p of c?.presets ?? []) camKeys.add(presetKey(c.camIdx, p.presetIdx));
+  }
+  const artifactOnly = [...artKeys].filter((k) => !camKeys.has(k));
+  const camerasOnly = [...camKeys].filter((k) => !artKeys.has(k));
+  return { artifactOnly, camerasOnly };
+}
+
+/** #1 히트테스트: 정규화 점(nx,ny)이 사각형 rect{x,y,w,h} 내부인지(경계 포함). */
+export function pointInRect(nx, ny, rect) {
+  if (!rect) return false;
+  return nx >= rect.x && nx <= rect.x + rect.w && ny >= rect.y && ny <= rect.y + rect.h;
+}
+
+/** #1 히트테스트: 정규화 점이 4점 다각형(quad) 내부인지(ray casting, 짝수-홀수). */
+export function pointInQuad(nx, ny, quad) {
+  if (!Array.isArray(quad) || quad.length < 3) return false;
+  let inside = false;
+  for (let i = 0, j = quad.length - 1; i < quad.length; j = i++) {
+    const xi = quad[i].x, yi = quad[i].y;
+    const xj = quad[j].x, yj = quad[j].y;
+    const intersect = yi > ny !== yj > ny && nx < ((xj - xi) * (ny - yi)) / (yj - yi) + xi;
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+/**
+ * #1 슬롯 히트테스트. 현재 프리셋 key 의 차량 ROI(rect) 우선, 그 다음 floor quad(차선).
+ * 그려지는 순서(slots 배열 순)에서 마지막(=상단)에 그려진 것을 우선 선택.
+ * layers: { vehicle, floor } — 끔 처리된 레이어는 히트 제외(현재 그리는 것과 정합).
+ * → 매칭 slotId | null.
+ */
+export function hitTestSlots({ nx, ny, slots, key, layers }) {
+  const showVehicle = layers?.vehicle !== false;
+  const showFloor = layers?.floor !== false;
+  let hit = null;
+  for (const slot of slots ?? []) {
+    if (showVehicle && pointInRect(nx, ny, slot.roiByPreset?.[key])) {
+      hit = slot.slotId;
+      continue;
+    }
+    if (showFloor && pointInQuad(nx, ny, slot.floorRoiByPreset?.[key])) {
+      hit = slot.slotId;
+    }
+  }
+  return hit;
+}
+
+/**
+ * #2/#3 공용: coveredSlotIds 순서를 position 진실로 globalIndex 재생성(설계 §positionIdx).
+ * slotId 의 sN 파싱 금지 — preset.coveredSlotIds 배열 순서가 프리셋 내 위치(position).
+ * 정렬: camIdx ASC → presetIdx ASC → coveredSlotIds 내 위치 ASC. globalIdx=i+1.
+ * coveredSlotIds 에 없는 slot 은 뒤로(안전망). → GlobalSlotIndex[].
+ */
+export function rebuildGlobalIndex(slots, presets) {
+  const slotSet = new Set((slots ?? []).map((s) => s.slotId));
+  const ordered = [];
+  const sortedPresets = [...(presets ?? [])].sort(
+    (a, b) => a.camIdx - b.camIdx || a.presetIdx - b.presetIdx,
+  );
+  const placed = new Set();
+  for (const p of sortedPresets) {
+    for (const id of p.coveredSlotIds ?? []) {
+      if (slotSet.has(id) && !placed.has(id)) {
+        placed.add(id);
+        ordered.push({ slotId: id, camIdx: p.camIdx, presetIdx: p.presetIdx });
+      }
+    }
+  }
+  // coveredSlotIds 에 없는 slot(안전망): slotId 순으로 뒤에 부여. camIdx/presetIdx 는 미상→0.
+  for (const s of slots ?? []) {
+    if (!placed.has(s.slotId)) {
+      placed.add(s.slotId);
+      ordered.push({ slotId: s.slotId, camIdx: 0, presetIdx: 0 });
+    }
+  }
+  return ordered.map((o, i) => ({
+    globalIdx: i + 1,
+    slotId: o.slotId,
+    camIdx: o.camIdx,
+    presetIdx: o.presetIdx,
+  }));
+}
+
+/**
+ * #2 삭제: slotId 슬롯을 slots·각 preset.coveredSlotIds 에서 제거 후 globalIndex 재구성.
+ * createdAt 등 나머지 필드 보존. 불변(새 artifact 반환).
+ */
+export function removeSlot(artifact, slotId) {
+  const slots = (artifact.slots ?? []).filter((s) => s.slotId !== slotId);
+  const presets = (artifact.presets ?? []).map((p) => ({
+    ...p,
+    coveredSlotIds: (p.coveredSlotIds ?? []).filter((id) => id !== slotId),
+  }));
+  const globalIndex = rebuildGlobalIndex(slots, presets);
+  return { ...artifact, slots, presets, globalIndex };
+}
+
+/** #3 사각형 정규화 클램프: x,y∈[0,1], w,h>0, x+w≤1, y+h≤1. */
+export function clamp01Rect(rect) {
+  const MIN = 0.001; // 최소 폭/높이(붕괴 방지)
+  let x = Math.min(1, Math.max(0, rect.x));
+  let y = Math.min(1, Math.max(0, rect.y));
+  let w = Math.max(MIN, rect.w);
+  let h = Math.max(MIN, rect.h);
+  if (x + w > 1) w = 1 - x;
+  if (y + h > 1) h = 1 - y;
+  w = Math.max(MIN, w);
+  h = Math.max(MIN, h);
+  return { x, y, w, h };
+}
+
+/**
+ * #3 크기 조정: 모서리 핸들(nw/ne/sw/se) 드래그 델타(ndx,ndy) 적용 후 clamp01Rect.
+ * 좌상(x,y)·우하(x+w,y+h) 를 핸들별로 이동시켜 사각형 갱신.
+ */
+export function resizeRect(rect, handle, ndx, ndy) {
+  let left = rect.x;
+  let top = rect.y;
+  let right = rect.x + rect.w;
+  let bottom = rect.y + rect.h;
+  switch (handle) {
+    case 'nw': left += ndx; top += ndy; break;
+    case 'ne': right += ndx; top += ndy; break;
+    case 'sw': left += ndx; bottom += ndy; break;
+    case 'se': right += ndx; bottom += ndy; break;
+    default: break;
+  }
+  // 좌/우, 상/하 뒤집힘 방지(정규화 후).
+  const x = Math.min(left, right);
+  const y = Math.min(top, bottom);
+  const w = Math.abs(right - left);
+  const h = Math.abs(bottom - top);
+  return clamp01Rect({ x, y, w, h });
+}
+
+/**
+ * #3 갱신: slotId 슬롯의 roiByPreset[key] 만 rect 로 교체(불변). slot 집합 불변 → globalIndex 불변.
+ */
+export function updateSlotRoi(artifact, slotId, key, rect) {
+  const slots = (artifact.slots ?? []).map((s) =>
+    s.slotId === slotId ? { ...s, roiByPreset: { ...s.roiByPreset, [key]: rect } } : s,
+  );
+  return { ...artifact, slots };
+}
+
+/**
+ * #7 수동 매핑 검증: globalIndex 의 globalIdx 가 1..N 연속·중복 없는지.
+ * → { ok, duplicates, gaps }. duplicates=2회 이상 등장한 globalIdx, gaps=1..N 중 빠진 번호.
+ */
+export function validateManualIndex(globalIndex) {
+  const idxs = (globalIndex ?? []).map((g) => g.globalIdx);
+  const n = idxs.length;
+  const seen = new Map();
+  for (const v of idxs) seen.set(v, (seen.get(v) ?? 0) + 1);
+  const duplicates = [...seen.entries()].filter(([, c]) => c > 1).map(([v]) => v).sort((a, b) => a - b);
+  const present = new Set(idxs);
+  const gaps = [];
+  for (let i = 1; i <= n; i++) if (!present.has(i)) gaps.push(i);
+  return { ok: duplicates.length === 0 && gaps.length === 0, duplicates, gaps };
+}
+
+/**
+ * #7 재정렬: orderedSlotIds 순서대로 globalIdx 1..N 재부여(불변 artifact 반환).
+ * slots 집합과 1:1(누락/초과 없음) 검증. 불일치 시 null. camIdx/presetIdx 는 기존 globalIndex 보존.
+ */
+export function reorderGlobalIndex(artifact, orderedSlotIds) {
+  const slotIds = new Set((artifact.slots ?? []).map((s) => s.slotId));
+  const ordered = orderedSlotIds ?? [];
+  if (ordered.length !== slotIds.size) return null;
+  const orderedSet = new Set(ordered);
+  if (orderedSet.size !== ordered.length) return null; // 중복 입력
+  for (const id of ordered) if (!slotIds.has(id)) return null; // 미존재 slotId
+  const metaById = new Map((artifact.globalIndex ?? []).map((g) => [g.slotId, g]));
+  const globalIndex = ordered.map((id, i) => {
+    const meta = metaById.get(id);
+    return {
+      globalIdx: i + 1,
+      slotId: id,
+      camIdx: meta?.camIdx ?? 0,
+      presetIdx: meta?.presetIdx ?? 0,
+    };
+  });
+  return { ...artifact, globalIndex };
 }
 
 /**

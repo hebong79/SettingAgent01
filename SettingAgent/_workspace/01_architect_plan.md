@@ -1,355 +1,185 @@
-# 01 · 설계서 — SettingViewer → SettingAgent 재통합 (단일 프로세스)
+# 01 설계서 — 주차면(ROI) 편집 + 전역 인덱스 수동 매핑
 
-작성: 설계자(architect) · 대상: SettingAgent · 분류: 리팩토링(통합, 기능 추가 없음)
-
----
-
-## 0. 목적·범위·불변식
-
-**목적**: 분리되어 있던 SettingViewer(독립 서비스, :13030)를 SettingAgent(:13020) **단일 프로세스**로 되돌려 통합한다. `viewer.enabled` 토글로 웹 뷰어(SPA + `/viewer/api/*`)를 함께 서빙한다.
-
-**핵심 불변식(반드시 보존)**
-- 분리 이후 추가된 기능 전량 보존: 정밀 수집(/capture) 연동, 분석 탭, RealPtz 소스, 프리셋 이동(gotoPreset), 캐시/PTZ 표시 수정.
-- 헤드리스 보존: `viewer.enabled=false` 면 뷰어 라우트·정적 서빙 **미등록**(순수 에이전트).
-- 기존 계약 불변: `/health`, `/setup/*`, `/capture/*`, `/mapping` 의 메서드·경로·응답 shape 유지.
-- 기존 156개 vitest 회귀 0.
-
-**비목표(과설계 금지)**: 새 기능 없음. 추상화·설정 유연성 추가 금지. 단지 '통합'(프록시 1홉 제거 + 중복 제거 + 단일 포트/기동)만 수행한다.
-
-**통합 이점**
-- `/mapping`·`/capture` 는 SettingAgent 내부에 이미 존재 → HTTP 자기호출(프록시 1홉) 불필요. repo/핸들러 직접 사용.
-- 코드 중복 제거: CameraClient(복제본), `util/http.ts`(복제본) 폐기.
-- 단일 포트(13020)·단일 기동(`npm start`).
+작성: 설계자(architect) · 대상: SettingAgent 웹 뷰어(SettingViewer) + 영속화 엔드포인트
+근거: `Docs/20260624_162408_00_전체아키텍처_설계서.md`, 코드(`src/api/server.ts`, `src/store/Repository.ts`, `src/capture/Finalizer.ts`, `src/setup/GlobalIndexer.ts`, `web/{app.js,core.js,index.html}`), 현재 `data/setup_artifact.json`
+원칙: ParkSimMgr 컨벤션(ESM·1-based·정규화 0~1·외과적·단순함 우선). 과설계 금지.
 
 ---
 
-## 1. 현황 사실(코드 확인 결과)
+## 0. 핵심 계약·확정 사실(설계 전제)
 
-| 항목 | SettingAgent(이식 대상) | SettingViewer(이동 원본) |
-|------|------------------------|--------------------------|
-| 서버 빌더 | `src/api/server.ts` `buildServer(ApiDeps)` — camera/vpd/repo/brain/orchestrator/capture 보유, `/mapping`·`/capture/*` 라우트 존재 | `src/server.ts` `buildViewerServer` — `/viewer/api/mapping`·`/viewer/api/capture/*` **프록시** + `registerViewerRoutes` |
-| CameraClient | `src/clients/CameraClient.ts` — **`listCameras()` 없음**(분리 때 제거). `CapturedImage` 는 `@parkagent/types`(domain/types) 사용 | `src/clients/CameraClient.ts` — 복제본. `listCameras()` 보유, `CapturedImage`·`CameraList` 로컬 정의 |
-| http 유틸 | `src/util/http.ts` — `fetchWithTimeout`+`withRetry`+`isRetryable`(상위집합) | `src/util/http.ts` — `fetchWithTimeout` 만(부분집합 → 폐기 가능) |
-| 설정 | `src/config/toolsConfig.ts` — viewer/cameraSources **없음** | `src/config/viewerConfig.ts` — camera/viewer/cameraSources/settingAgentUrl/server |
-| 정적 의존성 | `@fastify/static` **없음**(package.json) | `@fastify/static@^9.0.0` 보유 |
-| 소스 추상화 | 없음 | `src/viewer/{CameraSource,SimulatorSource,RealPtzSource,sourceRegistry,routes}.ts` |
-| SPA | 없음 | `web/{index.html,app.js,app.css,core.js,core.d.ts}` |
-
-**확인된 의존 사실**
-- `@fastify/static@9.1.3` 은 루트 `node_modules` 에 이미 호이스팅되어 있음(fastify 5.8.5 호환). 설치는 사실상 package.json 선언만 추가하면 됨.
-- SettingViewer `util/http.ts` 는 SettingAgent `util/http.ts` 의 **부분집합** → 복제본 폐기, SettingAgent 것 사용.
-- 두 CameraClient 의 차이는 ① `listCameras()` 유무 ② import 출처(`CapturedImage`·`CameraList`)뿐. 로직은 동일.
-- SettingAgent 에는 `CameraList` 타입이 없다. 이 타입은 viewer `CameraSource.ts` 에 정의되어 있고 **함께 이동**한다. 재추가하는 `listCameras()` 는 이 이동된 모듈에서 `CameraList` 를 import 한다.
-- `web/*` 는 순수 JS(빌드 비대상). `web/core.js` 는 환경 비의존 → 웹 테스트가 직접 import. `web/app.js` 는 `const api = (p) => `/viewer/api${p}`` 로 **모든** 엔드포인트를 `/viewer/api` 접두로 호출(capture·mapping 포함).
-- 양쪽 `vitest.config.ts`·`tsconfig.json` 동일(`include: ['test/**/*.test.ts']`, `include: ['src/**/*.ts','test/**/*.ts']`). `web/` 는 tsconfig include 밖 → 타입체크 비대상.
-- `viewerRoutes.ts` 는 `@fastify/static` 을 직접 register(와일드카드, API 라우트 뒤). 정적 서빙이 라우트에 내장됨.
+- **SetupArtifact 계약 불변.** `{ presets[], slots[], globalIndex[], createdAt, warnings?, report? }` (`packages/types/src/index.ts` + `src/domain/types.ts`). 편집은 **같은 형식의 산출물을 갱신**할 뿐, 새 필드·새 타입을 추가하지 않는다. Action/DM 이 이 파일을 읽는 계약이므로 shape 변경 금지.
+- **좌표 규약**: ROI(`roiByPreset[key]`)=정규화 `{x,y,w,h}` 0~1. floor(`floorRoiByPreset[key]`)=정규화 4점 `NormalizedQuad`. 키=`${camIdx}:${presetIdx}`(예 `1:3`). 1-based.
+- **globalIndex 규약**(`GlobalIndexer.buildGlobalIndex`): camIdx ASC → presetIdx ASC → positionIdx ASC 정렬 후 `globalIdx=i+1`. `validateCoverage(globalIndex, slots)`: `globalIndex.slotId` 집합 == `slots.slotId` 집합(누락/초과 0).
+- **현재 영속화 경로**: `Finalizer.finalize()` 와 `SetupOrchestrator` 만 `repo.saveArtifact()` 호출. 뷰어→artifact 는 **읽기 전용**(`GET /mapping`, `GET /viewer/api/mapping` 둘 다 `repo.loadArtifact()` 직접 반환). 쓰기 경로 없음 → **신규 필요**.
 
 ---
 
-## 2. 프록시 제거 결정 (근거 명시)
+## #4 진단 결론(코드/데이터 기반 — 라이브 기동 없이 확정)
 
-### 2-1. `/viewer/api/mapping` → **직접 읽기로 대체**(프록시 제거)
-- **결정**: `buildViewerServer` 의 `/viewer/api/mapping` HTTP 프록시를 폐기하고, SettingAgent buildServer 안에서 `deps.repo.loadArtifact()` 를 **직접** 반환하는 `/viewer/api/mapping` 라우트로 대체.
-- **근거**: SettingAgent 는 이미 `/mapping`(= `repo.loadArtifact()`)을 동일 프로세스에서 보유. 자기 자신에게 HTTP 요청(1홉·5s 타임아웃·502 분기)을 보낼 이유가 없다. 인메모리/파일 직접 접근이 가장 단순·정확.
-- **404 동작 보존**: 산출물 없으면 `reply.code(404); return { error: 'no setup artifact' }` — 기존 프록시·`/mapping` 과 동일.
-- **app.js 영향 없음**: `app.js` 는 `api('/mapping')` = `/viewer/api/mapping` 을 그대로 호출 → 경로 불변(SPA 무수정).
+**결론: Finalizer/Aggregator/`drawRoiOverlay`/`renderSlotList`/키매칭에 프리셋3 버그 없음. 원인은 "프리셋3로 네비게이션 불가"(데이터/열거) 가능성이 가장 높음 → 코드 수정 대상 아님. 진단·안내(분석 탭 + 네비 가드)로 처리.**
 
-### 2-2. `/viewer/api/capture/*` → **제거하고 SPA 가 `/capture/*` 직접 호출**
-- **결정(택1)**: `/viewer/api/capture/*` 프록시 라우트를 **만들지 않는다**. 대신 `app.js` 의 capture 호출만 `/capture/*`(접두 없음) 로 바꾼다.
-- **비교한 두 안**
-  - (A) SPA 가 `/capture/*` 직접 호출 — app.js 5개 호출 경로 수정.
-  - (B) `/viewer/api/capture/*` 를 핸들러 직접 호출로 등록 — app.js 무수정이나 alias 라우트 5개를 SettingAgent 에 신설(중복 라우트).
-- **(A) 채택 근거**: SettingAgent 는 이미 `/capture/{start,stop,finalize,status,runs,runs/:id/aggregate}` 를 동일 프로세스·동일 포트로 노출한다. SPA 가 같은 origin(`http://localhost:13020`)에서 그대로 호출하면 alias 라우트가 전혀 필요 없다. (B)는 동일 핸들러를 두 경로에 매다는 **중복**으로, "중복 제거"라는 통합 목표에 역행한다. app.js 수정은 5줄로 외과적이며, 단일 출처 원칙에 부합.
-- **app.js 수정점**: `api('/capture/...')` → `'/capture/...'`(아래 §6 표 참조).
+근거(현재 `data/setup_artifact.json` 실측):
+- presets: `1:1 n=8`, `1:2 n=6`, **`1:3 n=14`** — 프리셋3 채택 슬롯 14개 정상 존재.
+- slots roiByPreset 키 분포: `{1:1:8, 1:2:6, 1:3:14}` — 프리셋3 슬롯 ROI 키 `"1:3"` 정상.
+- globalIndex 15~28 이 `c1p3sN (1:3)` 로 정상 매핑. floor 키도 `1:3` 보유.
 
-### 2-3. 카메라 라우트(`/viewer/api/{cameras,snapshot,move,camera/login,health}`)
-- **결정**: 프록시 아님(원래도 CameraSource 직접 호출) → `registerViewerRoutes` 를 **그대로** 이식. CameraSource 레지스트리만 SettingAgent 조립부에서 주입.
-- **app.js 영향 없음**: 이 경로들은 `/viewer/api` 접두 유지(아래 §6).
+코드 경로 확인:
+- `drawRoiOverlay()`/`renderSlotList()` 는 `key = presetKey(state.cam, state.preset)` 로 `slot.roiByPreset[key]` 를 조회한다. cam=1·preset=3 이면 key=`"1:3"` → 위 데이터와 정확히 일치 → **선택만 되면 반드시 그려진다.**
+- 따라서 "안 그려진다"의 유일한 잔여 원인은 **사용자가 프리셋3을 선택할 수 없음**: 프리셋 셀렉트는 `GET /viewer/api/cameras`(=Unity `/cameras` 또는 presetProvider) 가 주는 `presets[]` 로 채워진다(`renderPresetSelect`). 이 목록에 `presetIdx=3` 이 없으면 key 가 `"1:3"` 이 되는 일이 없어 영구 미표시. (예: 시뮬레이터 `/cameras` 가 cam1 에 프리셋 1·2만 노출, 또는 라벨/인덱스 불일치.)
+- 후보(a) clusterMinSupport 미달: capture 설정은 `clusterMinSupport:3` 이나, **이미 채택 14개가 산출됨** → 이번 산출물엔 해당 없음(다른 회차/데이터에서 0이면 별개 — 분석 탭 perPreset 으로 노출).
 
----
+조치(이번 범위, 수정 아닌 진단·가드):
+1. **분석 탭 perPreset 보강(이미 테이블 존재)**: artifact 에는 있으나 `/cameras` 에 없는 프리셋 키를 "네비게이션 불가(드롭다운 미노출)" 경고로 표시. `web/core.js` 에 순수 함수 `diffArtifactVsCameras(artifact, cameras)` 추가 → "artifact 에만 있는 presetKey" / "cameras 에만 있는 presetKey" 산출. 분석 탭 warnings 영역에 렌더.
+2. **검수 탭 안내**: 선택 프리셋 key 에 해당하는 slot 이 0개면 `slot-list`/오버레이 영역에 "이 프리셋에 주차면 없음 — 다른 프리셋 선택 또는 분석 탭 확인" 안내 1줄(`renderSlotList` 빈 상태). 데이터가 진짜 0인 경우(검출 부족)와 네비 불가를 구분해 안내.
 
-## 3. 이동 / 병합 / 삭제 목록 (파일별)
-
-### 3-1. 이동(SettingViewer → SettingAgent, 내용 그대로 + import 경로만 보정)
-| 원본 | 대상 | 비고 |
-|------|------|------|
-| `SettingViewer/src/viewer/CameraSource.ts` | `SettingAgent/src/viewer/CameraSource.ts` | 무수정(상대 import 없음) |
-| `SettingViewer/src/viewer/SimulatorSource.ts` | `SettingAgent/src/viewer/SimulatorSource.ts` | `../clients/CameraClient.js` import — SettingAgent 경로 동일 → 무수정 |
-| `SettingViewer/src/viewer/RealPtzSource.ts` | `SettingAgent/src/viewer/RealPtzSource.ts` | `../config/viewerConfig.js`(CameraSourceConfig)·`../util/http.js` import → **§3-3 병합 후 경로 보정**(아래) |
-| `SettingViewer/src/viewer/sourceRegistry.ts` | `SettingAgent/src/viewer/sourceRegistry.ts` | `../config/viewerConfig.js` import → toolsConfig 로 보정(§3-3) |
-| `SettingViewer/src/viewer/routes.ts` | `SettingAgent/src/viewer/routes.ts` | `../config/viewerConfig.js`(ViewerConfig['viewer'])·`../clients/CameraClient.js`(CameraApiError) import → toolsConfig 로 보정 |
-| `SettingViewer/web/*`(index.html, app.js, app.css, core.js, core.d.ts) | `SettingAgent/web/*` | app.js 만 capture 경로 5줄 수정(§6) |
-
-### 3-2. 가산(SettingAgent 기존 파일에 추가)
-| 파일 | 변경 |
-|------|------|
-| `SettingAgent/src/clients/CameraClient.ts` | **`listCameras(): Promise<CameraList>` 재추가**(viewer 복제본에서 그대로). `CameraList` 는 `../viewer/CameraSource.js` 에서 import. 나머지 메서드 불변 |
-| `SettingAgent/src/config/toolsConfig.ts` | `viewer{enabled,allowMove,defaultFps,staticDir,controlToken}` + `cameraSources[]` 스키마·기본값 추가(§5) |
-| `SettingAgent/src/api/server.ts` | `ApiDeps` 에 `viewer?`, `sources?` 추가. `viewer.enabled` 일 때 `/viewer/api/mapping`(직접 읽기) 등록 + `registerViewerRoutes` 등록(§4) |
-| `SettingAgent/src/index.ts` | `buildSourceRegistry` 로 sources 빌드 → `buildServer` 주입(§7) |
-| `SettingAgent/package.json` | `dependencies` 에 `"@fastify/static": "^9.0.0"` 추가 |
-| `SettingAgent/config/tools.config.json` | `viewer`·`cameraSources` 섹션 추가(§5) |
-
-### 3-3. 병합(중복 → SettingAgent 단일)
-- **CameraSourceConfig / cameraSources / viewer 타입**: viewer `viewerConfig.ts` 의 `CameraSourceConfigSchema`(→ `CameraSourceConfig`)·`ViewerSchema` 를 SettingAgent `toolsConfig.ts` 로 **병합**. 이후:
-  - `RealPtzSource.ts` 의 `import type { CameraSourceConfig } from '../config/viewerConfig.js'` → `'../config/toolsConfig.js'` 로 변경.
-  - `sourceRegistry.ts` 의 `ViewerConfig` 의존 → `ToolsConfig`(camera·cameraSources) 로 시그니처 변경(§7-2).
-  - `routes.ts` 의 `ViewerConfig['viewer']` → `ToolsConfig['viewer']`.
-- **http 유틸**: viewer `util/http.ts`(복제본)는 이동하지 않음. RealPtzSource 가 SettingAgent `util/http.ts`(동일 `fetchWithTimeout`) 사용 → import 경로 동일(`../util/http.js`)이라 무수정.
-
-### 3-4. 삭제(이동·병합 완료 후)
-| 삭제 대상 | 사유 |
-|-----------|------|
-| `SettingViewer/src/clients/CameraClient.ts` | SettingAgent CameraClient 로 일원화(listCameras 재추가됨) |
-| `SettingViewer/src/util/http.ts` | SettingAgent http.ts 가 상위집합 |
-| `SettingViewer/src/config/viewerConfig.ts` | toolsConfig 로 병합 |
-| `SettingViewer/src/server.ts` | buildServer 로 통합(프록시 폐기) |
-| `SettingViewer/src/index.ts` | SettingAgent index.ts 단일 부트스트랩 |
-| `SettingViewer/test/mappingProxy.test.ts`·`captureProxy.test.ts` | 프록시 폐기로 의미 소멸 → **대체 테스트**로 교체(§8) |
-| `SettingViewer/config/viewer.config.json` | tools.config.json 으로 흡수 |
-| `SettingViewer/` 폴더 전체(소스 이동·doc 이관 후) | §9 |
+> 만약 developer 가 라이브에서 `/cameras` 에 프리셋3가 실제로 노출됨을 확인하면(=네비 가능한데도 미표시), 그때는 위 가정이 틀린 것이므로 **리더에게 에스컬레이션** 후 재진단(키 타입 불일치 number/string 등). 현재 코드상 `presetKey` 는 양쪽 모두 number 보간이라 불일치 없음.
 
 ---
 
-## 4. 라우트 통합 (buildServer 변경)
+## 영속화 모델(핵심 설계 결정)
 
-`buildServer(deps)` 끝부분(capture 라우트 등록 다음, `return app` 전)에 추가:
+### 결정: `PUT /mapping` — 전체 SetupArtifact 교체 (슬롯 단위 PATCH 기각)
 
-```ts
-// 뷰어 통합: viewer.enabled && sources 주입 시에만 등록(헤드리스 보존, 가산).
-if (deps.viewer?.enabled && deps.sources) {
-  // /mapping 직접 읽기(프록시 폐기) — repo.loadArtifact() 그대로 반환, 404 보존.
-  app.get('/viewer/api/mapping', async (_req, reply) => {
-    const artifact = deps.repo.loadArtifact();
-    if (!artifact) { reply.code(404); return { error: 'no setup artifact' }; }
-    return artifact;
-  });
-  // 카메라 라우트 + 정적 SPA(와일드카드는 내부에서 API 뒤에 register).
-  await registerViewerRoutes(app, { sources: deps.sources, viewer: deps.viewer });
-}
-```
+- **신규 라우트**: `PUT /mapping` (헤드리스 API) **+** `PUT /viewer/api/mapping`(뷰어 컨텍스트). 본문 = 완전한 SetupArtifact.
+- 처리: ① zod 스키마 검증(shape) → ② `validateCoverage(globalIndex, slots)` 정합 검증 → ③ 통과 시 `repo.saveArtifact(artifact)`, 실패 시 **400**(저장 안 함). 응답 `{ ok:true, slots, globalCount }`.
+- **GET /mapping·/viewer/api/mapping 은 불변**(읽기 직접 유지).
 
-- **주의**: `buildServer` 가 동기 `FastifyInstance` 를 반환하지만, `registerViewerRoutes` 는 async(내부 `await app.register(fastifyStatic)`). 두 가지 중 택1(구현자 판단, 단순한 쪽):
-  - (권장) `buildServer` 를 `async` 로 바꾸고 `await registerViewerRoutes(...)`. 호출부(index.ts·테스트)는 `await buildServer(...)`. — Fastify 는 `listen()` 시 plugin 등록을 보장하지만, `inject()` 테스트에서 static 라우트가 등록 전이면 404 위험이 있으므로 `await` 가 안전.
-  - (대안) `app.register(async (i) => { await registerViewerRoutes(i, ...) })` 로 감싸고 `buildServer` 동기 유지 + 테스트는 `await app.ready()`.
-  - **결정**: (권장) `buildServer` 를 async 화. 기존 156 테스트의 `buildServer(...)` 호출 전부 `await` 추가 필요 여부를 확인하고, 동기 사용처가 깨지면 최소 수정. (대부분 테스트는 `app.inject` 전에 await 가능.)
-- **라우트 등록 순서**: `/viewer/api/mapping`(정확 경로) → `registerViewerRoutes`(내부에서 `/viewer/api/*` 정확 경로들 먼저, `@fastify/static` 와일드카드 `/viewer/` 마지막). 카메라/capture/mapping 정확 경로가 와일드카드보다 앞서야 함(이미 routes.ts 가 보장).
-- **`/health` 충돌 주의**: SettingAgent 에 이미 `/health`(루트) 존재. 뷰어는 `/viewer/api/health`(접두 다름) → 충돌 없음.
+**PATCH(슬롯 단위)를 기각하는 근거(단순함 우선)**:
+- 삭제 1건이 slots·globalIndex·coveredSlotIds **3곳**을 동시에 바꾼다 → 부분 PATCH 는 서버가 재구성 로직을 또 들고, 클라이언트와 정합 책임이 갈라진다.
+- 산출물 크기 작음(현재 28 슬롯, 단일 JSON 파일). 전체 교체 비용 무시 가능. 멱등·디버깅 용이.
+- 뷰어가 이미 `state.mapping`(전체 artifact)을 메모리에 들고 있다 → 편집 후 통째 PUT 이 자연스럽다.
+- 정합 책임을 **클라이언트(core.js 순수함수)가 재구성 → 서버가 validateCoverage 로 게이트**의 단일 지점으로 모은다.
 
----
+### 편집 시 globalIndex 재계산 정책(확정)
 
-## 5. 설정 스키마 (toolsConfig 확장)
+- **삭제**: 제거된 slot 을 slots·globalIndex·해당 preset.coveredSlotIds 에서 빼고, **남은 슬롯을 `buildGlobalIndex` 규약(cam→preset→position)으로 재번호**(globalIdx 연속 1..N 유지). 수동 매핑(#7)이 적용돼 있으면 그 순서를 보존(아래).
+- **크기 조정(#3)**: `roiByPreset[key]` 만 갱신. slot 집합 불변 → globalIndex·coveredSlotIds 불변.
+- **수동 매핑(#7)**: 사용자가 정한 `globalIdx` 순서를 globalIndex 배열로 직접 반영(1..N 연속·중복 없음 검증). 이후 삭제가 일어나면 "수동 순서 보존 + 빈 번호 메꿈" 정책으로 재번호(자동 cam→preset 재정렬로 되돌리지 않음).
+- **coveredSlotIds 규약**: 각 preset 의 `coveredSlotIds` 는 그 프리셋 소속 slot 들을 **positionIdx(프리셋 내 위치) 순서**로 유지. 삭제 시 해당 id 만 제거(순서 보존).
 
-`toolsConfig.ts` 에 추가(viewer `viewerConfig.ts` 에서 가져옴, 하위호환):
+### positionIdx 표현 문제(중요 — developer 필독)
 
-```ts
-const ViewerSchema = z.object({
-  enabled: z.boolean(),
-  allowMove: z.boolean(),
-  defaultFps: z.number().int().positive(),
-  staticDir: z.string().min(1),
-  controlToken: z.string(),
-});
-
-const CameraSourceConfigSchema = z.object({
-  id: z.string().min(1),
-  kind: z.enum(['sim', 'hucoms']),
-  baseUrl: z.string().url().optional(),
-  host: z.string().optional(),
-  port: z.number().int().positive().optional(),
-  loginPath: z.string().optional(),
-  snapshotUrl: z.string().optional(),
-  ptz: z.object({
-    panRange: z.tuple([z.number(), z.number()]),
-    tiltRange: z.tuple([z.number(), z.number()]),
-    zoomRange: z.tuple([z.number(), z.number()]),
-  }).optional(),
-});
-export type CameraSourceConfig = z.infer<typeof CameraSourceConfigSchema>;
-```
-
-`ToolsConfigSchema` 에 `viewer: ViewerSchema`, `cameraSources: z.array(CameraSourceConfigSchema).optional()` 추가.
-
-`DEFAULT_TOOLS_CONFIG` 에:
-```ts
-viewer: { enabled: true, allowMove: true, defaultFps: 3, staticDir: 'web', controlToken: '' },
-// cameraSources 는 기본값 미설정(undefined → sourceRegistry 가 단일 sim 으로 폴백)
-```
-
-**병합 함수 주의(`loadToolsConfig`)**: 현재 `for (key of Object.keys(DEFAULT)) merged[key] = {...DEFAULT[key], ...raw[key]}` 로 **섹션 단위 객체 병합**한다. `viewer` 는 객체이므로 그대로 동작. 그러나 `cameraSources` 는 **옵셔널 배열** → 객체 spread 병합이 부적합. viewer 의 `loadViewerConfig` 가 한 것처럼 별도 처리 필요:
-```ts
-// 객체 섹션만 spread 병합. cameraSources(배열)는 있으면 그대로 통과.
-for (const key of OBJECT_KEYS) merged[key] = { ...DEFAULT[key], ...(raw[key] ?? {}) };
-if (raw.cameraSources !== undefined) merged.cameraSources = raw.cameraSources;
-```
-→ `Object.keys(DEFAULT_TOOLS_CONFIG)` 순회에서 `cameraSources` 는 DEFAULT 에 없으므로(undefined) 누락된다. 따라서 `cameraSources` 패스스루 한 줄을 명시 추가. (config.test.ts 회귀 확인.)
-
-`tools.config.json` 에 추가(하위호환·기본값):
-```json
-"viewer": { "enabled": true, "allowMove": true, "defaultFps": 3, "staticDir": "web", "controlToken": "" }
-```
-- `cameraSources` 는 미기재(폴백: 단일 sim, id='sim', camera.baseUrl 사용) — 기존 단일 시뮬레이터 동작과 동일.
-- **강등 경로**: `viewer.enabled=false` → buildServer 가 `/viewer/api/*`·정적 미등록. SPA 접속 시 404(순수 에이전트). index.ts 는 enabled 와 무관하게 sources 를 빌드해도 무방하나, 불필요 시 `enabled` 일 때만 빌드해도 됨(§7).
+`globalIndex[]` 에는 `positionIdx` 가 **없다**(타입에 없음). 재번호 시 cam→preset→position 정렬을 하려면 position 정보가 필요하다. position 의 신뢰 원천은 **`preset.coveredSlotIds` 의 배열 순서**(Finalizer 가 `orderByPosition` 결과 순으로 push). → 순수 재구성 함수는 `(slots, presets)` 에서 `coveredSlotIds` 순서를 position 으로 사용해 globalIndex 를 재생성한다. slotId 문자열(`c1p3s7`)의 sN 파싱에 의존하지 말 것(수동 삭제 후 sN 이 불연속될 수 있음 — 배열 순서가 진실).
 
 ---
 
-## 6. SPA(`web/app.js`) 수정점 (정확)
+## 작업 순서(빠른 순) · 각 단계 검증
 
-`const api = (path) => `/viewer/api${path}``(L19) **유지**. capture 호출 5곳만 접두 없는 절대경로로 변경:
+### 단계 1 — #4 진단·안내 (코드 영향 최소, 먼저)
+- `web/core.js`: 순수 함수 `diffArtifactVsCameras(artifact, cameras)` 추가 → `{ artifactOnly: string[], camerasOnly: string[] }`(presetKey 기준).
+- `web/app.js`: `renderAnalysis()` 에서 `state.cameras` 와 비교해 warnings 에 "프리셋 키 X: 산출물에는 있으나 카메라 드롭다운에 없음(선택 불가)" 추가. `renderSlotList()` 빈 상태 안내 1줄.
+- **검증**: vitest `diffArtifactVsCameras` — (artifact 1:3 보유 + cameras 1:1,1:2만) → `artifactOnly:['1:3']`. 빈 입력 방어. 분석 탭 수동 확인(문구 노출).
 
-| 위치(함수) | 변경 전 | 변경 후 |
-|-----------|---------|---------|
-| `capFetchStatus` (L262) | `fetch(api('/capture/status'))` | `fetch('/capture/status')` |
-| `capStart` (L301) | `fetch(api('/capture/start'), {...})` | `fetch('/capture/start', {...})` |
-| `capStop` (L312) | `fetch(api('/capture/stop'), {...})` | `fetch('/capture/stop', {...})` |
-| `capFinalize` (L319) | `fetch(api('/capture/finalize'), {...})` | `fetch('/capture/finalize', {...})` |
+### 단계 2 — #1 주차면 선택(히트테스트)
+- `web/core.js` 순수 함수:
+  - `pointInRect(nx, ny, rect)` — 정규화 좌표 점이 `{x,y,w,h}` 내부인지.
+  - `pointInQuad(nx, ny, quad)` — 4점 다각형 내부(짝수-홀수 ray casting).
+  - `hitTestSlots({ nx, ny, slots, key, layers })` → 최상위(마지막 그려진=배열 끝 우선) 매칭 `slotId|null`. vehicle rect 우선, floor quad 차선(현재 그리는 순서와 정합).
+- `web/app.js`: overlay 캔버스 `click` → 캔버스 픽셀→정규화(`/overlay.width`, `/overlay.height`) → `hitTestSlots` → `state.selectedSlotId` 설정 → `drawRoiOverlay()` 에서 선택 슬롯 하이라이트(굵은 테두리/대비색). 프리셋/탭 전환 시 선택 해제.
+- **검증**: vitest — rect 내부/경계/외부, quad 내부/외부, 겹친 슬롯 시 상단 우선, layers off 시 제외. 수동: 클릭 시 하이라이트.
 
-> 참고: capture GET 중 SPA 가 실제 호출하는 것은 `status` 뿐(runs·aggregate 는 app.js 미사용). start/stop/finalize/status 4개만 수정하면 됨.
+### 단계 3 — #2 선택 슬롯 삭제(영속화)
+- `web/core.js` 순수 함수 `removeSlot(artifact, slotId)` → 새 artifact:
+  - slots 에서 제거 → 각 preset.coveredSlotIds 에서 id 제거 → `rebuildGlobalIndex(slots, presets)`(coveredSlotIds 순서 기반 재번호)로 globalIndex 재생성. createdAt 등 나머지 보존.
+- `rebuildGlobalIndex(slots, presets)` 순수 함수 분리(재사용: 삭제·수동매핑 정합 산출).
+- `web/app.js`: "선택 슬롯 삭제" 버튼 → `removeSlot` → `state.mapping` 갱신 → "저장"으로 `PUT`. 저장 전까진 미반영(명시적 저장 모델).
+- 서버: `PUT /mapping`(아래 단계 5와 공유) 구현.
+- **검증**: vitest — 삭제 후 `validateCoverage` ok, globalIdx 연속 1..N-1, coveredSlotIds 에서 제거됨, 다른 슬롯 ROI 불변.
 
-**유지(수정 금지)** — 동일 origin/동일 프로세스라 그대로 동작:
-- `/viewer/api/cameras`, `/viewer/api/snapshot`, `/viewer/api/move`, `/viewer/api/camera/login`, `/viewer/api/health` → `registerViewerRoutes` 가 동일 경로로 제공.
-- `/viewer/api/mapping`(loadMapping·fetchArtifact, L47·L336) → §4 직접 읽기 라우트가 동일 경로 제공 → **무수정**.
+### 단계 4 — #3 크기 조정(핸들 드래그)
+- `web/core.js` 순수 함수:
+  - `resizeRect(rect, handle, ndx, ndy)` → 모서리(nw/ne/sw/se) 드래그 델타 적용 후 `clamp01Rect`(x,y∈[0,1], w,h>0, x+w≤1, y+h≤1).
+  - `updateSlotRoi(artifact, slotId, key, rect)` → 해당 slot `roiByPreset[key]` 만 교체(불변 갱신).
+- `web/app.js`: 선택 슬롯에 4모서리 핸들 렌더, mousedown→mousemove(정규화 델타)→`resizeRect` 실시간 미리보기→mouseup 확정→`state.mapping` 갱신. "저장"으로 PUT.
+- **floor 사변형 편집은 1차 범위 제외**(사각형 우선). 결정: 범위 밖(복잡도↑·요청도 "1차 판단"). 문서에 명시, 추후 과제.
+- **검증**: vitest — se 핸들 +δ → w/h 증가, 경계 클램프(1 초과 안 됨, 음수 폭 방지), 다른 slot 불변.
 
-→ 순변경: app.js 4줄. (다른 파일 web/* 무수정.)
+### 단계 5 — 영속화 엔드포인트 `PUT /mapping`
+- `src/api/server.ts`: zod `SetupArtifactSchema`(presets/slots/globalIndex shape) 추가. `PUT /mapping` 핸들러: 파싱 실패→400, `validateCoverage` 실패→400 `{error, missing, extra}`, 성공→`repo.saveArtifact` + `{ok,slots,globalCount}`.
+- viewer 블록(`app.register` 내부)에 `PUT /viewer/api/mapping` 동일 로직(또는 공용 핸들러 함수 추출). 뷰어는 `/viewer/api/mapping` 으로 PUT.
+- `web/app.js`: `saveMapping()` → `PUT /viewer/api/mapping` → 성공 시 메시지·`loadMapping()` 재로드, 실패 시 에러 표시(정합 불일치/네트워크). "저장" 버튼.
+- **검증**: vitest(`mappingDirect.test.ts` 스타일, `app.inject`) — 유효 artifact PUT→200 + saveArtifact 호출됨, coverage 깨진 artifact→400 + 미저장, 잘못된 shape→400.
 
----
+### 단계 6 — #7 전역 인덱스 수동 매핑(설계+UI)
+- `web/core.js` 순수 함수:
+  - `validateManualIndex(globalIndex)` → `{ ok, duplicates:number[], gaps:number[] }`(globalIdx 1..N 연속·중복 검사).
+  - `reorderGlobalIndex(artifact, orderedSlotIds)` → 사용자 지정 순서대로 globalIdx 1..N 재부여(slots 집합과 1:1 검증). 불일치 시 `null`/throw.
+- `web/index.html`/`app.css`: 분석 탭(또는 검수 탭) 에 "전역 인덱스 수동 매핑" 영역 — slotId↔globalIdx 목록을 드래그 재정렬 또는 숫자 입력. "정합 검사" 표시(중복/누락 빨강). "저장"으로 PUT.
+- `web/app.js`: 편집 UI 결선 → `validateManualIndex` 실시간 → `reorderGlobalIndex` → PUT.
+- **검증**: vitest — 중복 globalIdx 감지, gap 감지, 정상 재정렬 시 coverage ok·순서 반영. 수동: UI 재정렬→저장→재로드 일관.
 
-## 7. 조립 변경 (index.ts) + 소스 레지스트리
-
-### 7-1. index.ts
-```ts
-import { buildSourceRegistry } from './viewer/sourceRegistry.js';
-...
-const sources = tools.viewer.enabled ? buildSourceRegistry(tools) : undefined;
-const app = await buildServer({   // async 화(§4)
-  orchestrator, repo, camera, vpd, brain, mapFiles: tools.map, discovery: tools.discovery,
-  presetProvider, refreshOnRun: tools.presetProvider.refreshOnRun,
-  captureJob, finalizer, sqlite, capture: tools.capture,
-  viewer: tools.viewer, sources,            // 가산
-});
-await app.listen({ port: tools.server.port, host: '0.0.0.0' });
-```
-- 로그 한 줄에 `viewerEnabled: tools.viewer.enabled` 추가(선택).
-
-### 7-2. sourceRegistry 시그니처 변경
-현재 `buildSourceRegistry(cfg: ViewerConfig)` 가 `cfg.camera`·`cfg.cameraSources` 사용. ToolsConfig 도 동일 필드(`camera`·`cameraSources`)를 가지므로 시그니처만 변경:
-```ts
-export function buildSourceRegistry(cfg: Pick<ToolsConfig, 'camera' | 'cameraSources'>): Map<string, CameraSource>
-```
-- 본문 로직 불변(폴백: cameraSources 없으면 단일 sim).
-- `SimulatorSource` 가 받는 `new CameraClient(cfg.camera)` — SettingAgent CameraClient 생성자는 `ToolsConfig['camera']` 를 받으므로 타입 일치(이미 동일 shape).
-
----
-
-## 8. 테스트 이관 (vitest)
-
-### 8-1. 그대로 이동(경로 보정만)
-| 원본(viewer/test) | 대상(SettingAgent/test) | 보정 |
-|-------------------|-------------------------|------|
-| `cameraClientList.test.ts` | 동일 | import `../src/clients/CameraClient.js`(경로 동일). `ViewerConfig['camera']` 타입 참조 → `ToolsConfig['camera']` 로 변경(또는 인라인 객체 유지) |
-| `simulatorSource.test.ts` | 동일 | `../src/viewer/SimulatorSource.js` 경로 동일 → 무보정 |
-| `realPtzSource.test.ts` | 동일 | `CameraSourceConfig` import 출처 → `../src/config/toolsConfig.js` |
-| `sourceRegistry.test.ts` | 동일 | `buildSourceRegistry` 인자 타입(ViewerConfig→ToolsConfig 부분) 보정 |
-| `viewerRoutes.test.ts` | 동일 | `registerViewerRoutes`·`CameraSource` import 경로 동일. `ViewerConfig` import → 제거/인라인 |
-| `viewerCore.test.ts` | 동일 | `../web/core.js` 경로 동일 → 무보정 |
-| `analyzeArtifact.test.ts` | 동일 | `../web/core.js` → 무보정 |
-| `findPresetPtz.test.ts` | 동일 | `../web/core.js` → 무보정 |
-| `panelResize.test.ts` | 동일 | `../web/core.js` → 무보정 |
-| `captureCore.test.ts` | 동일 | `../web/core.js` → 무보정 |
-
-### 8-2. 대체/수정(프록시 폐기로 의미 변경)
-- **`mappingProxy.test.ts` → `mappingDirect.test.ts`(대체)**: 더 이상 upstream HTTP 흉내가 무의미. `buildServer` 를 repo 스텁(`loadArtifact` 가 산출물/null 반환)으로 띄워 `/viewer/api/mapping` 이:
-  - 산출물 있음 → 200 + JSON(`repo.loadArtifact()` 결과) 패스스루
-  - 산출물 없음 → 404 `{error:'no setup artifact'}`
-  를 검증. (502/타임아웃 케이스는 자기호출 제거로 소멸 → 삭제.)
-- **`captureProxy.test.ts` → 삭제(기존 `captureRoutes.test.ts` 가 커버)**: SPA 가 `/capture/*` 를 직접 호출하므로 프록시 alias 가 없다. `/capture/*` 동작은 SettingAgent 기존 `captureRoutes.test.ts`(11KB, 이미 통과)가 검증. 별도 뷰어용 capture 테스트 불필요.
-  - 대신 통합 회귀로 **`viewerEnabled.test.ts`(신규, 소형)** 추가 권장: `viewer.enabled=false` 면 `/viewer/api/health` 가 404, `true` 면 200 + `/health`(루트)·`/capture/status` 가 enabled 무관하게 동작 — 헤드리스 강등·라우트 충돌 없음을 1개 파일로 검증.
-
-### 8-3. 검증 목표
-- SettingAgent 단일 `npm test`(vitest) 가 **기존 156 + 이관분(약 11개 파일)** 전부 통과.
-- `npm run typecheck` 무오류(이동 파일 import 경로 보정 포함).
+> 단계 5(서버 PUT)는 3·4·6 모두의 저장 의존성. 구현 순서상 3에서 PUT 골격을 먼저 세우고(단계 5 일부 선행), 4·6 은 클라이언트 편집 + 동일 PUT 재사용으로 진행 권장.
 
 ---
 
-## 9. SettingViewer 폴더 처리 + 루트 워크스페이스
+## 파일별 신규/수정
 
-1. **doc 이관(이력 보존)**: `SettingViewer/doc/*.md`(7개) → `SettingAgent/docs/` 로 이동(파일명 유지). SettingViewer 설계·검증·분리 이력 보존.
-2. **소스/테스트/web/config 이동·삭제 완료** 후 `SettingViewer/` 폴더 **전체 제거**.
-3. **루트 `package.json` workspaces** 에서 `"SettingViewer"` 제거 → `["packages/*", "SettingAgent"]`.
-4. **bat 정리**: `setviewer.bat` 제거(통합으로 무의미). `setagent.bat` 유지(`cd SettingAgent && npm start` 가 뷰어까지 서빙). — 루트 정리 항목으로 명시(구현자 재량, 선택).
-5. **루트 `package-lock.json`**: workspaces 변경 후 `npm install` 1회로 갱신(`@fastify/static` 을 SettingAgent dep 로 정식 등록).
+### 서버(TypeScript ESM)
+- `src/api/server.ts` — **수정(가산)**: `SetupArtifactSchema`(zod), `PUT /mapping`, viewer 블록에 `PUT /viewer/api/mapping`. 저장 핸들러는 `validateCoverage` 게이트. 기존 `GET /mapping` 불변.
+- `src/setup/GlobalIndexer.ts` — **불변**(재사용: `buildGlobalIndex`, `validateCoverage`). 서버는 이미 import 가능.
+- `src/store/Repository.ts` — **불변**(`saveArtifact` 그대로 사용).
 
----
+### 뷰어 순수 로직 — `web/core.js`(전부 vitest 대상, DOM/fetch 미참조)
+- `diffArtifactVsCameras(artifact, cameras)` — #4 진단.
+- `pointInRect`, `pointInQuad`, `hitTestSlots` — #1 히트테스트.
+- `rebuildGlobalIndex(slots, presets)` — coveredSlotIds 순서 기반 globalIndex 재생성(삭제·정합 공용).
+- `removeSlot(artifact, slotId)` — #2 삭제 후 정합 재구성.
+- `clamp01Rect`, `resizeRect`, `updateSlotRoi` — #3 크기 조정.
+- `validateManualIndex`, `reorderGlobalIndex` — #7 수동 매핑.
+- `core.d.ts` — 신규 export 타입 시그니처 추가(기존 패턴 유지).
 
-## 10. 단계별 작업 순서 + 각 단계 검증
+### 뷰어 상호작용 — `web/app.js`(환경 의존, 비테스트)
+- state 확장: `selectedSlotId`, (편집 중) `editing` 플래그. 기존 `state.mapping` 을 편집 대상으로 사용.
+- overlay click/mousedown/mousemove/mouseup 결선(선택·핸들 드래그). `drawRoiOverlay` 에 선택 하이라이트·핸들 렌더 추가.
+- `saveMapping()`(PUT), 삭제/저장 버튼 핸들러, #7 UI 결선.
 
-```
-1. [설정 병합] toolsConfig.ts 에 ViewerSchema·CameraSourceConfigSchema·cameraSources 패스스루 추가.
-              tools.config.json 에 viewer 섹션 추가. package.json 에 @fastify/static 추가.
-   → 검증: npm run typecheck 통과. config.test.ts 통과(viewer 기본값 로드 확인).
+### UI — `web/index.html`, `web/app.css`
+- 검수 탭: "선택 슬롯 삭제", "저장" 버튼 + 선택 슬롯 정보 표시. (핸들은 캔버스 렌더.)
+- 분석 탭(또는 신규): "전역 인덱스 수동 매핑" 영역 + 정합 표시.
+- 선택 하이라이트·핸들·경고 스타일(app.css 가산).
 
-2. [소스 이동] src/viewer/*(5파일) 이동 + import 경로 보정(CameraSourceConfig→toolsConfig).
-              CameraClient.listCameras() 재추가(CameraList from ../viewer/CameraSource.js).
-   → 검증: npm run typecheck 통과.
-
-3. [서버 통합] buildServer async 화 + viewer.enabled 분기(/viewer/api/mapping 직접읽기 + registerViewerRoutes).
-              ApiDeps 에 viewer?·sources? 추가.
-   → 검증: typecheck 통과. 기존 buildServer 사용 테스트(apiRefresh 등) await 보정 후 통과.
-
-4. [조립] index.ts 에서 buildSourceRegistry 로 sources 빌드 → buildServer 주입(await).
-   → 검증: typecheck 통과. npm run dev 기동 → http://localhost:13020/viewer/ 200, /health 200.
-
-5. [SPA 이동] web/* 이동. app.js capture 4줄(status/start/stop/finalize) → /capture/* 직접호출.
-   → 검증: 브라우저 접속 — 카메라/스냅샷/이동/프리셋이동/정밀수집/분석탭 동작(Play 상응).
-
-6. [테스트 이관] viewer/test 11파일 이동·경로보정. mappingProxy→mappingDirect 대체.
-              captureProxy 삭제. viewerEnabled.test.ts 신규.
-   → 검증: npm test — 기존 156 + 이관분 전부 통과(회귀 0).
-
-7. [정리] doc 이관(SettingViewer/doc→SettingAgent/docs). SettingViewer/ 삭제.
-         루트 package.json workspaces 에서 SettingViewer 제거. npm install 로 lock 갱신.
-   → 검증: npm test(루트/SettingAgent) 통과. SettingViewer 참조 잔존 0(grep).
-```
+### 테스트 — `test/`
+- 신규: `roiEdit.test.ts`(히트테스트·resize·removeSlot·rebuildGlobalIndex), `manualIndex.test.ts`(validate/reorder), `mappingPut.test.ts`(`app.inject` PUT 200/400). `diffArtifactVsCameras` 는 `viewerCore.test.ts` 에 추가 가능.
 
 ---
 
-## 11. 영향도 사전분석
+## 순수 함수 ↔ 환경 의존 분리(테스트 경계)
 
-| 대상 | 영향 | 근거 |
-|------|------|------|
-| `@parkagent/types`(SetupArtifact 등) | **무영향** | 타입 변경 없음. `/mapping` 응답 shape 동일(repo.loadArtifact) |
-| ActionAgent / DMAgent | **무영향** | SettingAgent 외부 계약(`/setup`·`/mapping`·`/capture`) 불변. 별 워크스페이스 |
-| `/setup/*` 계약 | **무영향** | 미수정 |
-| `/capture/*` 계약 | **무영향** | 라우트·핸들러 불변. SPA 가 직접 호출하도록만 변경(서버측 동일) |
-| `/mapping` 루트 라우트 | **무영향** | 기존 `/mapping`(repo 직접) 그대로. 신설은 `/viewer/api/mapping`(별 경로) |
-| `/health` 루트 라우트 | **무영향** | 뷰어는 `/viewer/api/health`(별 경로) |
-| 기존 156 vitest | **회귀 0 목표** | 변경은 가산·async 보정뿐. buildServer async 화로 호출부 await 보정만 필요(소수 테스트) |
-| MCP 도구 / LLM 두뇌 경계 | **무영향** | 통합은 REST·정적 서빙 계층. MCP server(src/mcp)·brain 미수정 |
-| 런타임 포트 | 13030 폐기, 13020 단일 | setviewer.bat 제거 |
-
-**MCP 도구 vs LLM 두뇌 경계 판단**: 이번 작업은 **둘 다 아님**. 순수 인프라(REST 라우팅·정적 파일 서빙·설정 통합) 변경으로, 결정형 도구(센터라이징/PTZ 루프)도 LLM 판단도 신설하지 않는다. CameraSource 추상화는 기존 결정형 카메라 제어(req_img/req_move/cameras)의 어댑터일 뿐 — 경계 변동 없음.
+| 순수(core.js·vitest) | 환경 의존(app.js·수동) |
+|---|---|
+| diffArtifactVsCameras, pointInRect/Quad, hitTestSlots, removeSlot, rebuildGlobalIndex, clamp01Rect, resizeRect, updateSlotRoi, validateManualIndex, reorderGlobalIndex | 캔버스 좌표 변환, 마우스 이벤트, fetch(PUT/GET), DOM 렌더 |
+| 서버: validateCoverage(기존), SetupArtifactSchema 파싱 | Repository 파일 IO(기존) |
 
 ---
 
-## 12. 리스크 & 완화
+## MCP 도구 vs LLM 두뇌 경계 판단
 
-| 리스크 | 영향 | 완화 |
-|--------|------|------|
-| `buildServer` async 화로 기존 테스트 호출부 깨짐 | 회귀 | (대안) `app.register(async i => registerViewerRoutes(i,...))` 로 감싸 buildServer 동기 유지 + 테스트 `await app.ready()`. 둘 중 회귀 적은 쪽 채택. 먼저 grep 으로 buildServer 호출처 전수 확인 |
-| `loadToolsConfig` 의 cameraSources(배열) 병합 누락 | cameraSources 무시됨 | §5 패스스루 한 줄 추가 + config.test.ts 에 케이스 보강 |
-| app.js capture 경로 누락 수정 | 정밀수집 탭 깨짐 | §6 표의 4줄 정확 명시(status/start/stop/finalize). runs/aggregate 는 app.js 미사용 |
-| `/viewer/api/*` 와일드카드 vs 정확경로 순서 | mapping/capture 404 | routes.ts 가 이미 API 라우트 뒤에 static 등록. `/viewer/api/mapping` 은 그 앞(§4 등록 순서 준수) |
-| `@fastify/static` 버전 불일치 | 기동 실패 | 루트에 9.1.3 호이스팅 확인됨(fastify 5.8.5 호환). package.json `^9.0.0` 선언 + npm install |
-| 중복 제거 누락(viewer http.ts·CameraClient·viewerConfig 잔존) | 데드코드·혼란 | §3-4 삭제 목록 체크리스트화. 7단계 grep 으로 `SettingViewer`·`viewerConfig`·`buildViewerServer` 참조 0 확인 |
-| `CameraList` 타입 위치 | 빌드 오류 | viewer `CameraSource.ts` 와 함께 이동되므로 SettingAgent 내부에 존재. CameraClient.listCameras 가 `../viewer/CameraSource.js` 에서 import |
-| 헤드리스(enabled=false) 시 sources 미빌드 | RealPtz/sim 의존 누락 | index.ts 에서 `enabled ? buildSourceRegistry(tools) : undefined`. buildServer 가 `viewer.enabled && sources` 이중 가드 |
+- 이 기능 전체는 **사람-인-더-루프 수동 편집 UI** + **결정형 검증/영속화**다. **LLM 두뇌 미사용**(좌표 생성·판단 없음). 좌표 불변식(§0-4: LLM 좌표 생성 금지)과 정합 — 편집은 사용자 입력, 검증은 순수 함수, 저장은 Repository.
+- 실시간 반복 루프(센터라이징/PTZ 미세이동) 아님 → MCP 결정형 도구 신설 불필요. 기존 REST 계약에 **쓰기 1개(PUT)** 가산만으로 충족.
 
 ---
 
-## 13. 미해결 / 가정 (리더 확인 필요 시)
+## 영향도 분석
 
-1. **buildServer async 화 vs register 래핑**: 본 설계는 async 화를 권장하되, buildServer 호출처 전수 조사 후 회귀가 적은 쪽을 구현자가 택하도록 위임. (둘 다 동작상 동등) — 진행 가능, 별도 승인 불요.
-2. **setviewer.bat / setagent.bat**: 통합 후 setviewer.bat 제거를 제안. 마스터가 두 bat 유지를 원하면 setagent.bat 만 남기는 것으로 충분(뷰어 포함 서빙). — 기본은 setviewer.bat 제거로 진행.
-3. **cameraSources 실 PTZ(hucoms) 항목**: 현재 viewer.config.json 에 cameraSources 미기재(단일 sim 폴백). 통합 후에도 동일 폴백 유지 → 실 PTZ 사용 시 tools.config.json 에 cameraSources 추가(기존 viewer 와 동일 절차). 신규 기능 아님.
+- **계약 불변**: SetupArtifact 형식·필드 그대로. Action/DM 은 같은 파일을 읽으므로 **무영향**(편집은 같은 형식 갱신).
+- **기존 회귀 0 목표**: `GET /mapping`·`/viewer/api/mapping`·`/setup/*`·`/capture/*` 라우트 불변(가산만). 기존 281개 테스트 통과 유지. 신규 PUT 은 추가 라우트.
+- **뷰어 비편집 경로 불변**: 스트림 루프·정밀 수집·분석 탭 기존 동작 보존(가산 UI).
+- **Finalizer 불변**: 최종화는 여전히 자동 산출물을 쓴다. 편집은 그 위에 사용자 수정. (동시성 리스크는 아래.)
 
-이상 — 구현자(developer)는 §3·§4·§5·§6·§7·§10 을 그대로 따르고, 검증자(qa-tester)는 §8·§10 의 검증 기준으로 회귀 0 을 확인한다.
+## 리스크 · 완화
+
+1. **편집 중 finalize 동시성**: 사용자가 편집·미저장 상태에서 `/capture/finalize` 가 artifact 를 덮어쓰면 편집 유실. → 완화: 저장 시 `PUT` 응답에 createdAt 비교(낙관적). 1차는 **저장 시 최신 재로드 경고**("산출물이 갱신됨 — 다시 불러오세요")로 단순 처리. finalize 잠금까지는 과설계 — 보류.
+2. **캔버스 좌표 정확도**: 표시 크기(clientWidth) 기준 정규화. img object-fit/letterbox 가 있으면 오차. → 현재 오버레이가 frame.clientWidth/Height 를 그대로 쓰므로 동일 기준 유지(추가 변환 없음). 히트테스트도 같은 분모 사용 → 일관.
+3. **정합 깨짐**: 클라이언트 재구성 버그 시 globalIndex↔slots 불일치. → 서버 `validateCoverage` 가 400 으로 거부(저장 안 됨) → 파일 보호. 순수 함수 vitest 로 1차 차단.
+4. **저장 실패 처리**: 네트워크/400. → app.js 에서 명시적 에러 메시지·미반영(파일 불변). 성공 시에만 `loadMapping` 재동기화.
+5. **#4 가정 오류 가능성**: `/cameras` 에 프리셋3가 실제 노출되는데도 미표시면 가정이 틀림 → 라이브 확인 후 리더 에스컬레이션(코드상 키 불일치 없음 확인됨).
+
+---
+
+## 미해결 / 가정(리더 확인 요청)
+
+- **A. #7 UI 위치**: 분석 탭에 넣을지(읽기 중심 탭) 신규 "매핑 편집" 탭을 만들지. → 1차 제안: **분석 탭에 가산**(신규 탭 회피, 단순함). 이의 시 알려주세요.
+- **B. 저장 모델**: "명시적 저장 버튼"(편집은 메모리, 저장 시 1회 PUT) 가정. 자동 저장(편집마다 PUT) 아님(동시성·실수 위험↓). 동의 확인.
+- **C. floor 사변형 편집**: 1차 **범위 제외**(사각형만). 동의 확인.
+- **D. #4 실제 원인 확정**: 코드·현 데이터로는 "네비게이션 불가" 가설이 가장 유력하나, `/cameras` 응답 실측은 라이브 필요(이번 금지). developer 가 단계 1 안내를 넣고, 라이브 확인은 별도 진행 권장.

@@ -79,4 +79,38 @@ describe('analyzeArtifact (최종 셋업 산출물 분석)', () => {
       { key: '2:1', camIdx: 2, presetIdx: 1, label: 'Preset 1', slotCount: 1 },
     ]);
   });
+
+  it('floorRoiByPreset → slot.hasFloor + totals.withFloor 카운트', () => {
+    const withFloor = {
+      ...sample,
+      slots: [
+        {
+          slotId: 'c1p1s1',
+          zone: 'A-01',
+          roiByPreset: { '1:1': { x: 0.1, y: 0.2, w: 0.3, h: 0.4 } },
+          floorRoiByPreset: {
+            '1:1': [
+              { x: 0.1, y: 0.6 },
+              { x: 0.4, y: 0.6 },
+              { x: 0.36, y: 0.4 },
+              { x: 0.14, y: 0.4 },
+            ],
+          },
+        },
+        { slotId: 'c1p1s2', zone: 'A-02', roiByPreset: { '1:1': { x: 0.5, y: 0.2, w: 0.2, h: 0.3 } } },
+      ],
+    };
+    const a = analyzeArtifact(withFloor);
+    expect(a.totals.withFloor).toBe(1);
+    const s0 = a.slots.find((s) => s.slotId === 'c1p1s1')!;
+    const s1 = a.slots.find((s) => s.slotId === 'c1p1s2')!;
+    expect(s0.hasFloor).toBe(true);
+    expect(s1.hasFloor).toBe(false);
+  });
+
+  it('floor 없는 산출물 → withFloor=0, 모든 slot.hasFloor=false', () => {
+    const a = analyzeArtifact(sample);
+    expect(a.totals.withFloor).toBe(0);
+    expect(a.slots.every((s) => s.hasFloor === false)).toBe(true);
+  });
 });

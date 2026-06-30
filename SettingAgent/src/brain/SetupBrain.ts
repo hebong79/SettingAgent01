@@ -96,6 +96,26 @@ export const FinalizeCaptureResultSchema = z.object({
 });
 export type FinalizeCaptureResult = z.infer<typeof FinalizeCaptureResultSchema>;
 
+// ── 바닥 점유 영역(floor ROI · 4점 사변형) 비전 추론 ────────
+// 좌표를 "생성"하는 유일한 단계(원근 접지면). 검증·강등·폴백은 결정형(capture/floorRoi.ts)이 담당.
+export interface FloorRoiInput {
+  camIdx: number;
+  presetIdx: number;
+  /** 프리셋 최근 프레임 JPEG(base64). 비전 모델용. */
+  imageBase64: string;
+  /** 대상 차량 bbox(집계 대표, 정규화). */
+  vehicle: NormalizedRect;
+  /** 번호판 bbox(있으면 앞쪽 단서, 정규화). */
+  plate?: NormalizedRect;
+  /** 로깅/맥락용(예: `presetKey#clusterId`). */
+  slotHint?: string;
+}
+export const FloorRoiResultSchema = z.object({
+  quad: z.array(z.object({ x: z.number(), y: z.number() })).length(4),
+  confidence: z.number().min(0).max(1).default(0),
+});
+export type FloorRoiResult = z.infer<typeof FloorRoiResultSchema>;
+
 /** 셋업 두뇌. 비활성/실패 시 각 메서드는 null 을 반환(결정형 폴백). */
 export interface SetupBrain {
   readonly enabled: boolean;
@@ -106,4 +126,6 @@ export interface SetupBrain {
   reviewCheckpoint?(input: CheckpointInput): Promise<CheckpointResult | null>;
   /** 최종화 보조 판정(옵셔널). 비활성 시 null. */
   finalizeCapture?(input: FinalizeCaptureInput): Promise<FinalizeCaptureResult | null>;
+  /** 바닥 점유 영역(floor ROI · 4점) 비전 추론(옵셔널). 비활성/미설정 시 null. */
+  recognizeFloorRoi?(input: FloorRoiInput): Promise<FloorRoiResult | null>;
 }

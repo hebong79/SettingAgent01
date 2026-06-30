@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // 순수 ESM 모듈(브라우저 API 미참조) 직접 import.
 import {
   toPixel,
+  toPixelQuad,
   presetKey,
   slotLabel,
   fpsToInterval,
@@ -16,6 +17,23 @@ describe('toPixel (G2 — 0~1 × 표시크기 환산)', () => {
   });
   it('정규화 ROI → 픽셀(부분)', () => {
     expect(toPixel({ x: 0.5, y: 0.25, w: 0.1, h: 0.2 }, 800, 600)).toEqual({ px: 400, py: 150, pw: 80, ph: 120 });
+  });
+});
+
+describe('toPixelQuad (floor ROI 폴리곤 픽셀 변환)', () => {
+  it('정규화 4점 → 표시 픽셀 점 배열', () => {
+    const quad: [{ x: number; y: number }, { x: number; y: number }, { x: number; y: number }, { x: number; y: number }] = [
+      { x: 0, y: 1 },
+      { x: 1, y: 1 },
+      { x: 0.8, y: 0.5 },
+      { x: 0.2, y: 0.5 },
+    ];
+    expect(toPixelQuad(quad, 800, 600)).toEqual([
+      { px: 0, py: 600 },
+      { px: 800, py: 600 },
+      { px: 640, py: 300 },
+      { px: 160, py: 300 },
+    ]);
   });
 });
 

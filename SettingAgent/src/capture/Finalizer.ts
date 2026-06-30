@@ -4,11 +4,13 @@ import type { SetupBrain, FinalizeCaptureResult } from '../brain/SetupBrain.js';
 import type { ToolsConfig } from '../config/toolsConfig.js';
 import { aggregate, type AggregateOptions } from './Aggregator.js';
 import { clusterRef } from './CheckpointReviewer.js';
+import { fallbackQuadFromRect } from './floorRoi.js';
 import { orderByPosition } from '../setup/ordering.js';
 import { buildGlobalIndex, validateCoverage, type IndexableSlot } from '../setup/GlobalIndexer.js';
 import { pad } from '../domain/geometry.js';
 import type {
   GlobalSlotIndex,
+  NormalizedQuad,
   NormalizedRect,
   ParkingSlot,
   Preset,
@@ -106,7 +108,12 @@ export class Finalizer {
 
     // 4) 채택 클러스터만 → 프리셋별 positionIdx 부여 → ParkingSlot/Preset 조립.
     const accepted = fresh.filter((s) => s.status === 'candidate' && !rejectedRefs.has(clusterRef(s)));
-    const { presets, slots, indexable } = this.assemble(accepted, llm?.zoneLabels ?? {});
+    // floor ROI(체크포인트 LLM 산출, 별 테이블) 를 clusterRef 키로 조회 가능하게 맵 구성(가산).
+    const floorByRef = new Map<string, NormalizedQuad>();
+    for (const f of this.deps.store.getFloorRois(runId)) {
+      floorByRef.set(`${f.presetKey}#${f.clusterId}`, f.quad);
+    }
+    const { presets, slots, indexable } = this.assemble(accepted, llm?.zoneLabels ?? {}, floorByRef);
 
     const globalIndex: GlobalSlotIndex[] = buildGlobalIndex(indexable);
     const coverage = validateCoverage(globalIndex, slots);
@@ -131,6 +138,7 @@ export class Finalizer {
   private assemble(
     accepted: AggregatedSlot[],
     zoneLabels: Record<string, string>,
+    floorByRef: Map<string, NormalizedQuad>,
   ): { presets: Preset[]; slots: ParkingSlot[]; indexable: IndexableSlot[] } {
     const byPreset = new Map<string, AggregatedSlot[]>();
     for (const s of accepted) {
@@ -164,6 +172,10 @@ export class Finalizer {
         if (m.plateX !== null && m.plateY !== null && m.plateW !== null && m.plateH !== null) {
           slot.plateRoiByPreset = { [key]: { x: m.plateX, y: m.plateY, w: m.plateW, h: m.plateH } };
         }
+        // 바닥 영역은 항상 부여: 체크포인트 LLM 산출이 있으면 그것을, 없으면 bbox 유도 폴백을 사용
+        // → 최종화 시 모든 채택 슬롯이 바닥 점유 영역을 갖는다(LLM 미커버·미도달에도 그려짐).
+        const fquad = floorByRef.get(clusterRef(m)) ?? fallbackQuadFromRect(rects[srcIdx]);
+        slot.floorRoiByPreset = { [key]: fquad };
         slots.push(slot);
         indexable.push({ slotId, camIdx, presetIdx, positionIdx });
       });

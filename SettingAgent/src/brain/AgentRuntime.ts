@@ -9,7 +9,10 @@ import {
   Stage3ResultSchema,
   CheckpointResultSchema,
   FinalizeCaptureResultSchema,
+  FloorRoiResultSchema,
   type SetupBrain,
+  type FloorRoiInput,
+  type FloorRoiResult,
   type Stage1Input,
   type Stage1Result,
   type Stage2Input,
@@ -137,6 +140,21 @@ export class AgentRuntime implements SetupBrain {
       'zoneLabels 의 키는 slotId 이다. duplicates/rejects 의 식별자는 "presetKey#clusterId" 형식이다. ' +
       '스키마: { duplicates: string[][], zoneLabels: {slotId:label}, rejects: string[], report_ko: string }';
     return this.chatJson(system, user, (j) => FinalizeCaptureResultSchema.parse(j), undefined, false);
+  }
+
+  // ── 바닥 점유 영역(floor ROI · 4점) 비전 추론 ──────────────
+  // 좌표 "생성" 단계(원근 접지면). 검증·강등·폴백은 호출측 결정형(capture/floorRoi.ts).
+  async recognizeFloorRoi(input: FloorRoiInput): Promise<FloorRoiResult | null> {
+    if (!this.client || this.cfg.floorRoi?.enabled !== true) return null;
+    const p = this.cfg.floorRoi.prompt;
+    const system = loadPrompt(p.system);
+    const user = renderTemplate(loadPrompt(p.user), {
+      camIdx: String(input.camIdx),
+      presetIdx: String(input.presetIdx),
+      vehicle: JSON.stringify(input.vehicle),
+      plate: input.plate ? JSON.stringify(input.plate) : '(없음)',
+    });
+    return this.chatJson(system, user, (j) => FloorRoiResultSchema.parse(j), input.imageBase64);
   }
 
   /** 셋업 산출물 자연어 검토(보조, /brain/review). 비활성 시 null. */

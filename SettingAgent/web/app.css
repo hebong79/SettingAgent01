@@ -539,6 +539,91 @@ body.resizing {
   border-bottom: 0;
 }
 
+.slot-list .slot {
+  cursor: pointer;
+}
+
+.slot-list .slot.selected {
+  color: #ff8a8a;
+  font-weight: 700;
+}
+
+.slot-list .slot-empty {
+  color: var(--faint);
+  font-size: 13px;
+  padding: 8px 2px;
+}
+
+/* 주차면 편집 바(선택·삭제·저장). */
+.roi-edit-bar {
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.sel-slot-info {
+  flex: 1;
+  font-size: 12px;
+  color: #c6d0d8;
+}
+
+.map-msg {
+  font-size: 12px;
+  color: var(--faint);
+  margin-bottom: 6px;
+  min-height: 16px;
+}
+
+/* #7 전역 인덱스 수동 매핑. */
+.an-manual {
+  max-height: 320px;
+  overflow: auto;
+}
+
+.an-manual-bar {
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.an-manual-ok {
+  color: #39ff14;
+  font-size: 12px;
+}
+
+.an-manual-bad {
+  color: var(--warn);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.an-manual-msg {
+  font-size: 12px;
+  color: var(--faint);
+}
+
+.an-manual-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 2px;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 13px;
+}
+
+.an-manual-idx {
+  width: 42px;
+  color: var(--faint);
+}
+
+.an-manual-id {
+  flex: 1;
+}
+
+.an-manual-row button {
+  padding: 2px 8px;
+}
+
 /* 정밀 수집 패널: precise 탭일 때 패널 최상단으로 끌어올려 강조. */
 .precise-box {
   order: -1;
@@ -619,6 +704,53 @@ body.resizing {
   color: var(--accent) !important;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
+}
+
+/* ── 정밀 수집 결과 메시지 박스(모달) ─────────────────── */
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.modal-box {
+  min-width: 300px;
+  max-width: 440px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 20px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.modal-box h3 {
+  margin: 0 0 12px;
+  font-size: 17px;
+}
+
+.modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.modal-body div:last-child {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
 }
 
 .cap-advisory {

@@ -84,10 +84,13 @@ LLM 서버가 없으면 `config/llm.config.json` 의 `llm.enabled=false` → 결
 | POST | `/setup/export-camerapos` | 공급자(A/B)로 camerapos.json 생성 |
 | GET | `/setup/status` | 진행 상태 |
 | GET | `/mapping` | 최종 산출물 조회 |
+| PUT | `/mapping` (·`/viewer/api/mapping`) | 편집된 산출물 영속화(주차면 ROI 삭제·크기조정·전역 인덱스 수동 매핑). zod→`validateCoverage` 정합 게이트 통과 시 저장, 불일치 400 미저장. 문서: `docs/20260630_112704_주차면편집_수동인덱스_표시제어.md` |
 | GET | `/brain/ping` | LLM 연결 점검 |
 | POST | `/brain/review` | 산출물 LLM 검토 |
 | GET | `/viewer/`, `/viewer/api/*` | 웹 뷰어(SPA + 카메라/스냅샷/이동/mapping). `viewer.enabled=true` 일 때만. 접속: `http://localhost:13020/viewer/` |
 | POST | `/capture/start`·`/stop`·`/finalize`, GET `/capture/status`·`/runs` | 정밀 수집(반복 관측→SQLite 누적→집계→LLM 보정→`setup_artifact.json`). 단발 `/setup/*` 보완. 문서: `docs/20260625_233818_정밀주차면_반복수집_구현문서.md` |
+
+> 바닥 ROI(floor ROI): `llm.config` 의 `floorRoi.enabled=true` 시 정밀수집 체크포인트마다 LLM 비전이 차량 지면 접지 4점 사변형을 추론해 `slots[].floorRoiByPreset` 에 가산. 뷰어 `바닥` 토글(연두 폴리곤)로 표시. 문서: `docs/20260629_235626_차량바닥ROI_LLM비전_floorRoi.md`
 
 ---
 
@@ -110,10 +113,12 @@ npm run mcp               # MCP 도구 서버(stdio)
 `data/setup_artifact.json` (= `GET /mapping`):
 ```
 presets[]     { camIdx, presetIdx, label, coveredSlotIds[], pan/tilt/zoom }
-slots[]       { slotId, zone, roiByPreset(차량 ROI), plateRoiByPreset?(번호판 ROI) }
+slots[]       { slotId, zone, roiByPreset(차량 ROI), plateRoiByPreset?(번호판 ROI), floorRoiByPreset?(바닥 점유 4점 사변형) }
 globalIndex[] { globalIdx, slotId, camIdx, presetIdx }   // cam→preset→위치, 1-based
 warnings?, report?
 ```
+
+> 뷰어 검수/분석 탭에서 주차면(ROI) **선택·삭제·크기조정**과 **전역 인덱스 수동 재정렬**을 한 뒤 "저장"(`PUT /mapping`)으로 이 파일을 갱신할 수 있다(정합 게이트 통과 시에만 기록).
 
 ---
 

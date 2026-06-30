@@ -31,4 +31,15 @@ describe('config 분리', () => {
     expect(() => loadToolsConfig()).not.toThrow();
     expect(() => loadLlmConfig()).not.toThrow();
   });
+
+  it('floorRoi: 기본값은 비활성(하위호환), 실제 config 는 활성', () => {
+    // 미설정 경로 → DEFAULT 의 floorRoi(enabled=false).
+    const def = loadLlmConfig('config/__nope__.json');
+    expect(def.floorRoi?.enabled).toBe(false);
+    expect(def.floorRoi?.maxPerCheckpoint).toBe(12);
+    // 실제 config/llm.config.json → enabled=true(gemma 사용).
+    const real = loadLlmConfig();
+    expect(real.floorRoi?.enabled).toBe(true);
+    expect(real.floorRoi?.prompt.system).toMatch(/floor_roi\.system/);
+  });
 });

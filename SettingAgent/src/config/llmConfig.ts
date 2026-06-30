@@ -50,10 +50,19 @@ const SetupPromptsSchema = z.object({
   stage3: PromptPairSchema, // 최종 검증 + 설치 리포트
 });
 
+/** 바닥 점유 영역(floor ROI · 4점 사변형) 비전 추론 설정(옵셔널 — 미설정 시 비활성). */
+const FloorRoiSchema = z.object({
+  enabled: z.boolean(),
+  /** 체크포인트 1회당 LLM 호출 상한(토큰·시간 비용 제한). 초과분은 다음 주기에. */
+  maxPerCheckpoint: z.number().int().positive().default(12),
+  prompt: PromptPairSchema,
+});
+
 export const LlmConfigSchema = z.object({
   llm: LlmSchema,
   mcp: McpSchema,
   setupPrompts: SetupPromptsSchema,
+  floorRoi: FloorRoiSchema.optional(),
 });
 
 export type LlmConfig = z.infer<typeof LlmConfigSchema>;
@@ -83,6 +92,11 @@ export const DEFAULT_LLM_CONFIG: LlmConfig = {
     stage2: { system: 'config/prompts/stage2_dedupe_label.system.md', user: 'config/prompts/stage2_dedupe_label.user.md' },
     stage3: { system: 'config/prompts/stage3_final_report.system.md', user: 'config/prompts/stage3_final_report.user.md' },
   },
+  floorRoi: {
+    enabled: false,
+    maxPerCheckpoint: 12,
+    prompt: { system: 'config/prompts/floor_roi.system.md', user: 'config/prompts/floor_roi.user.md' },
+  },
 };
 
 /** llm.config.json 을 로드한다. 파일이 없으면 기본값을 검증해 반환. `_comment` 등 부가 키는 무시. */
@@ -93,6 +107,7 @@ export function loadLlmConfig(path = 'config/llm.config.json'): LlmConfig {
       llm: { ...DEFAULT_LLM_CONFIG.llm, ...(raw.llm as object) },
       mcp: { ...DEFAULT_LLM_CONFIG.mcp, ...(raw.mcp as object) },
       setupPrompts: { ...DEFAULT_LLM_CONFIG.setupPrompts, ...(raw.setupPrompts as object) },
+      floorRoi: { ...DEFAULT_LLM_CONFIG.floorRoi, ...(raw.floorRoi as object) },
     };
     return LlmConfigSchema.parse(merged);
   }

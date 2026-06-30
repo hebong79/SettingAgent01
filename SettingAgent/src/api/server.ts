@@ -16,6 +16,8 @@ import type { SqliteStore } from '../capture/SqliteStore.js';
 import { registerCaptureRoutes } from './captureRoutes.js';
 import { registerViewerRoutes } from '../viewer/routes.js';
 import type { CameraSource } from '../viewer/CameraSource.js';
+import { validateCoverage } from '../setup/GlobalIndexer.js';
+import type { SetupArtifact } from '../domain/types.js';
 
 const TargetSchema = z.object({
   camIdx: z.number().int().positive(),
@@ -25,6 +27,67 @@ const TargetSchema = z.object({
 });
 
 const RunBodySchema = z.object({ targets: z.array(TargetSchema).min(1) });
+
+// 편집된 SetupArtifact 영속화(PUT /mapping)용 shape 검증. 계약(@parkagent/types)과 동일 형태.
+const NormalizedRectSchema = z.object({ x: z.number(), y: z.number(), w: z.number(), h: z.number() });
+const NormalizedPointSchema = z.object({ x: z.number(), y: z.number() });
+const NormalizedQuadSchema = z.tuple([
+  NormalizedPointSchema,
+  NormalizedPointSchema,
+  NormalizedPointSchema,
+  NormalizedPointSchema,
+]);
+const PresetSchema = z.object({
+  camIdx: z.number().int(),
+  presetIdx: z.number().int(),
+  label: z.string(),
+  coveredSlotIds: z.array(z.string()),
+  pan: z.number().optional(),
+  tilt: z.number().optional(),
+  zoom: z.number().optional(),
+});
+const ParkingSlotSchema = z.object({
+  slotId: z.string(),
+  zone: z.string(),
+  roiByPreset: z.record(NormalizedRectSchema),
+  plateRoiByPreset: z.record(NormalizedRectSchema).optional(),
+  floorRoiByPreset: z.record(NormalizedQuadSchema).optional(),
+});
+const GlobalSlotIndexSchema = z.object({
+  globalIdx: z.number().int(),
+  slotId: z.string(),
+  camIdx: z.number().int(),
+  presetIdx: z.number().int(),
+});
+const SetupArtifactSchema = z.object({
+  presets: z.array(PresetSchema),
+  slots: z.array(ParkingSlotSchema),
+  globalIndex: z.array(GlobalSlotIndexSchema),
+  createdAt: z.string(),
+  warnings: z.array(z.string()).optional(),
+  report: z.string().optional(),
+});
+
+/**
+ * PUT /mapping 공유 핸들러(헤드리스·뷰어 동일 로직).
+ * ① zod shape 검증 실패 → 400. ② validateCoverage(globalIndex↔slots) 불일치 → 400(미저장).
+ * ③ 통과 → repo.saveArtifact, { ok, slots, globalCount } 반환.
+ */
+function saveMappingHandler(repo: Repository, body: unknown, reply: { code: (c: number) => void }) {
+  const parsed = SetupArtifactSchema.safeParse(body);
+  if (!parsed.success) {
+    reply.code(400);
+    return { error: 'invalid artifact', detail: parsed.error.flatten() };
+  }
+  const artifact = parsed.data as SetupArtifact;
+  const cov = validateCoverage(artifact.globalIndex, artifact.slots);
+  if (!cov.ok) {
+    reply.code(400);
+    return { error: 'coverage mismatch', missing: cov.missing, extra: cov.extra };
+  }
+  repo.saveArtifact(artifact);
+  return { ok: true, slots: artifact.slots.length, globalCount: artifact.globalIndex.length };
+}
 
 export interface ApiDeps {
   orchestrator: SetupOrchestrator;
@@ -185,6 +248,9 @@ export function buildServer(deps: ApiDeps): FastifyInstance {
     return artifact;
   });
 
+  // 편집된 SetupArtifact 영속화(주차면 ROI 편집·전역 인덱스 수동 매핑). GET /mapping 은 불변.
+  app.put('/mapping', async (req, reply) => saveMappingHandler(deps.repo, req.body, reply));
+
   // 장기 관측·반복 수집(/capture/*). 의존성 주입 시에만 등록(가산, 기존 라우트 불변).
   if (deps.captureJob && deps.finalizer && deps.sqlite && deps.capture) {
     registerCaptureRoutes(app, {
@@ -211,6 +277,8 @@ export function buildServer(deps: ApiDeps): FastifyInstance {
         }
         return artifact;
       });
+      // 편집된 SetupArtifact 영속화(뷰어 컨텍스트). 헤드리스 PUT /mapping 과 동일 로직.
+      instance.put('/viewer/api/mapping', async (req, reply) => saveMappingHandler(deps.repo, req.body, reply));
       // 카메라 라우트 + 정적 SPA(와일드카드는 내부에서 API 라우트 뒤에 register).
       await registerViewerRoutes(instance, { sources, viewer });
     });

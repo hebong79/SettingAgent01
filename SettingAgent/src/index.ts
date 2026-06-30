@@ -11,6 +11,7 @@ import { buildServer } from './api/server.js';
 import { buildSourceRegistry } from './viewer/sourceRegistry.js';
 import { SqliteStore } from './capture/SqliteStore.js';
 import { CheckpointReviewer } from './capture/CheckpointReviewer.js';
+import { FloorRoiReviewer } from './capture/FloorRoiReviewer.js';
 import { CaptureJob } from './capture/CaptureJob.js';
 import { Finalizer } from './capture/Finalizer.js';
 import { loadExpectedFaces } from './setup/mapTargets.js';
@@ -39,8 +40,11 @@ async function main(): Promise<void> {
   const sqlite = new SqliteStore(tools.capture.dbFile);
   const expectedByPreset = loadExpectedFaces(tools.map.presetFile);
   const reviewer = new CheckpointReviewer({ store: sqlite, brain });
+  const floorReviewer = new FloorRoiReviewer({
+    store: sqlite, brain, maxPerCheckpoint: llm.floorRoi?.maxPerCheckpoint,
+  });
   const captureJob = new CaptureJob({
-    camera, vpd, lpd, store: sqlite, reviewer, cfg: tools.capture,
+    camera, vpd, lpd, store: sqlite, reviewer, floorReviewer, cfg: tools.capture,
     lpdEnabled: tools.setup.lpdEnabled, expectedByPreset,
   });
   const finalizer = new Finalizer({

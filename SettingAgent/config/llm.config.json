@@ -23,5 +23,10 @@
     "stage1": { "system": "config/prompts/stage1_preset_judge.system.md", "user": "config/prompts/stage1_preset_judge.user.md" },
     "stage2": { "system": "config/prompts/stage2_dedupe_label.system.md", "user": "config/prompts/stage2_dedupe_label.user.md" },
     "stage3": { "system": "config/prompts/stage3_final_report.system.md", "user": "config/prompts/stage3_final_report.user.md" }
+  },
+  "floorRoi": {
+    "enabled": true,
+    "maxPerCheckpoint": 12,
+    "prompt": { "system": "config/prompts/floor_roi.system.md", "user": "config/prompts/floor_roi.user.md" }
   }
 }

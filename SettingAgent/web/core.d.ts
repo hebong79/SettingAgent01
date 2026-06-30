@@ -16,6 +16,17 @@ export interface PixelRect {
   ph: number;
 }
 
+export interface NormalizedPoint {
+  x: number;
+  y: number;
+}
+export type NormalizedQuad = [NormalizedPoint, NormalizedPoint, NormalizedPoint, NormalizedPoint];
+
+export interface PixelPoint {
+  px: number;
+  py: number;
+}
+
 export interface Ptz {
   pan: number;
   tilt: number;
@@ -44,10 +55,15 @@ export function captureProgress(status: Partial<CaptureStatus> | null | undefine
 };
 export function captureElapsedMs(status: Partial<CaptureStatus> | null | undefined, nowMs: number): number | null;
 export function formatElapsed(ms: number | null | undefined): string;
+export function captureResultSummary(
+  status: Partial<CaptureStatus> | null | undefined,
+  nowMs: number,
+): { title: string; lines: string[] };
 export function mapAdvisory(status: Partial<CaptureStatus> | null | undefined): string[];
 export function pollPlan(state: string, intervalMs?: number): { poll: boolean; intervalMs: number };
 
 export function toPixel(rect: NormalizedRect, imgW: number, imgH: number): PixelRect;
+export function toPixelQuad(quad: NormalizedQuad, imgW: number, imgH: number): PixelPoint[];
 export function presetKey(camIdx: number | string, presetIdx: number | string): string;
 export function slotLabel(slotId: string, globalIndex?: GlobalIndexEntry[]): string;
 export function fpsToInterval(fps: number): number;
@@ -74,6 +90,7 @@ export interface ArtifactAnalysis {
     slots: number;
     globalSlots: number;
     withPlate: number;
+    withFloor: number;
     warnings: number;
     zones: number;
   };
@@ -85,11 +102,68 @@ export interface ArtifactAnalysis {
     presetKey: string;
     roi: NormalizedRect | null;
     hasPlate: boolean;
+    hasFloor: boolean;
   }>;
   warnings: string[];
   report: string;
 }
 export function analyzeArtifact(artifact: unknown): ArtifactAnalysis;
+
+export interface SlotLike {
+  slotId: string;
+  zone?: string;
+  // 편집 순수 함수는 형태만 읽는다(엄격한 quad 튜플 강제 X) — 호출측 입력 부담 완화.
+  roiByPreset?: Record<string, NormalizedRect>;
+  plateRoiByPreset?: Record<string, NormalizedRect>;
+  floorRoiByPreset?: Record<string, NormalizedPoint[] | NormalizedQuad>;
+}
+export interface PresetLike {
+  camIdx: number;
+  presetIdx: number;
+  label?: string;
+  coveredSlotIds?: string[];
+}
+export interface GlobalSlotIndexEntry {
+  globalIdx: number;
+  slotId: string;
+  camIdx: number;
+  presetIdx: number;
+}
+export interface ArtifactLike {
+  presets?: PresetLike[];
+  slots?: SlotLike[];
+  globalIndex?: GlobalSlotIndexEntry[];
+  createdAt?: string;
+  warnings?: string[];
+  report?: string;
+  [k: string]: unknown;
+}
+
+export function diffArtifactVsCameras(
+  artifact: ArtifactLike | null | undefined,
+  cameras: CameraListItem[] | undefined,
+): { artifactOnly: string[]; camerasOnly: string[] };
+export function pointInRect(nx: number, ny: number, rect: NormalizedRect | null | undefined): boolean;
+export function pointInQuad(nx: number, ny: number, quad: NormalizedPoint[] | null | undefined): boolean;
+export function hitTestSlots(args: {
+  nx: number;
+  ny: number;
+  slots: readonly SlotLike[] | undefined;
+  key: string;
+  layers?: { vehicle?: boolean; floor?: boolean };
+}): string | null;
+export function rebuildGlobalIndex(
+  slots: readonly { slotId: string }[] | undefined,
+  presets: readonly PresetLike[] | undefined,
+): GlobalSlotIndexEntry[];
+export function removeSlot<T extends ArtifactLike>(artifact: T, slotId: string): T;
+export function clamp01Rect(rect: NormalizedRect): NormalizedRect;
+export function resizeRect(rect: NormalizedRect, handle: string, ndx: number, ndy: number): NormalizedRect;
+export function updateSlotRoi<T extends ArtifactLike>(artifact: T, slotId: string, key: string, rect: NormalizedRect): T;
+export function validateManualIndex(
+  globalIndex: readonly { globalIdx: number; slotId?: string }[] | undefined,
+): { ok: boolean; duplicates: number[]; gaps: number[] };
+export function reorderGlobalIndex<T extends ArtifactLike>(artifact: T, orderedSlotIds: string[]): T | null;
 
 export interface StreamLoopDeps {
   fetchFn: (url: string, opt: { signal: AbortSignal }) => Promise<{

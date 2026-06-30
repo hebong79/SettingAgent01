@@ -2,6 +2,7 @@
 // 순수 로직은 core.js 에서 import.
 import {
   toPixel,
+  toPixelQuad,
   presetKey,
   slotLabel,
   clampZoom,
@@ -10,11 +11,19 @@ import {
   captureProgress,
   captureElapsedMs,
   formatElapsed,
+  captureResultSummary,
   mapAdvisory,
   pollPlan,
   clampPanelWidth,
   analyzeArtifact,
   findPresetPtz,
+  diffArtifactVsCameras,
+  hitTestSlots,
+  removeSlot,
+  resizeRect,
+  updateSlotRoi,
+  validateManualIndex,
+  reorderGlobalIndex,
 } from './core.js';
 
 const $ = (id) => document.getElementById(id);
@@ -27,8 +36,22 @@ const state = {
   ptz: { pan: 0, tilt: 0, zoom: 1 }, // 현재 카메라 위치(명령 기준: 프리셋 이동·PTZ 제어로 갱신)
   cameras: [], // CameraList.cameras
   mapping: null, // SetupArtifact
+  roiHidden: false, // true 면 ROI/선택 오버레이를 그리지 않음(초기화·수집 시작 시).
   isHucoms: false,
+  selectedSlotId: null, // #1 선택된 주차면 slotId(없으면 null).
 };
+
+// #3 크기 조정 핸들 드래그 상태(캔버스 좌표 변환은 환경 의존 — 여기에서만 사용).
+const HANDLE_PX = 8; // 핸들 사각형 반경(px).
+let dragState = null; // { handle, slotId, key, startRect } | null
+
+/** 화면에 그려진 주차면 ROI·선택 표시를 초기화(데이터는 보존 — 표시만 끔). */
+function clearRoiDisplay() {
+  state.roiHidden = true;
+  state.selectedSlotId = null;
+  drawRoiOverlay();
+  renderSelectionInfo();
+}
 
 const frame = $('frame');
 const overlay = $('overlay');
@@ -136,20 +159,23 @@ function drawRoiOverlay() {
   overlay.height = frame.clientHeight;
   const ctx = overlay.getContext('2d');
   ctx.clearRect(0, 0, overlay.width, overlay.height);
-  if (!state.mapping) return;
+  if (state.roiHidden || !state.mapping) return; // 초기화/수집 중엔 표시 안 함.
   const key = presetKey(state.cam, state.preset);
   const showVehicle = $('roi-vehicle').checked;
   const showPlate = $('roi-plate').checked;
+  const showFloor = $('roi-floor').checked;
   const globalIndex = state.mapping.globalIndex ?? [];
   for (const slot of state.mapping.slots ?? []) {
+    const selected = slot.slotId === state.selectedSlotId;
     const vrect = slot.roiByPreset?.[key];
     if (vrect && showVehicle) {
       const { px, py, pw, ph } = toPixel(vrect, overlay.width, overlay.height);
-      ctx.strokeStyle = '#00e5ff';
-      ctx.lineWidth = 2;
+      ctx.strokeStyle = selected ? '#ff4d4d' : '#00e5ff'; // 선택 슬롯은 굵은 대비색.
+      ctx.lineWidth = selected ? 4 : 2;
       ctx.strokeRect(px, py, pw, ph);
-      ctx.fillStyle = '#00e5ff';
+      ctx.fillStyle = selected ? '#ff4d4d' : '#00e5ff';
       ctx.fillText(slotLabel(slot.slotId, globalIndex), px + 2, py + 12);
+      if (selected) drawHandles(ctx, px, py, pw, ph); // #3 크기 조정 핸들.
     }
     const prect = slot.plateRoiByPreset?.[key];
     if (prect && showPlate) {
@@ -157,6 +183,18 @@ function drawRoiOverlay() {
       ctx.strokeStyle = '#ffd60a';
       ctx.lineWidth = 2;
       ctx.strokeRect(px, py, pw, ph);
+    }
+    const fquad = slot.floorRoiByPreset?.[key];
+    if (fquad && showFloor) {
+      const pts = toPixelQuad(fquad, overlay.width, overlay.height);
+      ctx.beginPath();
+      pts.forEach((p, i) => (i ? ctx.lineTo(p.px, p.py) : ctx.moveTo(p.px, p.py)));
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(57, 255, 20, 0.22)'; // 바닥 점유 영역 — 반투명 채움(영역으로 또렷)
+      ctx.fill();
+      ctx.strokeStyle = '#39ff14';
+      ctx.lineWidth = 2;
+      ctx.stroke();
     }
   }
 }
@@ -167,12 +205,140 @@ function renderSlotList() {
   if (!state.mapping) return;
   const key = presetKey(state.cam, state.preset);
   const globalIndex = state.mapping.globalIndex ?? [];
+  let count = 0;
   for (const slot of state.mapping.slots ?? []) {
     if (!slot.roiByPreset?.[key]) continue;
+    count += 1;
     const div = document.createElement('div');
     div.className = 'slot';
+    if (slot.slotId === state.selectedSlotId) div.classList.add('selected');
     div.textContent = `#${slotLabel(slot.slotId, globalIndex)} ${slot.slotId} (${slot.zone})`;
+    div.addEventListener('click', () => selectSlot(slot.slotId)); // 목록 클릭으로도 선택.
     box.appendChild(div);
+  }
+  if (count === 0) {
+    // #4: 빈 상태 안내 — 데이터 0 vs 네비게이션 불가 구분 힌트.
+    const div = document.createElement('div');
+    div.className = 'slot-empty';
+    div.textContent = '이 프리셋에 주차면 없음 — 다른 프리셋 선택 또는 분석 탭 확인';
+    box.appendChild(div);
+  }
+}
+
+// --- 주차면 선택·삭제·크기조정(#1~#3) -----------------------------------
+/** 4모서리 크기조정 핸들 렌더(선택 슬롯). */
+function drawHandles(ctx, px, py, pw, ph) {
+  const r = HANDLE_PX;
+  const pts = [
+    [px, py], [px + pw, py], [px, py + ph], [px + pw, py + ph],
+  ];
+  ctx.fillStyle = '#ffffff';
+  ctx.strokeStyle = '#ff4d4d';
+  ctx.lineWidth = 2;
+  for (const [cx, cy] of pts) {
+    ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
+    ctx.strokeRect(cx - r, cy - r, r * 2, r * 2);
+  }
+}
+
+/** 캔버스 마우스 이벤트 → 정규화 좌표(오버레이 표시크기 기준, 히트테스트와 동일 분모). */
+function eventToNorm(e) {
+  const rect = overlay.getBoundingClientRect();
+  const nx = (e.clientX - rect.left) / rect.width;
+  const ny = (e.clientY - rect.top) / rect.height;
+  return { nx, ny };
+}
+
+/** 선택 슬롯의 차량 ROI 모서리 핸들 히트(핸들 px 반경). → 'nw'|'ne'|'sw'|'se'|null */
+function hitTestHandle(nx, ny) {
+  if (!state.selectedSlotId || !state.mapping) return null;
+  const key = presetKey(state.cam, state.preset);
+  const slot = (state.mapping.slots ?? []).find((s) => s.slotId === state.selectedSlotId);
+  const vrect = slot?.roiByPreset?.[key];
+  if (!vrect) return null;
+  const w = overlay.width || frame.clientWidth || 1;
+  const h = overlay.height || frame.clientHeight || 1;
+  const tol = HANDLE_PX / w; // x 허용오차(정규화)
+  const tolY = HANDLE_PX / h;
+  const corners = {
+    nw: [vrect.x, vrect.y],
+    ne: [vrect.x + vrect.w, vrect.y],
+    sw: [vrect.x, vrect.y + vrect.h],
+    se: [vrect.x + vrect.w, vrect.y + vrect.h],
+  };
+  for (const [name, [cx, cy]] of Object.entries(corners)) {
+    if (Math.abs(nx - cx) <= tol && Math.abs(ny - cy) <= tolY) return name;
+  }
+  return null;
+}
+
+function selectSlot(slotId) {
+  state.selectedSlotId = slotId;
+  drawRoiOverlay();
+  renderSlotList();
+  renderSelectionInfo();
+}
+
+/** 선택 슬롯 정보·삭제 버튼 활성 상태 갱신. */
+function renderSelectionInfo() {
+  const info = $('sel-slot-info');
+  const delBtn = $('roi-delete');
+  if (!info || !delBtn) return;
+  if (!state.selectedSlotId) {
+    info.textContent = '선택된 주차면 없음';
+    delBtn.disabled = true;
+    return;
+  }
+  const gi = state.mapping?.globalIndex ?? [];
+  info.textContent = `선택: #${slotLabel(state.selectedSlotId, gi)} ${state.selectedSlotId}`;
+  delBtn.disabled = false;
+}
+
+/** 선택 슬롯 삭제(메모리만 — '저장'으로 영속화). */
+function deleteSelectedSlot() {
+  if (!state.selectedSlotId || !state.mapping) return;
+  state.mapping = removeSlot(state.mapping, state.selectedSlotId);
+  state.selectedSlotId = null;
+  markDirty();
+  drawRoiOverlay();
+  renderSlotList();
+  renderSelectionInfo();
+}
+
+// 편집 후 미저장 표시.
+let mappingDirty = false;
+function markDirty() {
+  mappingDirty = true;
+  const m = $('map-msg');
+  if (m) m.textContent = '편집됨(미저장) — 저장을 눌러 반영';
+}
+
+/** 편집된 state.mapping 을 PUT 으로 영속화. 성공 시 재로드, 실패 시 명시적 에러. */
+async function saveMapping() {
+  if (!state.mapping) return;
+  const msg = $('map-msg');
+  try {
+    const res = await fetch(api('/mapping'), {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(state.mapping),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) {
+      mappingDirty = false;
+      if (msg) msg.textContent = `저장됨: 슬롯 ${data.slots}, 전역 ${data.globalCount}`;
+      await loadMapping(); // 서버 정본으로 재동기화.
+      state.selectedSlotId = null;
+      drawRoiOverlay();
+      renderSlotList();
+      renderSelectionInfo();
+    } else if (data.error === 'coverage mismatch') {
+      if (msg) msg.textContent = `저장 실패(정합 불일치): 누락 ${(data.missing ?? []).join(',') || '-'} / 초과 ${(data.extra ?? []).join(',') || '-'}`;
+    } else {
+      if (msg) msg.textContent = `저장 실패: ${data.error ?? res.status}`;
+    }
+  } catch (err) {
+    if (msg) msg.textContent = `저장 실패(네트워크): ${err}`;
   }
 }
 
@@ -331,6 +497,22 @@ function stopCapFramePolling() {
   }
 }
 
+let prevCapState = 'idle';
+
+/** 정밀 수집 종료 결과 메시지 박스 표시. */
+function showCaptureResult(status) {
+  const { title, lines } = captureResultSummary(status ?? {}, Date.now());
+  $('cap-result-title').textContent = title;
+  const body = $('cap-result-body');
+  body.innerHTML = '';
+  for (const l of lines) {
+    const d = document.createElement('div');
+    d.textContent = l;
+    body.appendChild(d);
+  }
+  $('cap-result-modal').hidden = false;
+}
+
 async function capPoll() {
   const status = await capFetchStatus();
   renderCaptureStatus(status);
@@ -344,6 +526,12 @@ async function capPoll() {
       $('cap-msg').textContent = `수집 완료 (${status.done}/${status.planned} 라운드) — '최종화'를 누르면 주차면이 그려집니다`;
     }
   }
+  // 활성 → 종료 전환 시 결과 메시지 박스를 1회 띄운다.
+  const wasActive = prevCapState === 'running' || prevCapState === 'stopping' || prevCapState === 'finalizing';
+  if (wasActive && (st === 'done' || st === 'stopped' || st === 'error')) {
+    showCaptureResult(status);
+  }
+  prevCapState = st;
   const plan = pollPlan(st);
   if (capPollTimer) {
     clearTimeout(capPollTimer);
@@ -354,6 +542,7 @@ async function capPoll() {
 
 async function capStart() {
   $('cap-msg').textContent = '';
+  clearRoiDisplay(); // #6: 수집 시작 시 화면에 그려진 주차면을 깨끗이 정리.
   const body = {
     count: Number($('cap-count').value) || 50,
     intervalMs: (Number($('cap-interval').value) || 30) * 1000,
@@ -381,6 +570,7 @@ async function capFinalize() {
   const data = await res.json().catch(() => ({}));
   if (res.ok) {
     $('cap-msg').textContent = `최종화 완료: 슬롯 ${data.slots}, 전역 ${data.globalCount}`;
+    state.roiHidden = false; // 최종화 결과를 다시 표시.
     await loadMapping(); // 정밀 결과를 검수 탭에 반영.
     drawRoiOverlay();
     renderSlotList();
@@ -462,7 +652,7 @@ async function renderAnalysis() {
   const t = a.totals;
   for (const [l, v] of [
     ['카메라', t.cameras], ['프리셋', t.presets], ['주차면', t.slots],
-    ['전역 인덱스', t.globalSlots], ['번호판 ROI', t.withPlate], ['존', t.zones], ['경고', t.warnings],
+    ['전역 인덱스', t.globalSlots], ['번호판 ROI', t.withPlate], ['바닥 ROI', t.withFloor], ['존', t.zones], ['경고', t.warnings],
   ]) {
     sum.appendChild(summaryCard(l, v));
   }
@@ -486,7 +676,15 @@ async function renderAnalysis() {
 
   const wbox = $('an-warnings');
   wbox.innerHTML = '';
-  if (!a.warnings.length) {
+  // #4: 산출물엔 있으나 카메라 드롭다운에 없는 프리셋 키 → 선택 불가(미표시 원인) 경고.
+  const diff = diffArtifactVsCameras(lastArtifact, state.cameras);
+  for (const k of diff.artifactOnly) {
+    const div = document.createElement('div');
+    div.className = 'an-warn';
+    div.textContent = `프리셋 키 ${k}: 산출물에는 있으나 카메라 드롭다운에 없음 → 검수 탭에서 선택 불가(미표시)`;
+    wbox.appendChild(div);
+  }
+  if (!a.warnings.length && !diff.artifactOnly.length) {
     wbox.textContent = '경고 없음';
   } else {
     for (const w of a.warnings) {
@@ -497,8 +695,97 @@ async function renderAnalysis() {
     }
   }
 
+  renderManualIndex(); // #7 전역 인덱스 수동 매핑 UI.
   $('an-report').textContent = a.report || '(LLM 리포트 없음)';
   $('an-raw').textContent = JSON.stringify(lastArtifact, null, 2);
+}
+
+// --- #7 전역 인덱스 수동 매핑 -------------------------------------------
+// 분석 탭에 가산. lastArtifact 를 편집 대상(orderedSlotIds)으로 사용.
+let manualOrder = []; // 현재 편집 중인 slotId 순서.
+
+function renderManualIndex() {
+  const box = $('an-manual');
+  if (!box) return;
+  box.innerHTML = '';
+  if (!lastArtifact || !Array.isArray(lastArtifact.globalIndex)) {
+    box.textContent = '산출물 없음';
+    return;
+  }
+  // globalIdx 오름차순 초기 순서.
+  manualOrder = [...lastArtifact.globalIndex]
+    .sort((a, b) => a.globalIdx - b.globalIdx)
+    .map((g) => g.slotId);
+  drawManualList();
+}
+
+function drawManualList() {
+  const box = $('an-manual');
+  box.innerHTML = '';
+  const gi = manualOrder.map((slotId, i) => ({ globalIdx: i + 1, slotId }));
+  const v = validateManualIndex(gi);
+  const status = $('an-manual-status');
+  if (status) {
+    status.textContent = v.ok
+      ? '정합 OK (1..N 연속·중복 없음)'
+      : `정합 오류 — 중복:${v.duplicates.join(',') || '-'} 누락:${v.gaps.join(',') || '-'}`;
+    status.className = v.ok ? 'an-manual-ok' : 'an-manual-bad';
+  }
+  manualOrder.forEach((slotId, i) => {
+    const row = document.createElement('div');
+    row.className = 'an-manual-row';
+    const num = document.createElement('span');
+    num.className = 'an-manual-idx';
+    num.textContent = `#${i + 1}`;
+    const id = document.createElement('span');
+    id.className = 'an-manual-id';
+    id.textContent = slotId;
+    const up = document.createElement('button');
+    up.textContent = '▲';
+    up.disabled = i === 0;
+    up.addEventListener('click', () => moveManual(i, -1));
+    const down = document.createElement('button');
+    down.textContent = '▼';
+    down.disabled = i === manualOrder.length - 1;
+    down.addEventListener('click', () => moveManual(i, +1));
+    row.append(num, id, up, down);
+    box.appendChild(row);
+  });
+}
+
+function moveManual(i, delta) {
+  const j = i + delta;
+  if (j < 0 || j >= manualOrder.length) return;
+  [manualOrder[i], manualOrder[j]] = [manualOrder[j], manualOrder[i]];
+  drawManualList();
+}
+
+/** #7 저장: reorderGlobalIndex → PUT(공유 saveMapping 경로 재사용). */
+async function saveManualIndex() {
+  if (!lastArtifact) return;
+  const msg = $('an-manual-msg');
+  const next = reorderGlobalIndex(lastArtifact, manualOrder);
+  if (!next) {
+    if (msg) msg.textContent = '재정렬 실패: slots 집합과 불일치';
+    return;
+  }
+  try {
+    const res = await fetch(api('/mapping'), {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(next),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) {
+      if (msg) msg.textContent = `저장됨: 전역 ${data.globalCount}`;
+      await loadMapping(); // 검수 탭 동기화.
+      await renderAnalysis(); // 분석 탭 재렌더(새 순서 반영).
+    } else {
+      if (msg) msg.textContent = `저장 실패: ${data.error ?? res.status}`;
+    }
+  } catch (err) {
+    if (msg) msg.textContent = `저장 실패(네트워크): ${err}`;
+  }
 }
 
 function downloadArtifact() {
@@ -564,6 +851,56 @@ function wirePanelResize() {
   window.addEventListener('mouseup', onUp);
 }
 
+// --- 오버레이 편집(선택·핸들 드래그) 결선 -------------------------------
+function wireOverlayEditing() {
+  // mousedown: 핸들 위면 리사이즈 시작, 아니면 슬롯 선택/해제.
+  overlay.addEventListener('mousedown', (e) => {
+    if (state.roiHidden || !state.mapping) return;
+    const { nx, ny } = eventToNorm(e);
+    const key = presetKey(state.cam, state.preset);
+    const handle = hitTestHandle(nx, ny);
+    if (handle && state.selectedSlotId) {
+      const slot = (state.mapping.slots ?? []).find((s) => s.slotId === state.selectedSlotId);
+      const startRect = slot?.roiByPreset?.[key];
+      if (startRect) {
+        dragState = { handle, slotId: state.selectedSlotId, key, startRect: { ...startRect }, last: { nx, ny } };
+        e.preventDefault();
+        return;
+      }
+    }
+    // 선택/해제: 차량 ROI(레이어 토글 반영) 히트테스트.
+    const layers = { vehicle: $('roi-vehicle').checked, floor: $('roi-floor').checked };
+    const hit = hitTestSlots({ nx, ny, slots: state.mapping.slots ?? [], key, layers });
+    state.selectedSlotId = hit; // 빈 곳 → null(해제).
+    drawRoiOverlay();
+    renderSlotList();
+    renderSelectionInfo();
+  });
+
+  // mousemove: 리사이즈 진행 중이면 실시간 미리보기.
+  window.addEventListener('mousemove', (e) => {
+    if (!dragState) return;
+    const { nx, ny } = eventToNorm(e);
+    const ndx = nx - dragState.last.nx;
+    const ndy = ny - dragState.last.ny;
+    const slot = (state.mapping.slots ?? []).find((s) => s.slotId === dragState.slotId);
+    const cur = slot?.roiByPreset?.[dragState.key];
+    if (!cur) return;
+    const next = resizeRect(cur, dragState.handle, ndx, ndy);
+    state.mapping = updateSlotRoi(state.mapping, dragState.slotId, dragState.key, next);
+    dragState.last = { nx, ny };
+    drawRoiOverlay();
+  });
+
+  // mouseup: 리사이즈 확정.
+  window.addEventListener('mouseup', () => {
+    if (!dragState) return;
+    dragState = null;
+    markDirty();
+    drawRoiOverlay();
+  });
+}
+
 // --- 이벤트 결선 ---------------------------------------------------------
 function wire() {
   document.querySelectorAll('.tab').forEach((t) =>
@@ -573,11 +910,19 @@ function wire() {
   $('cap-start').addEventListener('click', capStart);
   $('cap-stop').addEventListener('click', capStop);
   $('cap-finalize').addEventListener('click', capFinalize);
+  $('cap-result-close').addEventListener('click', () => {
+    $('cap-result-modal').hidden = true;
+  });
+  $('cap-result-finalize').addEventListener('click', () => {
+    $('cap-result-modal').hidden = true;
+    capFinalize();
+  });
   $('an-refresh').addEventListener('click', renderAnalysis);
   $('an-download').addEventListener('click', downloadArtifact);
   $('an-raw-toggle').addEventListener('click', () => {
     $('an-raw-box').hidden = !$('an-raw-box').hidden;
   });
+  $('an-manual-save').addEventListener('click', saveManualIndex); // #7
 
   $('sel-source').addEventListener('change', async (e) => {
     state.source = e.target.value;
@@ -587,12 +932,18 @@ function wire() {
   });
   $('sel-cam').addEventListener('change', (e) => {
     state.cam = Number(e.target.value);
+    state.selectedSlotId = null; // 프리셋 컨텍스트 전환 시 선택 해제.
     renderPresetSelect();
+    drawRoiOverlay(); // #4: 카메라 전환 시 해당 ROI 즉시 재그리기.
+    renderSelectionInfo();
   });
   $('sel-preset').addEventListener('change', (e) => {
     state.preset = Number(e.target.value);
+    state.selectedSlotId = null; // 프리셋 전환 시 선택 해제.
     syncPtzFromPreset();
     renderSlotList();
+    drawRoiOverlay(); // #4: 프리셋 전환 시 해당 프리셋 ROI 즉시 재그리기(미호출 버그 수정).
+    renderSelectionInfo();
   });
 
   $('btn-start').addEventListener('click', () => loop.start(Number($('fps').value) || 3));
@@ -600,6 +951,12 @@ function wire() {
   $('btn-goto').addEventListener('click', gotoPreset);
   $('roi-vehicle').addEventListener('change', drawRoiOverlay);
   $('roi-plate').addEventListener('change', drawRoiOverlay);
+  $('roi-floor').addEventListener('change', drawRoiOverlay);
+  $('roi-clear').addEventListener('click', clearRoiDisplay); // #5: 표시 초기화
+  $('roi-delete').addEventListener('click', deleteSelectedSlot); // #2
+  $('map-save').addEventListener('click', saveMapping); // #2/#3/#7 영속화
+
+  wireOverlayEditing();
 
   document.querySelectorAll('[data-dir]').forEach((b) =>
     b.addEventListener('click', () => {
@@ -642,6 +999,7 @@ async function init() {
   await loadSources();
   await Promise.all([loadCameras(), loadMapping(), loadHealth()]);
   drawRoiOverlay();
+  renderSelectionInfo();
 }
 
 init();

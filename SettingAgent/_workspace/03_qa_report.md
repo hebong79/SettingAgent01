@@ -1,106 +1,94 @@
-# 03 · 검증자(qa-tester) 리포트 — SettingViewer → SettingAgent 재통합 검증
+# 03 검증 리포트 — 주차면(ROI) 편집 + 전역 인덱스 수동 매핑 + 프리셋3 진단/수정
 
-작성: 검증자(qa-tester) · 대상: SettingAgent · 분류: 리팩토링(통합) 검증
-입력: `01_architect_plan.md`(§8·§10 검증 기준) + `02_developer_changes.md` + 변경 소스
-
----
-
-## 0. 결론
-
-**재작업 불필요. 통과.** 구현 결함 0건. 설계서의 모든 검증 항목 충족(회귀 0).
-
-- `npm run typecheck` → **오류 0**.
-- `npm test`(vitest) → **36 파일 / 239 테스트 전부 통과**(02 보고 수치와 일치, 회귀 0).
-- 토글·프록시제거·계약불변·중복제거·라우트순서 전부 코드/inject 로 교차 검증됨.
+검증자(qa-tester) · 입력: `02_developer_changes.md`, `01_architect_plan.md`, 변경 소스 + 설계 §5/§6
+판정: **통과(PASS) — 재작업 불필요.** 회귀 0, 신규 34 전부 통과, PUT 정합·#4·계약 검증 통과.
 
 ---
 
-## 1. 양쪽 테스트 결과(수치 그대로)
+## 1. 전체 테스트 결과(수치 그대로)
 
 | 항목 | 결과 |
-|------|------|
-| `cd SettingAgent && npm run typecheck` | 오류 0 |
-| `cd SettingAgent && npm test` | **Test Files 36 passed (36) / Tests 239 passed (239)**, Duration 2.12s |
-| 신규/대체 테스트 통과 | `mappingDirect.test.ts`(2) ✓, `viewerEnabled.test.ts`(2) ✓ |
-| 이관 테스트 통과 | viewerRoutes(14)·cameraClientList(6)·realPtzSource(8)·sourceRegistry(4)·simulatorSource(6)·viewerCore(19)·analyzeArtifact(5)·findPresetPtz(4)·panelResize(4)·captureCore(9) 전부 ✓ |
-| 삭제 확인 | `mappingProxy.test.ts`·`captureProxy.test.ts` 부재(Glob 0) ✓ |
-| 루트 workspaces | `["packages/*","SettingAgent"]` — SettingViewer 제거 반영 ✓ |
-| `@fastify/static` | `node_modules/@fastify/static@9.1.3` 설치 확인(fastify 5.8.5 호환) ✓ |
+|---|---|
+| `node --check web/app.js web/core.js` | `NODE_CHECK_OK` (구문 오류 0) |
+| `npm run typecheck` (tsc --noEmit) | 에러 0 |
+| `npm test` | **46 files, 315 tests passed** (기존 281 + 신규 34, **회귀 0**) |
+| 신규 3파일(`roiEdit`·`manualIndex`·`mappingPut`) 단독 | 3 files, **34 tests passed** |
 
-> captureJob.test 의 로그(`preset2 캡처 실패`/`DB 적재 폭발`/`LPD down`)는 **의도된 에러 흡수 경로 테스트**(레벨 40/50 logger 출력)로 통과에 영향 없음. 전부 ✓.
+신규 34 = roiEdit 22 + manualIndex 7(파일 표기) + mappingPut 5. (developer 노트의 "34" 수치 일치.)
 
 ---
 
-## 2. viewer.enabled 토글 검증 (inject, 라이브 서버 미사용)
+## 2. 순수함수 정확성(core.js — 단위 테스트 + 추가 엣지 직접 검증)
 
-`viewerEnabled.test.ts` 가 `app.inject` 로 검증(포트 점유 없음):
+기존 테스트(roiEdit/manualIndex)에 더해 **미커버 엣지 10건을 직접 실행**(전부 통과)하여 교차 확인:
 
-- **enabled=false** → `/viewer/api/health` **404**(헤드리스 강등), `/health`(루트) 200, `/setup/status` 200. ✓
-- **enabled=true** → `/viewer/api/health` **200** + `{status:'ok', sources:['sim']}`, `/health`(루트) 200(경로 충돌 없음). ✓
+- `pointInRect`/`pointInQuad`: 내부·경계·외부·null 방어 ✔. ray casting quad 내부/외부 ✔.
+- `hitTestSlots`: 단일/겹침(배열 끝=상단 우선)/빈곳 null/`layers.vehicle=false` 제외/floor quad 차선 ✔. **추가 검증**: 한 slot 에 rect+floor 동시 존재 시 1회 hit, `layers.floor=false` 시 rect 밖 floor 영역 제외 ✔ — **그리는 순서·레이어 토글과 정합**.
+- `rebuildGlobalIndex`: cam→preset→coveredSlotIds 위치 순 1..N ✔. **slotId sN 파싱 안 함**(`['b','a']` 순서 그대로) ✔. **추가 검증**: coveredSlotIds 에 없는 orphan slot 안전망으로 뒤에 부여(globalIdx 연속) ✔.
+- `removeSlot`: 삭제 후 `validateCoverage.ok`, globalIdx 연속, 해당 preset.coveredSlotIds 에서 제거, 타 슬롯 ROI 불변, 원본 불변(불변 갱신) ✔. **추가 검증**: 멀티 카메라(cam1·cam2)에서 cam 정렬 보존 ✔.
+- `clamp01Rect`/`resizeRect`/`updateSlotRoi`: se +δ 증가, 1 초과 클램프, 음수폭 붕괴 방지·좌우 뒤집힘 정규화, 음수좌표→0 ✔. **추가 검증**: nw 핸들이 우하단 고정(좌상단만 이동), updateSlotRoi 새 key 추가 시 기존 key 보존·globalIndex 동일 참조 유지 ✔.
+- `validateManualIndex`: ok / 중복(duplicates+gaps) / gap 감지 ✔. **추가 검증**: 빈 배열 → ok ✔.
+- `reorderGlobalIndex`: 정상 재정렬(coverage ok·순서 반영), 누락/미존재/중복 입력 → null ✔. **추가 검증**: camIdx/presetIdx 기존 globalIndex 에서 보존 ✔.
+- `diffArtifactVsCameras`: artifact 1:3 보유 + cameras 1:1,1:2 → `artifactOnly:['1:3']`, 빈 입력 방어, camerasOnly 산출 ✔.
 
-서버 코드(`server.ts` L201) 이중 가드 `if (deps.viewer?.enabled && deps.sources)` 확인 — enabled=false 또는 sources 미주입 시 뷰어 라우트·정적 블록 자체가 `app.register` 되지 않음(미등록 → 404). 헤드리스 보존 정합.
-
-`mappingDirect.test.ts` 가 enabled=true + 임시 staticDir 로 `/viewer/`(SPA 200 경로) 등록을 간접 증명(static root 존재 시 register 성공, inject 통과).
-
----
-
-## 3. 프록시 제거 정합
-
-- **`/viewer/api/mapping` = `repo.loadArtifact()` 직접**(server.ts L206–213): 산출물 → 200 패스스루, null → 404 `{error:'no setup artifact'}`. `mappingDirect.test.ts` 2케이스로 검증(content-type application/json, body.slots[0].slotId 패스스루 확인). HTTP 자기호출(1홉·502·타임아웃) 소멸 확인. ✓
-- **`/viewer/api/capture/*` 라우트 부재**: src 전역 grep `viewer/api/capture` → 0건. alias 미신설 확인. ✓
-- **app.js capture 직접 호출**(grep 교차): L262 `/capture/status`, L301 `/capture/start`, L312 `/capture/stop`, L319 `/capture/finalize` — 모두 접두 없는 직접 호출. `api('/capture` 잔존 0. ✓
-- **mapping/cameras/snapshot/move/login/health 는 `/viewer/api/*` 유지**(app.js): `api('/mapping')`(L47·L336)·`api('/cameras...')`(L38)·`api('/snapshot...')`(L188·L238)·`api('/move')`(L210)·`api('/camera/login')`(L564)·`api('/health')`(L56·L113) — `const api=(p)=>`/viewer/api${p}`` 접두 유지. ✓
+**판정: 순수함수 11개 전부 설계 규약대로 동작.**
 
 ---
 
-## 4. 계약 불변
+## 3. PUT 영속화 정합(핵심) — `app.inject`
 
-- `/health`(루트)·`/setup/*`·루트 `/mapping`·`/capture/*` shape·동작 유지 — 기존 테스트(apiRefresh·captureRoutes 19개·setupOrchestrator 등) 전부 통과로 회귀 0 확인. server.ts 의 기존 라우트 핸들러 무수정(가산만). ✓
-- **CameraClient 시그니처 불변 + listCameras 가산만**(CameraClient.ts 정독):
-  - `health()`·`requestImage(camIdx,presetIdx,ptz?)`·`move(camIdx,pan,tilt,zoom)`·`clampZoom(zoom)` 본문·시그니처 불변. `CapturedImage` 출처 `../domain/types.js` 유지.
-  - `listCameras(): Promise<CameraList>` 재추가. A타입 파싱: `name ?? 'C{idx}'`, `label ?? 'C{idx}-P{idx}'` 폴백, **`enabled: c.enabled !== false`(false 보존)**, presets 중첩 PTZ(pan/tilt/zoom) 보존. `CameraList` 출처 `../viewer/CameraSource.js`. cameraClientList.test(6) 통과. ✓
+mappingPut.test.ts(5) + **검증자 추가 inject 테스트 3건**(extra·zod·GET404, 실행 후 정리)로 경계 전수 확인:
 
----
+| 시나리오 | 기대 | 결과 |
+|---|---|---|
+| 유효 SetupArtifact → PUT /mapping | 200 `{ok:true,slots,globalCount}` + `repo.saveArtifact` 1회 | ✔ |
+| 유효 → PUT /viewer/api/mapping(동일 핸들러) | 200 + saveArtifact 호출 | ✔ |
+| coverage **missing**(slots 에 있고 globalIndex 에 없음) | 400 `coverage mismatch` `missing:['b']` + **미저장** | ✔ |
+| coverage **extra**(globalIndex 에 잉여 slotId) | 400 `coverage mismatch` `extra:['ghost']` + 미저장 | ✔(추가검증) |
+| globalIndex=[] (전부 누락) | 400 `missing:['a']` + 미저장 | ✔ |
+| zod shape 위반(`presets:'nope'`) | 400 `invalid artifact` + 미저장 | ✔ |
+| zod shape 위반(roiByPreset rect 필드 누락 `{x,y,w}`) | 400 `invalid artifact` + 미저장 | ✔(추가검증) |
+| GET /mapping (artifact 없음) | 404 불변 | ✔(추가검증) |
 
-## 5. 중복 제거
-
-- `src/` 내 `buildViewerServer`/`settingAgentUrl`/`loadViewerConfig`/`DEFAULT_VIEWER_CONFIG` 라이브 참조 **0건**. `viewerConfig`·`SettingViewer` 언급은 toolsConfig.ts/index.ts/server.ts 의 **의도적 통합 주석 3건뿐**(라이브 코드 아님). ✓
-- 중복 파일 부재: `src/viewer/` = {CameraSource, SimulatorSource, RealPtzSource, sourceRegistry, routes}.ts 5개만(viewer 복제 CameraClient 없음). `viewerConfig.ts` 부재(Glob 0). `src/util/http.ts` 단일(상위집합, viewer 복제본 미이동). ✓
-- SettingViewer 소스 import 0: `git ls-files SettingViewer` = 0, 작업트리 파일 0(빈 폴더만 잔존). ✓
-
----
-
-## 6. 라우트 등록 순서
-
-- `routes.ts`: `/viewer/api/{cameras,snapshot,move,camera/login,health}`(정확 경로) 전부 등록 후 **마지막에** `@fastify/static`(prefix `/viewer/`, 와일드카드) register. server.ts 는 그 앞에 `/viewer/api/mapping` 등록. 정확 경로가 와일드카드보다 우선 → 충돌 없음.
-- inject 검증: `viewerEnabled.test.ts` 의 `/viewer/api/health` → 200 JSON `{status:'ok',sources:['sim']}` 반환(정적 index.html 이 아님) = 정확 경로가 static 보다 먼저 매칭됨을 실증. ✓
+게이트 순서 = ① zod → ② `validateCoverage`(기존 GlobalIndexer 재사용) → ③ saveArtifact. **정합 불일치 시 파일 보호(미저장) 동작 확인.** GET /mapping·/viewer/api/mapping 읽기 직접 반환·404 보존(코드+테스트 확인).
 
 ---
 
-## 7. 발견 결함 / 수정
+## 4. #4(프리셋3 진단/수정) — 코드 확인(라이브 불가)
 
-- **구현 결함: 0건.** 테스트 작성 실수: 0건(직접 수정 없음). 통과 위장 없음.
-
----
-
-## 8. 미커버(명시)
-
-1. **라이브 기동(`npm start`) 미수행**: 포트 13020 점유 가능성으로 마스터 지시대로 inject 만 사용. 실제 `listen()` 후 `/viewer/`(SPA HTML 200)·정적 자산 서빙은 별도 스모크 필요.
-2. **브라우저 DOM 동작 미커버**: 카메라 선택/스냅샷 렌더/PTZ 이동/프리셋 이동(gotoPreset)/정밀수집 탭/분석 탭의 실제 DOM·fetch 왕복은 web 테스트(core.js 순수 로직 단위테스트)로만 부분 커버. 엔드투엔드 브라우저 검증은 범위 외.
-3. **실 PTZ(HNR-2036LA) 스모크 미수행**: RealPtzSource CGI/PTZ 범위는 미확인 가정값(설계 §13.6). 실 장비 연결 후 실측 보정 필요. realPtzSource.test(8)는 모킹 기반.
-4. **SettingViewer 빈 폴더 잠금**: `git ls-files` 0·작업트리 파일 0 이나 디렉터리 핸들 잠금으로 빈 폴더 자체 삭제 실패(다른 프로세스가 cwd 점유 추정). git 추적상 영향 없음. 프로세스 종료 후 `Remove-Item -Recurse -Force SettingViewer` 1회 필요(02 §8-1과 동일).
+- `sel-cam`·`sel-preset` change 핸들러에 **`drawRoiOverlay()` 호출 추가** 확인(app.js L937·L945, grep). 전환 시 `state.selectedSlotId=null`(선택 해제)도 추가됨.
+- `drawRoiOverlay`: `state.roiHidden` 가드 보존(L162), key=`presetKey(cam,preset)` 로 `slot.roiByPreset[key]` 조회 — 설계 진단(키매칭 정상)과 정합.
+- `diffArtifactVsCameras` → 분석 탭 경고(artifactOnly = 드롭다운에 없어 선택 불가) / 검수 탭 빈 상태 안내 결선 확인.
+- **미커버**: `/cameras` 에 프리셋3 실제 노출 여부는 라이브 필요(설계서 §리스크5). 코드상 진단·재그리기는 정상.
 
 ---
 
-## 9. 검증 항목 요약표
+## 5. 계약·기존기능 불변(영향도)
 
-| 검증 항목 | 결과 |
-|-----------|------|
-| 1. 양쪽 테스트(typecheck/test) | ✓ 0 오류 / 36파일·239테스트 통과 |
-| 2. viewer.enabled 토글(inject) | ✓ false→404·true→200, 헤드리스 보존 |
-| 3. 프록시 제거 정합 | ✓ mapping 직접·capture alias 부재·app.js 직접호출 |
-| 4. 계약 불변 | ✓ 기존 라우트·CameraClient 시그니처 불변 |
-| 5. 중복 제거 | ✓ 복제 CameraClient/http/viewerConfig 잔존 0 |
-| 6. 라우트 등록 순서 | ✓ 정확경로 우선(inject 실증) |
+- **GlobalIndexer.ts·Repository.ts: diff 0**(불변, 재사용). 계약 게이트는 기존 `validateCoverage` 그대로.
+- **SetupArtifact shape 불변**: PUT 핸들러는 같은 형식 갱신만. zod 스키마는 계약과 동형(필드 추가 없음). `src/domain/types.ts` 의 `NormalizedPoint`/`NormalizedQuad` 재수출은 **선행 floorRoi 작업** 소산이며 본 ROI-편집 과제와 무관(SetupArtifact 필드 불변).
+- floor 채움(직전 변경) 보존: `drawRoiOverlay` 의 floor `fill('rgba(57,255,20,0.22)')` 유지(L193-194). roiHidden/표시초기화 가드 보존.
+- GET 라우트·`/setup/*`·`/capture/*` 무수정(가산만). 캡처/recognizeFloorRoi 경로 무영향(테스트 회귀 0 으로 확인).
+- 오버레이 편집 결선: 히트테스트·리사이즈 모두 `eventToNorm` 동일 분모 사용(설계 §리스크2 — 좌표 일관성 확보), 레이어 토글이 hit-test 와 draw 양쪽에 반영.
 
-이상 — 통과. 재작업 불필요.
+---
+
+## 6. 발견 결함 / 수정
+
+- **발견 결함: 없음.** 모든 단위·inject·엣지 검증 통과. 테스트 느슨화/통과 위장 없음.
+- 검증 중 작성한 임시 inject 테스트(extra/zod/GET404)는 확인 후 삭제 — 저장소 오염 없음.
+
+---
+
+## 7. 미커버(명시)
+
+- **브라우저 캔버스 상호작용**(vitest 비대상, 환경 의존): 마우스 클릭 선택 하이라이트, 4모서리 핸들 드래그 리사이즈 실시간 미리보기, 삭제/저장 버튼 후 재로드, #7 ▲▼ 재정렬 UI. → 순수 로직은 단위로 차단했으나 실제 마우스/캔버스 동작은 **라이브 뷰어 수동 검증 권장**.
+- **#4 라이브**: `/cameras` 응답에 프리셋3 실노출 여부 실측(라이브 필요). 미표시 재현 시 진단 경고로 1차 구분, 그래도 미표시면 리더 에스컬레이션.
+- **동시성**: 편집 미저장 중 `/capture/finalize` 덮어쓰기 유실(설계 §리스크1) — 1차 보류(과설계 회피). finalize 잠금 미구현은 설계 결정.
+- 라이브 서버 기동: 본 검증 범위 제외(지시대로 미기동).
+
+---
+
+## 최종 판정
+
+**PASS — 재작업 불필요.** typecheck 0 / 315 tests passed(회귀 0) / 신규 34 / PUT 정합(missing·extra·zod·미저장·GET404) 전수 통과 / #4 코드 수정·진단 결선 확인 / 계약·기존기능 불변 확인. 잔여는 전부 환경 의존(브라우저·라이브) 수동 항목으로 명시.

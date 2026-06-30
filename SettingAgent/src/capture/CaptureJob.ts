@@ -4,6 +4,7 @@ import type { LpdClient } from '../clients/LpdClient.js';
 import type { SqliteStore } from './SqliteStore.js';
 import type { CheckpointReviewer } from './CheckpointReviewer.js';
 import { advisoryLines } from './CheckpointReviewer.js';
+import type { FloorRoiReviewer } from './FloorRoiReviewer.js';
 import { aggregate, type AggregateOptions } from './Aggregator.js';
 import type { SetupTarget } from '../setup/SetupOrchestrator.js';
 import type { ToolsConfig } from '../config/toolsConfig.js';
@@ -18,6 +19,8 @@ export interface CaptureJobDeps {
   lpd?: LpdClient;
   store: SqliteStore;
   reviewer?: CheckpointReviewer;
+  /** 바닥 점유 영역(floor ROI) 체크포인트 계산기(옵셔널 — 미주입 시 기존 동작). */
+  floorReviewer?: FloorRoiReviewer;
   cfg: ToolsConfig['capture'];
   /** LPD 번호판도 함께 검출·적재할지(setup.lpdEnabled 재사용). */
   lpdEnabled: boolean;
@@ -53,6 +56,8 @@ export class CaptureJob {
   private endedAt?: string;
   /** 최근 캡처 프레임(뷰어가 수집 과정을 관찰용으로 표시 — 카메라 재명령 없이). */
   private lastFrame?: { jpeg: Buffer; camIdx: number; presetIdx: number; roundIdx: number };
+  /** 프리셋별 최근 프레임(체크포인트 floor ROI 계산용). key=`${camIdx}:${presetIdx}`. */
+  private lastFrameByPreset = new Map<string, Buffer>();
   private timer?: NodeJS.Timeout;
   private params?: CaptureStartParams;
   private roundRunning = false;
@@ -106,6 +111,7 @@ export class CaptureJob {
     this.done = 0;
     this.planned = p.count;
     this.latestAdvisory = [];
+    this.lastFrameByPreset.clear();
     this.startedAt = this.now();
     this.endedAt = undefined;
     this.runId = this.deps.store.createRun({ plannedCount: p.count, intervalMs: p.intervalMs, startedAt: this.startedAt });
@@ -190,6 +196,7 @@ export class CaptureJob {
   private async captureTarget(runId: number, roundIdx: number, t: SetupTarget): Promise<void> {
     const cap = await this.deps.camera.requestImage(t.camIdx, t.presetIdx, t.ptz);
     this.lastFrame = { jpeg: cap.jpg, camIdx: t.camIdx, presetIdx: t.presetIdx, roundIdx };
+    this.lastFrameByPreset.set(`${t.camIdx}:${t.presetIdx}`, cap.jpg);
     const obsId = this.deps.store.insertObservation({
       runId,
       roundIdx,
@@ -245,6 +252,11 @@ export class CaptureJob {
         this.deps.expectedByPreset,
       );
       if (result) this.latestAdvisory = advisoryLines(result);
+    }
+
+    // 바닥 점유 영역(floor ROI) 계산(LLM 활성·주입 시). 실패 시 결정형 폴백으로 항상 보유.
+    if (this.deps.floorReviewer) {
+      await this.deps.floorReviewer.review(this.runId, slots, this.lastFrameByPreset);
     }
   }
 

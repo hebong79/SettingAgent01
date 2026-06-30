@@ -7,6 +7,7 @@ import type {
   CheckpointRow,
   DetectionRow,
 } from './types.js';
+import type { NormalizedQuad } from '../domain/types.js';
 
 /**
  * 관측·검출·집계 누적용 SQLite DAO (설계서 §5).
@@ -67,6 +68,12 @@ export class SqliteStore {
       CREATE TABLE IF NOT EXISTS artifact_snapshot (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         run_id INTEGER, created_at TEXT, artifact_json TEXT
+      );
+      CREATE TABLE IF NOT EXISTS floor_roi (
+        run_id INTEGER, preset_key TEXT, cluster_id INTEGER,
+        x0 REAL, y0 REAL, x1 REAL, y1 REAL, x2 REAL, y2 REAL, x3 REAL, y3 REAL,
+        updated_at TEXT,
+        PRIMARY KEY (run_id, preset_key, cluster_id)
       );
       CREATE INDEX IF NOT EXISTS idx_det_obs ON detection(observation_id);
       CREATE INDEX IF NOT EXISTS idx_obs_run_preset ON observation(run_id, preset_idx);
@@ -239,6 +246,48 @@ export class SqliteStore {
     this.db
       .prepare(`INSERT INTO artifact_snapshot (run_id, created_at, artifact_json) VALUES (?, ?, ?)`)
       .run(runId, createdAt, artifactJson);
+  }
+
+  // ── 바닥 점유 영역(floor ROI · 4점 사변형) ────────────────
+  /** floor quad 를 (run, presetKey, clusterId) 키로 upsert(LLM 산출 — 집계와 수명주기 분리). */
+  upsertFloorRoi(runId: number, presetKey: string, clusterId: number, quad: NormalizedQuad, updatedAt: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO floor_roi (run_id, preset_key, cluster_id, x0, y0, x1, y1, x2, y2, x3, y3, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(run_id, preset_key, cluster_id) DO UPDATE SET
+           x0=excluded.x0, y0=excluded.y0, x1=excluded.x1, y1=excluded.y1,
+           x2=excluded.x2, y2=excluded.y2, x3=excluded.x3, y3=excluded.y3,
+           updated_at=excluded.updated_at`,
+      )
+      .run(
+        runId, presetKey, clusterId,
+        quad[0].x, quad[0].y, quad[1].x, quad[1].y, quad[2].x, quad[2].y, quad[3].x, quad[3].y,
+        updatedAt,
+      );
+  }
+
+  getFloorRois(runId: number): Array<{ presetKey: string; clusterId: number; quad: NormalizedQuad }> {
+    const rows = this.db
+      .prepare(
+        `SELECT preset_key AS presetKey, cluster_id AS clusterId, x0, y0, x1, y1, x2, y2, x3, y3
+         FROM floor_roi WHERE run_id = ? ORDER BY preset_key, cluster_id`,
+      )
+      .all(runId) as Array<{
+      presetKey: string;
+      clusterId: number;
+      x0: number; y0: number; x1: number; y1: number; x2: number; y2: number; x3: number; y3: number;
+    }>;
+    return rows.map((r) => ({
+      presetKey: r.presetKey,
+      clusterId: r.clusterId,
+      quad: [
+        { x: r.x0, y: r.y0 },
+        { x: r.x1, y: r.y1 },
+        { x: r.x2, y: r.y2 },
+        { x: r.x3, y: r.y3 },
+      ] as NormalizedQuad,
+    }));
   }
 }
 

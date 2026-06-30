@@ -2,6 +2,8 @@
 // 공유 계약은 @parkagent/types 에서 재수출(기존 `../domain/types.js` import 경로 유지 — 외과적 변경).
 export type {
   NormalizedRect,
+  NormalizedPoint,
+  NormalizedQuad,
   Camera,
   Preset,
   ParkingSlot,

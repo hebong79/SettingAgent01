@@ -1,103 +1,111 @@
-# 03. QA 검증 리포트 — 장기 관측·반복 수집 → SQLite 누적 → LLM 정밀 주차면
+# 03 · 검증 리포트 — LLM 비전 차량 바닥 ROI(floor ROI · 4점 사변형)
 
-- 작성: 검증자(qa-tester) · 2026-06-25
-- 기준: `_workspace/02_developer_changes.md`(인계 포인트 8개) + `01_architect_plan.md` + 설계서 §0.3(G1~G5)·§8(좌표 불변식)
-- 방법: vitest, 외부 서버·LLM·카메라·VPD/LPD 모킹, SQLite `:memory:`/임시파일, 타이머 주입.
-- 결론: **양쪽 전부 통과 · 회귀 0 · 좌표 불변식 충족. 구현 결함 0(재작업 불필요).**
+작성: 검증자(qa-tester) · 대상: SettingAgent · 입력: `02_developer_changes.md` + `01_architect_plan.md` + 변경 소스 + 신규/수정 테스트
+판정: **PASS · 회귀 0 · 재작업 불요**
 
 ---
 
-## 0. 실행 결과 (수치 그대로)
+## 0. 결과 요약(수치 그대로)
 
-| 대상 | typecheck | 테스트(이전→이후) | 회귀 |
-|------|-----------|--------------------|------|
-| SettingAgent | 통과(0 에러) | **81 → 156** (신규 +75, 24 파일) | **0** |
-| SettingViewer | 통과(0 에러) | **62 → 84** (신규 +22, 9 파일) | **0** |
-
-- `cd SettingAgent && npm run typecheck && npm test` → **24 files / 156 tests passed**.
-- `cd SettingViewer && npm run typecheck && npm test` → **9 files / 84 tests passed**.
-- CaptureJob/Finalizer 의 흡수·예외 경로에서 출력되는 warn/error 로그는 **의도된 결함 주입 테스트**(흡수/error 전이 검증)로, 모두 통과한 케이스다.
-
----
-
-## 1. 작성한 테스트 목록
-
-### SettingAgent (`SettingAgent/test/`)
-| 파일 | 케이스 수 | 매핑 | 핵심 검증 |
-|------|----------|------|-----------|
-| `geometry.test.ts`(가산) | +4 | median | 홀/짝 길이, 정렬·원본 불변, 빈 배열=0 |
-| `sqliteStore.test.ts`(신규) | 16 | G2 | 스키마 보장, 런 CRUD, 관측·검출 적재→`getDetectionsForRun`(round 조인), `getPresetRounds`(DISTINCT round), `replaceAggregatedSlots` 멱등(replace), snake↔camel round-trip, `updateAggregatedStatus`(좌표 불변), checkpoint/snapshot, 파일경로 디렉터리 자동생성·재오픈 |
-| `aggregator.test.ts`(신규) | 14 | G3 | 안정 클러스터(support↑→candidate), 노이즈(support<min→rejected), minConfidence 필터, **중앙값 대표 bbox**, occupancyRate(distinct round 분자·0 division), 프리셋 분리, 멀리 떨어진 2클러스터, plate 귀속(내부/외부), 결정형 동일 출력, plate-only/빈 입력 |
-| `captureJob.test.ts`(신규) | 9 | G1 | start→running·DB 생성, 중복 start throw, count 도달→done(stop_reason=count)·done_count·적재 4건, 라운드 사이 stop→stopped(manual)·다음 미예약, stop no-op, 프리셋 일부 실패 흡수, 라운드 예외→error, LPD 적재·LPD 실패 흡수 |
-| `captureRoutes.test.ts`(신규) | 19 | 라우트 | start(200/zod 400/409), status/stop(400), finalize(409/404/200), runs/aggregate(200/404/400), **기존 /health·/mapping·/setup/* 회귀**, 의존성 미주입 시 라우트 미등록(가산 보장) |
-| `checkpointFinalizer.test.ts`(신규) | 13 | G4·§8 | clusterRef/advisoryLines 순수헬퍼, **체크포인트 좌표 불변**(merges/rejects→status, bbox 동일), LLM off/미주입/예외 no-op, Finalizer 결정형 강등(candidate 채택·zone=cam{N}·report 없음·rejected 제외), **Finalizer 좌표 불변**(roi=대표 bbox), LLM zoneLabels/report 반영, LLM rejects 제외, finalizeCapture 예외 강등, 체크포인트 status 보존 |
-
-### SettingViewer (`SettingViewer/test/`)
-| 파일 | 케이스 수 | 매핑 | 핵심 검증 |
-|------|----------|------|-----------|
-| `captureProxy.test.ts`(신규) | 13 | G5 | status/runs/aggregate(GET)·start/stop/finalize(POST) 패스스루, 경로·메서드·**본문 전달**, :id 치환, 200/400/409/404 패스스루, 5xx→502, unreachable→502, 기존 /mapping 회귀 |
-| `captureCore.test.ts`(신규) | 9 | G5 | captureProgress(percent·label·**0 division 방어**·100 클램프·undefined), mapAdvisory(배열 복사·없음→[]), pollPlan(running/stopping/finalizing 만 폴링·간격) |
-
----
-
-## 2. 좌표 불변식(§8) 검증 결과 — **충족**
-
-설계 핵심: "좌표는 검출+집계만 생성/수정, LLM 은 메타(status/zone/report)만". 다음을 명시적으로 단언했고 모두 통과:
-
-1. **CheckpointReviewer**(`checkpointFinalizer.test.ts` "rejects/merges → status 갱신, ROI 좌표는 입력=출력 동일"):
-   - `merges`(2번째부터)→`merged`, `rejects`→`rejected` 로 **status 만** 변경. 입력 슬롯의 `{x,y,w,h}` 와 DB 조회 결과 bbox 가 **정확히 동일**(`toEqual`).
-2. **SqliteStore.updateAggregatedStatus**(`sqliteStore.test.ts`): status 컬럼만 UPDATE, 좌표 4필드 불변 단언.
-3. **Finalizer**(`checkpointFinalizer.test.ts` "ROI 좌표는 집계 대표 bbox 그대로"):
-   - LLM `zoneLabels`/`report_ko` 는 반영되되, `slot.roiByPreset['1:1']` = 집계 대표 bbox `{0.3,0.3,0.1,0.1}`(roiPadding=0) 와 동일. LLM 은 좌표를 만들거나 바꾸지 않음.
-   - LLM `rejects`/`duplicates` 는 **채택 여부 메타**로만 작용(좌표 미생성).
-
----
-
-## 3. 경계면(snake/camel·1-based·조인) 교차 비교 결과
-
-| 경계 | 검증 | 결과 |
+| 항목 | 명령 | 결과 |
 |------|------|------|
-| detection(테이블, round 없음) ↔ DetectionRow(roundIdx 보유) | `getDetectionsForRun` 가 observation 조인으로 round_idx 부여 | OK(`sqliteStore.test.ts`) |
-| aggregated_slot(snake: occupancy_rate/plate_x) ↔ AggregatedSlot(camel) | replace→get round-trip `toEqual` | OK |
-| Aggregator presetKey `${cam}:${preset}` ↔ getPresetRounds 키 | 동일 포맷·occupancy 분모 일치 | OK |
-| clusterRef `presetKey#clusterId` ↔ LLM merges/rejects 입력 | reviewer/finalizer 가 동일 ref 로 매칭 | OK |
-| Finalizer slotId `c{cam}p{preset}s{pos}` ↔ FinalizeCaptureResult.zoneLabels 키 | `c1p1s1` 라벨 적용 확인 | OK |
-| globalIndex.globalIdx | 1-based 부여 확인 | OK |
-| Viewer 프록시 경로 `/viewer/api/capture/runs/:id/aggregate` → `/capture/runs/{id}/aggregate` | :id 치환·메서드·본문 패스스루 | OK |
+| SettingAgent 타입체크 | `npm run typecheck` (`tsc -p tsconfig.json --noEmit`) | **통과**(exit 0, 무에러) |
+| @parkagent/types 타입체크 | `npx tsc --noEmit` (패키지 디렉터리) | **통과**(exit 0) |
+| 전체 테스트 | `npm test` (`vitest run`) | **42 파일 / 278 테스트 전부 통과** |
+| floor 신규+수정 테스트 | `npx vitest run floorRoi…` | **8 파일 / 58 테스트 통과** |
+| 뷰어 JS 문법 | `node --check web/app.js`, `web/core.js` | **둘 다 exit 0** |
+
+- 기준선 248 + 신규 30 = **278**(구현자 보고와 일치). **기존 회귀 0**.
+- `@parkagent/types` 는 `package.json` 의 `exports`/`types` 가 `./src/index.ts` 를 직접 가리키는 **소스-소비 패키지**(build/typecheck npm 스크립트 없음). 그래서 인계의 `npm run typecheck`(types)·`npm run build`(types) 는 "Missing script" 로 실패하나, 이는 결함이 아니라 패키지 설계임 — `npx tsc --noEmit` 로 직접 검증해 통과 확인. SettingAgent typecheck 가 이 타입을 실제 해석하므로 통합 타입 인식도 입증됨.
+- 라이브 서버 미기동(지침 준수). 검증은 typecheck + vitest(브레인/스토어/카메라 모킹)로만.
+
+신규 테스트 구성(30): `floorRoi`(10) · `floorRoiStore`(3) · `agentRuntimeFloor`(3) · `floorRoiReviewer`(8) · `finalizerFloor`(2) + 수정분 `config`(+1) · `analyzeArtifact`(+2) · `viewerCore`(+1).
 
 ---
 
-## 4. 성공 기준(G1~G5) 매핑
+## 1. 폴백(핵심) — floor ROI 항상 존재
 
-- **G1**(반복 N + 수동 정지 잡): `captureJob.test.ts` — 상태머신 전이·count/manual/error·중복 거부·흡수. **충족**.
-- **G2**(SQLite 적재/조회): `sqliteStore.test.ts` 16케이스. **충족**.
-- **G3**(결정형 시공간 집계): `aggregator.test.ts` 14케이스(합성 데이터). **충족**.
-- **G4**(체크포인트/최종 LLM + artifact): `checkpointFinalizer.test.ts` — 메타 반영·좌표 불변·강등·shape/saveArtifact/snapshot. **충족**.
-- **G5**(Viewer 프록시·순수로직): `captureProxy.test.ts`/`captureCore.test.ts`. **충족**.
+`capture/floorRoi.ts`(순수·외부의존 0) + `floorRoi.test.ts`(10) 교차 검토.
 
----
+- **`resolveFloorQuad(llmQuad, vehicle)` = `normalizeQuad(llmQuad) ?? fallbackQuadFromRect(vehicle)`** — LLM 결과가 무효이면 무조건 폴백. floor ROI 가 비는 경로 없음.
+- **무효 판정**: 점≠4(3점 테스트)·NaN 포함·undefined/null → `normalizeQuad` 가 `null` → 폴백. (확인됨)
+- **클램프**: 범위 초과 입력(-0.5, 1.5 등)을 `clamp01` 로 0~1 강제. `fallbackQuadFromRect` 도 모든 점 `clamp01`(범위 초과 rect 테스트 통과).
+- **순서 규약**(`[앞왼,앞오,뒤오,뒤왼]`): y 기준 하(앞=y큼)/상(뒤=y작음) 2점씩 분리 → 각 쌍 x 기준 좌/우. 뒤섞인 입력을 규약 순서로 재정렬하는 테스트로 고정. LLM 순서 오류가 뷰어 폴리곤을 꼬지 않음.
+- **경계 교차**: `FloorRoiReviewer` 가 LLM throw(`floorRoiReviewer.test.ts` "LLM throw → 폴백")·LLM null("무효 quad(null) → 폴백") 모두 `fallbackQuadFromRect(vehicleRect)` 와 정확히 일치하는 quad 를 upsert 함을 검증 — 폴백 발동 지점이 reviewer 까지 일관.
 
-## 5. 발견 결함·수정
-
-- **구현 결함: 0건.** 모든 신규 테스트가 구현을 수정 없이 통과. 통과 위장·테스트 느슨화 없음.
-- 테스트 작성 중 자체 보정 1건(구현 무관): `captureCore.test.ts` 의 `@ts-expect-error` 지시문 제거 — `core.d.ts` 가 이미 타입을 제공하므로 불필요(미사용 지시문은 typecheck 에러). 직접 수정.
+판정: **폴백 보장 검증 완료.**
 
 ---
 
-## 6. 미커버(범위 밖) — 명시
+## 2. 체크포인트 통합 — FloorRoiReviewer
 
-다음은 유닛/모킹으로 커버하지 않았으며 별도 동작확인이 필요(삭제·통과 위장 아님):
+`FloorRoiReviewer.review()` + `CaptureJob.checkpoint()` + `floorRoiReviewer.test.ts`(8) 교차 검토.
 
-1. **실 PTZ·Unity 실서버 스모크**(설계서 §10-8, 인계 §8): 시뮬레이터(:13100) N=소수·짧은 주기 → 수집→집계→`/capture/finalize`→`/mapping` 정밀 결과. **미수행(외부 서비스 미가동)** — 유닛(모킹)만 완료.
-2. **장시간 잡·DB 증가**(설계서 §11-3): 보존/정리 정책 범위 밖.
-3. **재기동 복구**(running 중 프로세스 종료, §11-5): 범위 밖. 런 status='running' 으로만 남음, 정리 로직 미검증.
-4. **브라우저 DOM/app.js 통합**(탭 전환·진행바·폴링 와이어링): core.js 순수로직만 검증. DOM 결합·실폴링 미커버.
-5. **better-sqlite3 네이티브 로드**: 구현자 실측(프리빌트 로드 성공) 신뢰. 본 검증은 `:memory:`/임시파일 동작으로 간접 확인.
-6. **newFacesRecentK 정교화**(인계 §2): 1차 단순화(현재 후보 면 수)를 그대로 전달하는 동작만 검증. 라운드별 신규 면 추적 로직은 미구현(후속).
+- **cadence**: `CaptureJob.checkpoint(roundIdx)` 끝에 `floorReviewer.review(runId, slots, lastFrameByPreset)` 가산(`checkpointEvery` 재사용, 별도 주기 없음). `floorReviewer` 옵셔널 → 미주입 시 기존 동작(기존 captureJob 테스트 10건 무회귀).
+- **채택 슬롯만**: `status !== 'rejected' && !== 'merged'` 필터 → rejected/merged 제외 테스트 통과.
+- **프레임 보유 슬롯만**: `framesByPreset.get(presetKey)` 없으면 skip("프레임 있는 프리셋만 upsert" — 1:2 프레임 없어 skip).
+- **maxPerCheckpoint 상한**: 5슬롯·상한 2 → LLM 호출 2회·upsert 2건(테스트 통과). 초과분은 다음 주기(폴백 항상 있어 누락 무해).
+- **장애격리**: `recognizeFloorRoi` throw 를 try/catch 로 흡수 후 폴백 upsert(로그 `floor ROI 추론 실패(폴백)` 는 의도된 경고 — 테스트 통과 경로).
+- **CaptureJob.lastFrameByPreset**: `start()` 에서 `clear()`, `captureTarget()` 에서 `${camIdx}:${presetIdx}` 키로 set(기존 `lastFrame` 1장 보존, 가산 1줄). presetKey 규약 일치.
+- **plate 전달**: plate bbox 존재 시 `input.plate` 로 전달("plate 가 있으면 input.plate 로 전달" 통과).
+
+판정: **체크포인트 통합 검증 완료.**
 
 ---
 
-## 7. 재작업 필요 여부
+## 3. 저장 / 최종화
 
-**불필요.** 구현 결함 0, 양쪽 회귀 0, 좌표 불변식 충족. 문서화 에이전트로 인계 가능.
-미커버 항목(특히 §6-1 실서버 스모크)은 동작확인 단계에서 시뮬레이터로 별도 수행 권장.
+`SqliteStore`(floor_roi) + `Finalizer` + `floorRoiStore.test.ts`(3) + `finalizerFloor.test.ts`(2) 교차 검토.
+
+- **별 테이블 `floor_roi`**: PK(run_id, preset_key, cluster_id), `CREATE TABLE IF NOT EXISTS`(마이그레이션 불필요). `upsertFloorRoi` = `INSERT … ON CONFLICT … DO UPDATE`(같은 키 재upsert → 갱신·중복 행 없음, 테스트 통과). 런/클러스터 격리 테스트 통과.
+- **집계 멱등과 분리**: `replaceAggregatedSlots` 는 `aggregated_slot` 만 delete+insert. floor_roi 는 건드리지 않음 → 집계 재실행에도 floor quad 소실 없음(설계 §6 근거 구현 확인).
+- **quad shape/순서 왕복 보존**: 8실수 → x0..y3 컬럼 → 4점 배열 복원. `floorRoiStore.test.ts` 의 `toEqual(q)` 와 `finalizerFloor` 의 `toEqual(quad)` 가 순서까지 동일 보장.
+- **Finalizer 가산**: `getFloorRois(runId)` → `floorByRef: Map<`${presetKey}#${clusterId}`, quad>` → `assemble` 에서 `clusterRef(m)`(=`${presetKey}#${clusterId}`, CheckpointReviewer 와 동일 키 함수) 매칭 시 `slot.floorRoiByPreset = { [key]: quad }`. floor 없으면 키 미생성(옵셔널 보존, "필드 부재" 테스트 통과).
+- **경계 교차(키 일치)**: reviewer 가 저장하는 키(`s.presetKey`, `s.clusterId`)와 Finalizer 가 조회하는 키(`f.presetKey#f.clusterId` ↔ `clusterRef(member)`)가 동일 규약 — 누락·미스매치 없음 확인.
+
+판정: **저장/최종화 검증 완료.**
+
+---
+
+## 4. 계약 불변(가산)
+
+- **ParkingSlot 계약**: `roiByPreset`/`plateRoiByPreset` 불변(`finalizerFloor` 가 `roiByPreset['1:1']` 정확값 동시 검증). `floorRoiByPreset?` 옵셔널 가산 → ActionAgent/DMAgent·기존 `/mapping`·`/setup`·`/capture` 무영향(기존 테스트 248 회귀 0).
+- **SetupBrain.recognizeFloorRoi?**: 인터페이스에서 **옵셔널** → 이 메서드 없는 기존 브레인 모킹도 타입 만족(기존 brain 테스트 무회귀).
+- **AgentRuntime.recognizeFloorRoi**: 기존 `chatJson` + `image_url`(data:image/jpeg;base64) 멀티모달 경로 100% 재사용. `agentRuntimeFloor.test.ts` 가 fake 서버 body 에 `image_url`·`data:image/jpeg;base64,` 포함을 검사 → 신규 HTTP 경로 0 확인. `floorRoi.enabled=false` 또는 `llm.enabled=false` → null(호출 안 함) 검증.
+- **설정 하위호환**: `FloorRoiSchema.optional()` 라 floorRoi 없는 config 리터럴(기존 agentRuntime.test 등)도 파싱 성공. 단, `loadLlmConfig` 머지는 `{...DEFAULT.floorRoi, ...raw.floorRoi}` 라 **로드 결과는 항상 `cfg.floorRoi` 정의됨**(런타임 `cfg.floorRoi?.enabled` 접근 안전). 설계 §8 의 "미설정 시 undefined" 서술과 다르나(02 노트 §4-1 에 명시), 기능·계약 영향 없음 — 검증자 동의(런타임 안전성 측면에서 더 견고).
+
+판정: **계약 불변 검증 완료.**
+
+---
+
+## 5. 뷰어
+
+- **`toPixelQuad(quad, imgW, imgH)`**: 순수 변환(`quad.map(p => ({px:p.x*imgW, py:p.y*imgH}))`). viewerCore 테스트 통과.
+- **`analyzeArtifact`**: slot 평탄화에 `hasFloor = !!(s.floorRoiByPreset && keys.length)`, totals 에 `withFloor` 누적. `analyzeArtifact.test.ts`(+2) 통과.
+- **`drawRoiOverlay`**: `slot.floorRoiByPreset?.[key]` + `showFloor` 토글 시 `beginPath→moveTo/lineTo→closePath`(폐곡선) 폴리곤, `#39ff14`(청록/노랑과 구분). toPixelQuad 출력 순회와 일치.
+- **`index.html`**: `roi-floor` 체크박스(기본 checked) 존재. `app.js` 가 `$('roi-floor').addEventListener('change', drawRoiOverlay)` 등록. 분석 카드 '바닥 ROI' = `t.withFloor`.
+- **JS 문법**: `node --check` app.js·core.js 둘 다 통과.
+
+판정: **뷰어(순수 로직·문법·요소 존재) 검증 완료.**
+
+---
+
+## 6. 발견 결함 / 수정
+
+- **구현 결함: 없음.** 테스트 작성 실수로 인한 수정 없음. 통과 위장 없음.
+- 인계 문서의 `npm run typecheck`(@parkagent/types)·`npm run build`(types) 명령은 해당 패키지에 스크립트가 없어 실패하나, 이는 types 가 소스-직접-소비 패키지인 설계 때문이며 결함 아님(§0 참조). `npx tsc --noEmit` 로 대체 검증 통과.
+
+---
+
+## 7. 미커버(명시)
+
+- **실 gemma4:12b 좌표 정확도**: vitest 는 brain/서버 모킹. 사변형 정밀도·접지면 추정(지붕 아닌 바닥)·순서 정확도는 **실 LLM 호출로만** 검증 가능. `normalizeQuad`(순서 강제·클램프)+폴백이 안전망이나, 실측 quad 가 차체 윤곽을 찍는 경향이면 프롬프트(접지면 강조) 튜닝 필요. → 마스터 라이브 수집 후 뷰어 폴리곤(#39ff14) 육안 확인 권장.
+- **라이브 서버 / Play 모드 스모크**: 미수행(지침: 라이브 기동 금지). REST `/capture` 실연동·실제 체크포인트 주기 floor 갱신은 별도 스모크로 표시.
+- **브라우저 DOM 렌더링**: `drawRoiOverlay` 의 canvas 실제 픽셀 출력은 비검증(jsdom/headless 미사용). 순수 변환(`toPixelQuad`)·문법·요소 존재까지만 커버.
+- **confidence 임계 폴백**: 1차 미적용(유효 quad 면 채택). 설계 §13-C 후속 — 현재 범위 외.
+
+---
+
+## 8. 최종 판정
+
+**PASS.** 278/278 통과(기존 248 회귀 0, 신규 30 전부 통과), 타입체크 통과, 뷰어 JS 문법 통과. 폴백 보장·체크포인트 통합·저장/최종화·계약 불변·뷰어 모두 검증. 경계면(reviewer→store→finalizer→slot quad 키·순서, runtime image_url 경로) 불일치 없음. **재작업 불요** — 문서화 단계 진행 가능.
