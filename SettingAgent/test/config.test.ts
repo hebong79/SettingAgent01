@@ -40,6 +40,6 @@ describe('config 분리', () => {
     // 실제 config/llm.config.json → enabled=true(gemma 사용).
     const real = loadLlmConfig();
     expect(real.floorRoi?.enabled).toBe(true);
-    expect(real.floorRoi?.prompt.system).toMatch(/floor_roi\.system/);
+    expect(real.floorRoi?.prompt).toMatch(/floor_roi\.yaml/);
   });
 });

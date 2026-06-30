@@ -177,12 +177,14 @@
         </section>
         <section class="panel-section">
           <div class="section-title">전역 인덱스 수동 매핑</div>
+          <p class="an-manual-help">슬롯마다 <b>전역 ID</b>를 직접 입력해 매핑하세요. 1..N 고유여야 합니다. (카메라·프리셋·프리셋내 위치는 산출물 기준 자동 표기)</p>
           <div class="an-manual-bar toolbar">
+            <button id="an-manual-auto" title="카메라→프리셋→위치 순으로 1..N 자동 번호">자동 번호</button>
+            <button id="an-manual-save" class="primary" title="전역 ID 매핑을 저장">저장</button>
             <span id="an-manual-status" class="an-manual-ok"></span>
-            <button id="an-manual-save" class="primary" title="현재 순서를 전역 인덱스로 저장">저장</button>
             <span id="an-manual-msg" class="an-manual-msg"></span>
           </div>
-          <div id="an-manual" class="an-manual"></div>
+          <div id="an-manual" class="an-manual an-table-wrap"></div>
         </section>
         <section class="panel-section">
           <div class="section-title">LLM 설치 리포트 (report)</div>

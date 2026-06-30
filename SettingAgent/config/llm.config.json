@@ -27,6 +27,6 @@
   "floorRoi": {
     "enabled": true,
     "maxPerCheckpoint": 12,
-    "prompt": { "system": "config/prompts/floor_roi.system.md", "user": "config/prompts/floor_roi.user.md" }
+    "prompt": "config/prompts/floor_roi.yaml"
   }
 }

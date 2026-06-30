@@ -65,7 +65,7 @@ function cfg(floorEnabled: boolean): LlmConfig {
     floorRoi: {
       enabled: floorEnabled,
       maxPerCheckpoint: 12,
-      prompt: pair('config/prompts/floor_roi.system.md'),
+      prompt: 'config/prompts/floor_roi.yaml',
     },
   };
 }

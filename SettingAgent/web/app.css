@@ -576,8 +576,19 @@ body.resizing {
 
 /* #7 전역 인덱스 수동 매핑. */
 .an-manual {
-  max-height: 320px;
+  max-height: 360px;
   overflow: auto;
+}
+
+.an-manual-help {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.an-manual-input {
+  width: 64px;
+  text-align: center;
 }
 
 .an-manual-bar {

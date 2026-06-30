@@ -435,6 +435,69 @@ export function reorderGlobalIndex(artifact, orderedSlotIds) {
   return { ...artifact, globalIndex };
 }
 
+/** slotId 의 (camIdx, presetIdx, 프리셋내 위치) 를 산출물에서 도출. globalIndex·roiByPreset·coveredSlotIds 사용. */
+function slotContext(artifact, slot, giBySlot) {
+  const g = giBySlot.get(slot.slotId);
+  const key = Object.keys(slot.roiByPreset ?? {})[0] ?? '';
+  const [kc, kp] = key.split(':').map(Number);
+  const camIdx = g?.camIdx ?? (Number.isFinite(kc) ? kc : 0);
+  const presetIdx = g?.presetIdx ?? (Number.isFinite(kp) ? kp : 0);
+  const preset = (artifact.presets ?? []).find((p) => p.camIdx === camIdx && p.presetIdx === presetIdx);
+  const pos = preset && Array.isArray(preset.coveredSlotIds) ? preset.coveredSlotIds.indexOf(slot.slotId) : -1;
+  return { camIdx, presetIdx, positionIdx: pos >= 0 ? pos + 1 : null };
+}
+
+/**
+ * 전역 인덱스 매핑 표 행 산출(순수). 슬롯별 카메라/프리셋/프리셋내 위치/zone/현재 전역ID.
+ * 카메라→프리셋→위치 순 정렬. UI 가 전역ID 직접 입력으로 매핑하게 한다.
+ */
+export function buildMappingRows(artifact) {
+  if (!artifact || !Array.isArray(artifact.slots)) return [];
+  const giBySlot = new Map((artifact.globalIndex ?? []).map((g) => [g.slotId, g]));
+  const rows = artifact.slots.map((s) => {
+    const ctx = slotContext(artifact, s, giBySlot);
+    return {
+      slotId: s.slotId,
+      camIdx: ctx.camIdx,
+      presetIdx: ctx.presetIdx,
+      positionIdx: ctx.positionIdx,
+      zone: s.zone ?? '',
+      globalIdx: giBySlot.get(s.slotId)?.globalIdx ?? null,
+    };
+  });
+  rows.sort(
+    (a, b) =>
+      a.camIdx - b.camIdx ||
+      a.presetIdx - b.presetIdx ||
+      (a.positionIdx ?? Infinity) - (b.positionIdx ?? Infinity),
+  );
+  return rows;
+}
+
+/**
+ * 사용자가 입력한 slotId→전역ID 맵을 적용해 새 globalIndex 를 만든다(순수).
+ * 모든 슬롯에 1..N 고유 전역ID 가 있어야 함(validateManualIndex). 위반 시 { ok:false, error }.
+ */
+export function applyManualGlobalIds(artifact, idBySlot) {
+  if (!artifact || !Array.isArray(artifact.slots)) return { ok: false, error: '산출물 없음' };
+  const giBySlot = new Map((artifact.globalIndex ?? []).map((g) => [g.slotId, g]));
+  const entries = [];
+  for (const s of artifact.slots) {
+    const n = Number(idBySlot?.[s.slotId]);
+    if (!Number.isInteger(n) || n < 1) {
+      return { ok: false, error: `전역ID 누락/오류: ${s.slotId}` };
+    }
+    const ctx = slotContext(artifact, s, giBySlot);
+    entries.push({ globalIdx: n, slotId: s.slotId, camIdx: ctx.camIdx, presetIdx: ctx.presetIdx });
+  }
+  const v = validateManualIndex(entries);
+  if (!v.ok) {
+    return { ok: false, error: `정합 오류 — 중복:${v.duplicates.join(',') || '-'} 누락:${v.gaps.join(',') || '-'}`, validation: v };
+  }
+  entries.sort((a, b) => a.globalIdx - b.globalIdx);
+  return { ok: true, artifact: { ...artifact, globalIndex: entries } };
+}
+
 /**
  * 스냅샷 폴링 루프(백프레셔·Blob revoke·정지). DOM/브라우저 전역 미참조 → 의존성 주입.
  * deps:

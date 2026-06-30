@@ -2,7 +2,7 @@ import OpenAI from 'openai';
 import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions';
 import type { LlmConfig } from '../config/llmConfig.js';
 import type { SetupArtifact } from '../domain/types.js';
-import { loadPrompt, renderTemplate, extractJson } from './prompts.js';
+import { loadPrompt, loadPromptPair, renderTemplate, extractJson } from './prompts.js';
 import {
   Stage1ResultSchema,
   Stage2ResultSchema,
@@ -146,9 +146,8 @@ export class AgentRuntime implements SetupBrain {
   // 좌표 "생성" 단계(원근 접지면). 검증·강등·폴백은 호출측 결정형(capture/floorRoi.ts).
   async recognizeFloorRoi(input: FloorRoiInput): Promise<FloorRoiResult | null> {
     if (!this.client || this.cfg.floorRoi?.enabled !== true) return null;
-    const p = this.cfg.floorRoi.prompt;
-    const system = loadPrompt(p.system);
-    const user = renderTemplate(loadPrompt(p.user), {
+    const { system, user: userTpl } = loadPromptPair(this.cfg.floorRoi.prompt);
+    const user = renderTemplate(userTpl, {
       camIdx: String(input.camIdx),
       presetIdx: String(input.presetIdx),
       vehicle: JSON.stringify(input.vehicle),

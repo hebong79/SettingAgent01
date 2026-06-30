@@ -165,6 +165,20 @@ export function validateManualIndex(
 ): { ok: boolean; duplicates: number[]; gaps: number[] };
 export function reorderGlobalIndex<T extends ArtifactLike>(artifact: T, orderedSlotIds: string[]): T | null;
 
+export interface MappingRow {
+  slotId: string;
+  camIdx: number;
+  presetIdx: number;
+  positionIdx: number | null;
+  zone: string;
+  globalIdx: number | null;
+}
+export function buildMappingRows(artifact: ArtifactLike | null | undefined): MappingRow[];
+export function applyManualGlobalIds<T extends ArtifactLike>(
+  artifact: T,
+  idBySlot: Record<string, number | string>,
+): { ok: true; artifact: T } | { ok: false; error: string; validation?: { ok: boolean; duplicates: number[]; gaps: number[] } };
+
 export interface StreamLoopDeps {
   fetchFn: (url: string, opt: { signal: AbortSignal }) => Promise<{
     blob: () => Promise<unknown>;

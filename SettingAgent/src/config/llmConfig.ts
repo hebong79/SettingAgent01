@@ -55,7 +55,8 @@ const FloorRoiSchema = z.object({
   enabled: z.boolean(),
   /** 체크포인트 1회당 LLM 호출 상한(토큰·시간 비용 제한). 초과분은 다음 주기에. */
   maxPerCheckpoint: z.number().int().positive().default(12),
-  prompt: PromptPairSchema,
+  /** system/user 를 담은 단일 yaml 프롬프트 파일 경로(구분 용이). */
+  prompt: z.string().min(1),
 });
 
 export const LlmConfigSchema = z.object({
@@ -95,7 +96,7 @@ export const DEFAULT_LLM_CONFIG: LlmConfig = {
   floorRoi: {
     enabled: false,
     maxPerCheckpoint: 12,
-    prompt: { system: 'config/prompts/floor_roi.system.md', user: 'config/prompts/floor_roi.user.md' },
+    prompt: 'config/prompts/floor_roi.yaml',
   },
 };
 

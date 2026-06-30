@@ -1,8 +1,21 @@
 import { readFileSync } from 'node:fs';
+import { parse as parseYaml } from 'yaml';
 
-/** 프롬프트 파일을 읽는다. */
+/** 프롬프트 파일을 읽는다(plain text — md 등). */
 export function loadPrompt(path: string): string {
   return readFileSync(path, 'utf-8');
+}
+
+/**
+ * system+user 를 한 yaml 파일에서 읽는다(구분 용이 — md 분리 대신). 키: system, user.
+ * 예: floor_roi.yaml. 누락 시 에러.
+ */
+export function loadPromptPair(path: string): { system: string; user: string } {
+  const doc = parseYaml(readFileSync(path, 'utf-8')) as { system?: unknown; user?: unknown };
+  if (typeof doc?.system !== 'string' || typeof doc?.user !== 'string') {
+    throw new Error(`프롬프트 yaml 에 문자열 system/user 가 필요: ${path}`);
+  }
+  return { system: doc.system, user: doc.user };
 }
 
 /** {{key}} 플레이스홀더를 vars 값으로 치환. 없는 키는 빈 문자열. */

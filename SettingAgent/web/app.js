@@ -22,8 +22,8 @@ import {
   removeSlot,
   resizeRect,
   updateSlotRoi,
-  validateManualIndex,
-  reorderGlobalIndex,
+  buildMappingRows,
+  applyManualGlobalIds,
 } from './core.js';
 
 const $ = (id) => document.getElementById(id);
@@ -700,88 +700,95 @@ async function renderAnalysis() {
   $('an-raw').textContent = JSON.stringify(lastArtifact, null, 2);
 }
 
-// --- #7 전역 인덱스 수동 매핑 -------------------------------------------
-// 분석 탭에 가산. lastArtifact 를 편집 대상(orderedSlotIds)으로 사용.
-let manualOrder = []; // 현재 편집 중인 slotId 순서.
+// --- #7 전역 인덱스 수동 매핑(표 + 전역ID 직접 입력) ----------------------
+// 분석 탭에 가산. 슬롯마다 카메라/프리셋/위치를 표기하고 전역 ID 를 직접 입력해 매핑한다.
 
 function renderManualIndex() {
   const box = $('an-manual');
   if (!box) return;
   box.innerHTML = '';
-  if (!lastArtifact || !Array.isArray(lastArtifact.globalIndex)) {
-    box.textContent = '산출물 없음';
+  if ($('an-manual-msg')) $('an-manual-msg').textContent = '';
+  if (!lastArtifact || !Array.isArray(lastArtifact.slots) || lastArtifact.slots.length === 0) {
+    box.textContent = '최종화된 주차면이 없습니다 — 정밀수집 → 최종화 후 표시됩니다.';
+    if ($('an-manual-status')) $('an-manual-status').textContent = '';
     return;
   }
-  // globalIdx 오름차순 초기 순서.
-  manualOrder = [...lastArtifact.globalIndex]
-    .sort((a, b) => a.globalIdx - b.globalIdx)
-    .map((g) => g.slotId);
-  drawManualList();
-}
-
-function drawManualList() {
-  const box = $('an-manual');
-  box.innerHTML = '';
-  const gi = manualOrder.map((slotId, i) => ({ globalIdx: i + 1, slotId }));
-  const v = validateManualIndex(gi);
-  const status = $('an-manual-status');
-  if (status) {
-    status.textContent = v.ok
-      ? '정합 OK (1..N 연속·중복 없음)'
-      : `정합 오류 — 중복:${v.duplicates.join(',') || '-'} 누락:${v.gaps.join(',') || '-'}`;
-    status.className = v.ok ? 'an-manual-ok' : 'an-manual-bad';
+  const rows = buildMappingRows(lastArtifact);
+  const table = document.createElement('table');
+  table.className = 'an-table';
+  table.innerHTML =
+    '<thead><tr><th>전역 ID</th><th>카메라</th><th>프리셋</th><th>프리셋내 위치</th><th>slotId</th><th>zone</th></tr></thead>';
+  const tbody = document.createElement('tbody');
+  for (const r of rows) {
+    const tr = document.createElement('tr');
+    const idTd = document.createElement('td');
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.min = '1';
+    input.className = 'an-manual-input';
+    input.dataset.slotId = r.slotId;
+    input.value = r.globalIdx ?? '';
+    input.addEventListener('input', validateManualTable);
+    idTd.appendChild(input);
+    tr.appendChild(idTd);
+    for (const c of [r.camIdx, r.presetIdx, r.positionIdx ?? '-', r.slotId, r.zone]) {
+      const td = document.createElement('td');
+      td.textContent = String(c);
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
   }
-  manualOrder.forEach((slotId, i) => {
-    const row = document.createElement('div');
-    row.className = 'an-manual-row';
-    const num = document.createElement('span');
-    num.className = 'an-manual-idx';
-    num.textContent = `#${i + 1}`;
-    const id = document.createElement('span');
-    id.className = 'an-manual-id';
-    id.textContent = slotId;
-    const up = document.createElement('button');
-    up.textContent = '▲';
-    up.disabled = i === 0;
-    up.addEventListener('click', () => moveManual(i, -1));
-    const down = document.createElement('button');
-    down.textContent = '▼';
-    down.disabled = i === manualOrder.length - 1;
-    down.addEventListener('click', () => moveManual(i, +1));
-    row.append(num, id, up, down);
-    box.appendChild(row);
-  });
+  table.appendChild(tbody);
+  box.appendChild(table);
+  validateManualTable();
 }
 
-function moveManual(i, delta) {
-  const j = i + delta;
-  if (j < 0 || j >= manualOrder.length) return;
-  [manualOrder[i], manualOrder[j]] = [manualOrder[j], manualOrder[i]];
-  drawManualList();
+/** 표의 전역ID 입력값을 {slotId: 값} 으로 수집. */
+function collectManualIds() {
+  const map = {};
+  for (const input of document.querySelectorAll('.an-manual-input')) {
+    map[input.dataset.slotId] = input.value;
+  }
+  return map;
 }
 
-/** #7 저장: reorderGlobalIndex → PUT(공유 saveMapping 경로 재사용). */
+/** 현재 입력값 정합(1..N 고유) 표시. */
+function validateManualTable() {
+  const status = $('an-manual-status');
+  if (!status || !lastArtifact) return;
+  const res = applyManualGlobalIds(lastArtifact, collectManualIds());
+  status.textContent = res.ok ? '정합 OK (1..N 고유)' : res.error;
+  status.className = res.ok ? 'an-manual-ok' : 'an-manual-bad';
+}
+
+/** 자동 번호: 표 순서(카메라→프리셋→위치)대로 1..N 채움. */
+function autoNumberManual() {
+  [...document.querySelectorAll('.an-manual-input')].forEach((input, i) => (input.value = String(i + 1)));
+  validateManualTable();
+}
+
+/** #7 저장: 전역ID 매핑 적용 → PUT(공유 saveMapping 경로). */
 async function saveManualIndex() {
   if (!lastArtifact) return;
   const msg = $('an-manual-msg');
-  const next = reorderGlobalIndex(lastArtifact, manualOrder);
-  if (!next) {
-    if (msg) msg.textContent = '재정렬 실패: slots 집합과 불일치';
+  const res = applyManualGlobalIds(lastArtifact, collectManualIds());
+  if (!res.ok) {
+    if (msg) msg.textContent = `저장 불가: ${res.error}`;
     return;
   }
   try {
-    const res = await fetch(api('/mapping'), {
+    const r = await fetch(api('/mapping'), {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(next),
+      body: JSON.stringify(res.artifact),
     });
-    const data = await res.json().catch(() => ({}));
-    if (res.ok) {
+    const data = await r.json().catch(() => ({}));
+    if (r.ok) {
       if (msg) msg.textContent = `저장됨: 전역 ${data.globalCount}`;
       await loadMapping(); // 검수 탭 동기화.
-      await renderAnalysis(); // 분석 탭 재렌더(새 순서 반영).
+      await renderAnalysis(); // 분석 탭 재렌더(저장값 반영).
     } else {
-      if (msg) msg.textContent = `저장 실패: ${data.error ?? res.status}`;
+      if (msg) msg.textContent = `저장 실패: ${data.error ?? r.status}`;
     }
   } catch (err) {
     if (msg) msg.textContent = `저장 실패(네트워크): ${err}`;
@@ -923,6 +930,7 @@ function wire() {
     $('an-raw-box').hidden = !$('an-raw-box').hidden;
   });
   $('an-manual-save').addEventListener('click', saveManualIndex); // #7
+  $('an-manual-auto').addEventListener('click', autoNumberManual); // #7 자동 번호
 
   $('sel-source').addEventListener('change', async (e) => {
     state.source = e.target.value;
