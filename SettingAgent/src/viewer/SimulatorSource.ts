@@ -28,6 +28,11 @@ export class SimulatorSource implements CameraSource {
     return this.camera.move(cam, ptz.pan, ptz.tilt, ptz.zoom);
   }
 
+  /** MJPEG 스트림 위임(설계서 §3 단계3). CameraClient.streamMjpeg 로 그대로 전달(ptz override 포함, 루프3). */
+  streamMjpeg(cam: number, presetIdx: number, signal: AbortSignal, ptz?: Ptz): AsyncGenerator<Buffer> {
+    return this.camera.streamMjpeg(cam, presetIdx, signal, ptz);
+  }
+
   toNativePtz(viewerPtz: Ptz): unknown {
     return viewerPtz;
   }

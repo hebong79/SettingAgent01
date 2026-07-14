@@ -1,4 +1,6 @@
-/** 타임아웃이 있는 fetch. AbortController 로 timeoutMs 초과 시 중단. */
+import { logger } from './logger.js';
+
+/** 타임아웃이 있는 fetch. AbortController 로 timeoutMs 초과 시 중단. 통신 패킷 로그(cat:'packet'). */
 export async function fetchWithTimeout(
   url: string,
   init: RequestInit,
@@ -6,8 +8,15 @@ export async function fetchWithTimeout(
 ): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const method = init.method ?? 'GET';
+  const t0 = Date.now();
   try {
-    return await fetch(url, { ...init, signal: controller.signal });
+    const res = await fetch(url, { ...init, signal: controller.signal });
+    logger.info({ cat: 'packet', method, url, status: res.status, ms: Date.now() - t0 }, '통신 패킷');
+    return res;
+  } catch (err) {
+    logger.warn({ cat: 'packet', method, url, err: err instanceof Error ? err.message : String(err), ms: Date.now() - t0 }, '통신 패킷 실패');
+    throw err;
   } finally {
     clearTimeout(timer);
   }

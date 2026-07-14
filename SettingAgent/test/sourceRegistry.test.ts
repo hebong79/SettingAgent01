@@ -3,26 +3,34 @@ import { buildSourceRegistry } from '../src/viewer/sourceRegistry.js';
 import { DEFAULT_TOOLS_CONFIG, type ToolsConfig } from '../src/config/toolsConfig.js';
 import { SimulatorSource } from '../src/viewer/SimulatorSource.js';
 import { RealPtzSource } from '../src/viewer/RealPtzSource.js';
+import { CameraposSource } from '../src/viewer/CameraposSource.js';
 
-/** buildSourceRegistry 입력(camera + cameraSources)만 발췌. */
-type RegistryCfg = Pick<ToolsConfig, 'camera' | 'cameraSources'>;
-const base = (): RegistryCfg => ({ camera: structuredClone(DEFAULT_TOOLS_CONFIG.camera), cameraSources: undefined });
+/** buildSourceRegistry 입력(camera + cameraSources + unityRpc + map + cameraMode + realCamera)만 발췌. */
+type RegistryCfg = Pick<ToolsConfig, 'camera' | 'cameraSources' | 'unityRpc' | 'map' | 'cameraMode' | 'realCamera'>;
+const base = (): RegistryCfg => ({
+  camera: structuredClone(DEFAULT_TOOLS_CONFIG.camera),
+  cameraSources: undefined,
+  unityRpc: structuredClone(DEFAULT_TOOLS_CONFIG.unityRpc),
+  map: structuredClone(DEFAULT_TOOLS_CONFIG.map),
+  cameraMode: 'simulator',
+  realCamera: undefined,
+});
 
 describe('buildSourceRegistry — 하위호환/다중소스', () => {
-  it('cameraSources 미설정 → sim 단일 폴백(id=sim)', () => {
+  it('cameraSources 미설정 → camerapos 단일 폴백(id=rpc)', () => {
     const tools = base();
     expect(tools.cameraSources).toBeUndefined();
     const reg = buildSourceRegistry(tools);
-    expect([...reg.keys()]).toEqual(['sim']);
-    expect(reg.get('sim')).toBeInstanceOf(SimulatorSource);
-    expect(reg.get('sim')!.kind).toBe('sim');
+    expect([...reg.keys()]).toEqual(['rpc']);
+    expect(reg.get('rpc')).toBeInstanceOf(CameraposSource);
+    expect(reg.get('rpc')!.kind).toBe('rpc');
   });
 
-  it('cameraSources 빈 배열 → sim 단일 폴백', () => {
+  it('cameraSources 빈 배열 → rpc 단일 폴백', () => {
     const tools = base();
     tools.cameraSources = [];
     const reg = buildSourceRegistry(tools);
-    expect([...reg.keys()]).toEqual(['sim']);
+    expect([...reg.keys()]).toEqual(['rpc']);
   });
 
   it('다중 소스(sim + hucoms) 등록·선택', () => {

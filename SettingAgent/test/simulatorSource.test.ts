@@ -73,4 +73,28 @@ describe('SimulatorSource', () => {
     expect(src.toNativePtz(p)).toBe(p);
     expect(src.fromNativePtz(p)).toBe(p);
   });
+
+  it('streamMjpeg → camera.streamMjpeg 위임(cam,preset,signal 그대로 전달 + 프레임 패스스루)', async () => {
+    const streamCalls: Array<{ cam: number; preset: number; signal: AbortSignal }> = [];
+    const f1 = Buffer.from([0xff, 0xd8, 0x01, 0xff, 0xd9]);
+    const f2 = Buffer.from([0xff, 0xd8, 0x02, 0xff, 0xd9]);
+    const client = {
+      async *streamMjpeg(cam: number, preset: number, signal: AbortSignal) {
+        streamCalls.push({ cam, preset, signal });
+        yield f1;
+        yield f2;
+      },
+    } as unknown as CameraClient;
+
+    const src = new SimulatorSource(client);
+    const ac = new AbortController();
+    const got: Buffer[] = [];
+    for await (const f of src.streamMjpeg!(3, 7, ac.signal)) got.push(f);
+
+    expect(streamCalls).toHaveLength(1);
+    expect(streamCalls[0].cam).toBe(3);
+    expect(streamCalls[0].preset).toBe(7);
+    expect(streamCalls[0].signal).toBe(ac.signal); // 동일 signal 인스턴스 위임
+    expect(got).toEqual([f1, f2]); // 프레임 패스스루
+  });
 });

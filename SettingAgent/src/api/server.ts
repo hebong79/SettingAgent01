@@ -2,8 +2,9 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { SetupOrchestrator, SetupTarget } from '../setup/SetupOrchestrator.js';
 import type { Repository } from '../store/Repository.js';
-import type { CameraClient } from '../clients/CameraClient.js';
+import type { ICameraClient } from '../clients/CameraClient.js';
 import type { VpdClient } from '../clients/VpdClient.js';
+import type { LpdClient } from '../clients/LpdClient.js';
 import type { AgentRuntime } from '../brain/AgentRuntime.js';
 import { loadSetupTargets, loadExpectedFaces, viewsToTargets, type MapFiles } from '../setup/mapTargets.js';
 import { discoverViews } from '../setup/discover.js';
@@ -15,11 +16,15 @@ import type { Finalizer } from '../capture/Finalizer.js';
 import type { SqliteStore } from '../capture/SqliteStore.js';
 import { registerCaptureRoutes } from './captureRoutes.js';
 import { registerCalibrateRoutes } from './calibrateRoutes.js';
+import { registerSettingsRoutes } from './settingsRoutes.js';
+import { registerDbRoutes } from './dbRoutes.js';
+import { DEFAULT_SETTINGS_PATHS, type SettingsPaths } from '../config/settingsStore.js';
 import type { PtzCalibrator } from '../calibrate/PtzCalibrator.js';
 import { registerViewerRoutes } from '../viewer/routes.js';
 import type { CameraSource } from '../viewer/CameraSource.js';
-import { validateCoverage } from '../setup/GlobalIndexer.js';
-import type { SetupArtifact } from '../domain/types.js';
+import { validateArtifactBody } from './artifactSchema.js';
+import type { SaveStore } from '../store/SaveStore.js';
+import type { CRpcClient } from '../clients/CRpcClient.js';
 
 const TargetSchema = z.object({
   camIdx: z.number().int().positive(),
@@ -30,72 +35,28 @@ const TargetSchema = z.object({
 
 const RunBodySchema = z.object({ targets: z.array(TargetSchema).min(1) });
 
-// 편집된 SetupArtifact 영속화(PUT /mapping)용 shape 검증. 계약(@parkagent/types)과 동일 형태.
-const NormalizedRectSchema = z.object({ x: z.number(), y: z.number(), w: z.number(), h: z.number() });
-const NormalizedPointSchema = z.object({ x: z.number(), y: z.number() });
-const NormalizedQuadSchema = z.tuple([
-  NormalizedPointSchema,
-  NormalizedPointSchema,
-  NormalizedPointSchema,
-  NormalizedPointSchema,
-]);
-const PresetSchema = z.object({
-  camIdx: z.number().int(),
-  presetIdx: z.number().int(),
-  label: z.string(),
-  coveredSlotIds: z.array(z.string()),
-  pan: z.number().optional(),
-  tilt: z.number().optional(),
-  zoom: z.number().optional(),
-});
-const ParkingSlotSchema = z.object({
-  slotId: z.string(),
-  zone: z.string(),
-  roiByPreset: z.record(NormalizedRectSchema),
-  plateRoiByPreset: z.record(NormalizedRectSchema).optional(),
-  floorRoiByPreset: z.record(NormalizedQuadSchema).optional(),
-});
-const GlobalSlotIndexSchema = z.object({
-  globalIdx: z.number().int(),
-  slotId: z.string(),
-  camIdx: z.number().int(),
-  presetIdx: z.number().int(),
-});
-const SetupArtifactSchema = z.object({
-  presets: z.array(PresetSchema),
-  slots: z.array(ParkingSlotSchema),
-  globalIndex: z.array(GlobalSlotIndexSchema),
-  createdAt: z.string(),
-  warnings: z.array(z.string()).optional(),
-  report: z.string().optional(),
-});
-
 /**
  * PUT /mapping 공유 핸들러(헤드리스·뷰어 동일 로직).
- * ① zod shape 검증 실패 → 400. ② validateCoverage(globalIndex↔slots) 불일치 → 400(미저장).
- * ③ 통과 → repo.saveArtifact, { ok, slots, globalCount } 반환.
+ * validateArtifactBody(shape+coverage) 통과 시 repo.saveArtifact, { ok, slots, globalCount } 반환.
+ * 실패 시 400 + { error, ... }(invalid artifact | coverage mismatch).
  */
 function saveMappingHandler(repo: Repository, body: unknown, reply: { code: (c: number) => void }) {
-  const parsed = SetupArtifactSchema.safeParse(body);
-  if (!parsed.success) {
-    reply.code(400);
-    return { error: 'invalid artifact', detail: parsed.error.flatten() };
+  const v = validateArtifactBody(body);
+  if (!v.ok) {
+    reply.code(v.code);
+    return v.body;
   }
-  const artifact = parsed.data as SetupArtifact;
-  const cov = validateCoverage(artifact.globalIndex, artifact.slots);
-  if (!cov.ok) {
-    reply.code(400);
-    return { error: 'coverage mismatch', missing: cov.missing, extra: cov.extra };
-  }
-  repo.saveArtifact(artifact);
-  return { ok: true, slots: artifact.slots.length, globalCount: artifact.globalIndex.length };
+  repo.saveArtifact(v.artifact);
+  return { ok: true, slots: v.artifact.slots.length, globalCount: v.artifact.globalIndex.length };
 }
 
 export interface ApiDeps {
   orchestrator: SetupOrchestrator;
   repo: Repository;
-  camera: CameraClient;
+  camera: ICameraClient;
   vpd: VpdClient;
+  /** 번호판 검출(LPD) 클라이언트. 라이브 검출(POST /capture/detect) 주입용. */
+  lpd?: LpdClient;
   brain?: AgentRuntime;
   /** mapConfig 자동 프리셋 로딩 파일 경로(#1, 기본 소스). */
   mapFiles?: MapFiles;
@@ -111,6 +72,14 @@ export interface ApiDeps {
   sqlite?: SqliteStore;
   /** capture 라우트 설정·targets 로딩용. */
   capture?: ToolsConfig['capture'];
+  /** 정밀수집 결과 저장/열기(save/*) 스토어. 주입 시 /capture/save·saves 라우트 등록(가산). */
+  saveStore?: SaveStore;
+  /** 미리 정의된 주차면 폴리곤 파일(Place01/PtzCamRoi.json) 경로. GET/PUT /capture/place-roi 서빙용. */
+  placeRoiFile?: string;
+  /** 주차면 자동보정 기준 프레임 저장 디렉터리(data/refframes). /capture/refframe·autocorrect 용. */
+  refFrameDir?: string;
+  /** 지면모델 설정(GET /capture/ground-model). 3D 육면체 렌더 근거. */
+  ground?: ToolsConfig['ground'];
   /** 주차면별 번호판 중심정렬·줌 PTZ 캘리브레이션 잡(/calibrate/*). 미주입 시 미등록(가산). */
   calibrator?: PtzCalibrator;
   /** calibrate 설정(outFile=GET /calibrate/result 경로). */
@@ -119,6 +88,12 @@ export interface ApiDeps {
   viewer?: ToolsConfig['viewer'];
   /** 카메라 소스 레지스트리(뷰어 카메라 라우트용). */
   sources?: Map<string, CameraSource>;
+  /** 웹 옵션 페이지(/settings) 편집 대상 config 파일 경로. 미지정 시 기본 config 경로. */
+  settingsPaths?: SettingsPaths;
+  /** DB 뷰어(/db/*) read-only 조회 대상 SQLite 파일. 주입 시에만 등록(가산·독립, R4). */
+  dbFile?: string;
+  /** Unity JSON-RPC 프록시 클라이언트. 주입 시 뷰어에 전달되어 /viewer/api/rpc* 라우트 등록(가산). */
+  rpc?: CRpcClient;
 }
 
 /**
@@ -266,6 +241,14 @@ export function buildServer(deps: ApiDeps): FastifyInstance {
       cfg: deps.capture,
       mapFiles: deps.mapFiles,
       presetProvider: deps.presetProvider,
+      brain: deps.brain,
+      saveStore: deps.saveStore,
+      placeRoiFile: deps.placeRoiFile,
+      refFrameDir: deps.refFrameDir,
+      ground: deps.ground,
+      camera: deps.camera,
+      vpd: deps.vpd,
+      lpd: deps.lpd,
     });
   }
 
@@ -273,6 +256,12 @@ export function buildServer(deps: ApiDeps): FastifyInstance {
   if (deps.calibrator && deps.calibrate) {
     registerCalibrateRoutes(app, { calibrator: deps.calibrator, outFile: deps.calibrate.outFile });
   }
+
+  // 웹 옵션 페이지(/settings). 결정형 파일 I/O — 항상 등록(가산, 기존 라우트 불변).
+  registerSettingsRoutes(app, deps.settingsPaths ?? DEFAULT_SETTINGS_PATHS);
+
+  // SQLite DB 뷰어(/db/*). read-only 독립 연결 — 캡처 블록과 무관하게 등록(가산, R4).
+  if (deps.dbFile) registerDbRoutes(app, { dbFile: deps.dbFile });
 
   // 웹 뷰어 통합(SettingViewer). viewer.enabled && sources 주입 시에만 등록(헤드리스 보존, 가산).
   // registerViewerRoutes 는 async(내부 @fastify/static register) → app.register 로 감싸 buildServer 동기 유지.
@@ -292,7 +281,14 @@ export function buildServer(deps: ApiDeps): FastifyInstance {
       // 편집된 SetupArtifact 영속화(뷰어 컨텍스트). 헤드리스 PUT /mapping 과 동일 로직.
       instance.put('/viewer/api/mapping', async (req, reply) => saveMappingHandler(deps.repo, req.body, reply));
       // 카메라 라우트 + 정적 SPA(와일드카드는 내부에서 API 라우트 뒤에 register).
-      await registerViewerRoutes(instance, { sources, viewer });
+      // rpc(Unity 프록시)·llm(모델 선택기=brain)은 주입 시에만 해당 라우트 등록(가산).
+      await registerViewerRoutes(instance, {
+        sources,
+        viewer,
+        rpc: deps.rpc,
+        llm: deps.brain,
+        cameraposFile: deps.mapFiles?.cameraposFile,
+      });
     });
   }
 

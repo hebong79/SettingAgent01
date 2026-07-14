@@ -1,4 +1,4 @@
-import type { CameraClient } from '../clients/CameraClient.js';
+import type { ICameraClient } from '../clients/CameraClient.js';
 import type { ToolsConfig } from '../config/toolsConfig.js';
 import type { CameraView } from './mapTargets.js';
 import { discoverViews } from './discover.js';
@@ -21,7 +21,7 @@ export interface PresetProvider {
 export class DiscoveryPresetProvider implements PresetProvider {
   readonly name = 'discovery';
   constructor(
-    private camera: CameraClient,
+    private camera: ICameraClient,
     private opts: ToolsConfig['discovery'],
     private log?: (msg: string) => void,
   ) {}
@@ -74,7 +74,7 @@ export class UnityPresetProvider implements PresetProvider {
 }
 
 export interface ProviderDeps {
-  camera: CameraClient;
+  camera: ICameraClient;
   discovery: ToolsConfig['discovery'];
   cameraBaseUrl: string;
   timeoutMs: number;

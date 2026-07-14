@@ -1,4 +1,4 @@
-import type { CameraClient } from '../clients/CameraClient.js';
+import type { ICameraClient } from '../clients/CameraClient.js';
 import type { ToolsConfig } from '../config/toolsConfig.js';
 import type { CameraView } from './mapTargets.js';
 
@@ -15,7 +15,7 @@ import type { CameraView } from './mapTargets.js';
  * 주의: 일부 서버(실 PTZ)는 없는 프리셋에도 영상을 반환해 프리셋 경계가 불명확할 수 있다(옵트인 사유).
  */
 export async function discoverViews(
-  camera: CameraClient,
+  camera: ICameraClient,
   opts: ToolsConfig['discovery'],
   log?: (msg: string) => void,
 ): Promise<CameraView[]> {

@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import type { SetupArtifact } from '../domain/types.js';
+import type { NormalizedQuad, NormalizedRect, SetupArtifact } from '../domain/types.js';
+import { rectToQuad } from '../domain/geometry.js';
 
 /**
  * 셋업 산출물(Preset/ParkingSlot/GlobalSlotIndex)을 JSON 파일로 영속화.
@@ -18,13 +19,34 @@ export class Repository {
     writeFileSync(this.file, JSON.stringify(artifact, null, 2), 'utf-8');
   }
 
-  /** 산출물 로드. 없으면 null. */
+  /** 산출물 로드. 없으면 null. 구데이터(plateRoiByPreset=rect)는 로드 시 quad 로 승격(하위호환). */
   loadArtifact(): SetupArtifact | null {
     if (!existsSync(this.file)) return null;
-    return JSON.parse(readFileSync(this.file, 'utf-8')) as SetupArtifact;
+    const artifact = JSON.parse(readFileSync(this.file, 'utf-8')) as SetupArtifact;
+    promotePlateRois(artifact);
+    return artifact;
   }
 
   get path(): string {
     return this.file;
+  }
+}
+
+/** rect 형태 감지: {x,y,w,h}(w 키 존재)면 구 rect, 4원소 배열이면 신 quad. */
+function isRect(v: unknown): v is NormalizedRect {
+  return typeof v === 'object' && v !== null && 'w' in (v as Record<string, unknown>);
+}
+
+/** 구데이터 plateRoiByPreset(rect) → quad 승격(제자리 변형). 이미 quad(배열)면 무변경. */
+function promotePlateRois(artifact: SetupArtifact): void {
+  for (const slot of artifact.slots ?? []) {
+    const plate = slot.plateRoiByPreset as Record<string, unknown> | undefined;
+    if (!plate) continue;
+    for (const key of Object.keys(plate)) {
+      const v = plate[key];
+      if (isRect(v)) {
+        (slot.plateRoiByPreset as Record<string, NormalizedQuad>)[key] = rectToQuad(v);
+      }
+    }
   }
 }

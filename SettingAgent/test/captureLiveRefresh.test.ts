@@ -24,8 +24,9 @@ import type { CameraView } from '../src/setup/mapTargets.js';
  */
 
 const captureCfg: ToolsConfig['capture'] = {
-  defaultCount: 50, intervalMs: 1000, checkpointEvery: 10, dbFile: ':memory:',
-  clusterDist: 0.06, clusterMinSupport: 3, minConfidence: 0.5,
+  defaultCount: 50, intervalMs: 1000, moveIntervalMs: 1000, checkpointEvery: 10,
+  checkpointTriggerMode: 'rounds', checkpointIntervalMs: 60000, dbFile: ':memory:',
+  clusterDist: 0.06, clusterMinSupport: 3, minConfidence: 0.5, moveBeforeCapture: true,
 };
 const setupCfg = {
   presetSettleMs: 0, betweenPresetMs: 0, minConfidence: 0.5, roiPadding: 0, yBandTolerance: 0.1,

@@ -1,9 +1,10 @@
-import type { CameraClient } from '../clients/CameraClient.js';
+import type { ICameraClient } from '../clients/CameraClient.js';
 import type { LpdClient, PlateBox } from '../clients/LpdClient.js';
 import type { SetupBrain, CenteringAdvice } from '../brain/SetupBrain.js';
 import type { Repository } from '../store/Repository.js';
 import type { ToolsConfig } from '../config/toolsConfig.js';
 import { logger } from '../util/logger.js';
+import { quadBoundingRect } from '../domain/geometry.js';
 import { expandPlateTargets, writeSlotPtz } from './slotPtzWriter.js';
 import {
   plateCenterError,
@@ -21,7 +22,7 @@ import type { PlateTarget, Ptz, SlotPtzItem, CalibrateState, CalibrateStatus } f
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 export interface PtzCalibratorDeps {
-  camera: CameraClient;
+  camera: ICameraClient;
   lpd: LpdClient;
   /** LLM 자문(옵셔널). cfg.llmAdvise=false 또는 메서드 null 이면 순수 결정형 폴백. */
   brain?: SetupBrain;
@@ -56,7 +57,7 @@ export class PtzCalibrator {
   private startedAt?: string;
   private endedAt?: string;
 
-  private readonly camera: CameraClient;
+  private readonly camera: ICameraClient;
   private readonly lpd: LpdClient;
   private readonly brain?: SetupBrain;
   private readonly cfg: ToolsConfig['calibrate'];
@@ -143,7 +144,9 @@ export class PtzCalibrator {
     if (!plate) return this.skipItem(t, ptz, 0, 'no_plate');
 
     // ── A) pan/tilt 중심 정렬 ───────────────────────────────
-    let err = plateCenterError(plate.rect);
+    // OBB quad → 축정렬 boundingRect 유도(기존 centering/zoom math 재사용). 매 검출 후 재유도.
+    let pr = quadBoundingRect(plate.quad);
+    let err = plateCenterError(pr);
 
     // probe: 작은 dPan/dTilt 1회 → 게인 추정(부호 포함).
     const gainResult = await this.probeGain(t, ptz, err);
@@ -152,46 +155,56 @@ export class PtzCalibrator {
     let centered = isCentered(err, this.cfg.centerTol);
     for (let iter = 0; iter < this.cfg.maxIterations && !centered; iter++) {
       // (옵셔널) LLM 자문 → 검증·클램프. occluded 면 스킵.
-      const advice = await this.advise(t, ptz, err, plate.rect.w, 'center');
-      if (advice?.occluded) return this.skipItem(t, ptz, plate.rect.w, 'occluded');
+      const advice = await this.advise(t, ptz, err, pr.w, 'center');
+      if (advice?.occluded) return this.skipItem(t, ptz, pr.w, 'occluded');
 
       const next = this.applyCenterAdvice(err, gain, ptz, advice);
       ptz = { ...ptz, pan: next.pan, tilt: next.tilt };
       const got = await this.captureAndDetect(t, ptz);
       if (!got) {
         // 가림/소실 — 마지막 상태 기록.
-        return this.skipItem(t, ptz, plate.rect.w, 'plate_lost');
+        return this.skipItem(t, ptz, pr.w, 'plate_lost');
       }
       plate = got;
-      const newErr = plateCenterError(plate.rect);
+      pr = quadBoundingRect(plate.quad);
+      const newErr = plateCenterError(pr);
       // 개선 정체 → 게인 감쇠(진동 방지).
       if (improvement(err, newErr) < IMPROVE_EPS) gain = dampGain(gain);
       err = newErr;
       centered = isCentered(err, this.cfg.centerTol);
     }
+    logger.info(
+      { cat: 'centering', slot: t.slotId, phase: 'center', centered, errX: Number(err.errX.toFixed(3)), errY: Number(err.errY.toFixed(3)), ptz },
+      '센터링 pan/tilt 완료',
+    );
 
     // ── B) zoom 폭 정렬(중심 수렴 후에만) ───────────────────
-    let plateWidth = plate.rect.w;
+    // plateWidth = boundingRect 폭(설계 §2 정의). pr 은 위에서 최신 검출 기준 유지.
+    let plateWidth = pr.w;
     let converged = isWidthConverged(plateWidth, this.cfg.targetPlateWidth, this.cfg.widthTol);
     for (let iter = 0; iter < this.cfg.maxIterations && !converged; iter++) {
-      const advice = await this.advise(t, ptz, plateCenterError(plate.rect), plateWidth, 'zoom');
+      const advice = await this.advise(t, ptz, plateCenterError(pr), plateWidth, 'zoom');
       if (advice?.occluded) break;
       const newZoom = this.applyZoomAdvice(ptz.zoom, plateWidth, advice);
       ptz = { ...ptz, zoom: newZoom };
       const got = await this.captureAndDetect(t, ptz);
       if (!got) break; // 소실 — 마지막 상태 기록
       plate = got;
+      pr = quadBoundingRect(plate.quad);
 
       // zoom 으로 중심 드리프트 시 1스텝 재중심(과보정 방지 1회).
-      const zErr = plateCenterError(plate.rect);
+      const zErr = plateCenterError(pr);
       if (!isCentered(zErr, this.cfg.centerTol)) {
         const rec = panTiltCorrection(zErr, gain, ptz.pan, ptz.tilt, this.cfg.maxStepDeg);
         ptz = { ...ptz, pan: rec.pan, tilt: rec.tilt };
         const reGot = await this.captureAndDetect(t, ptz);
-        if (reGot) plate = reGot;
+        if (reGot) {
+          plate = reGot;
+          pr = quadBoundingRect(plate.quad);
+        }
       }
 
-      plateWidth = plate.rect.w;
+      plateWidth = pr.w;
       converged = isWidthConverged(plateWidth, this.cfg.targetPlateWidth, this.cfg.widthTol);
     }
 
@@ -221,7 +234,7 @@ export class PtzCalibrator {
     };
     const probePlate = await this.captureAndDetect(t, probePtz);
     if (!probePlate) return { gain: fb };
-    const afterErr = plateCenterError(probePlate.rect);
+    const afterErr = plateCenterError(quadBoundingRect(probePlate.quad));
     const gain = estimateGain(beforeErr, afterErr, { dPan: this.cfg.probeStepDeg, dTilt: this.cfg.probeStepDeg }, fb);
     return { gain };
   }

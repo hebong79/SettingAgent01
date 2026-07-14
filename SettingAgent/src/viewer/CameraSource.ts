@@ -41,12 +41,16 @@ export interface SnapshotOpts {
  * toNativePtz/fromNativePtz 는 뷰어 단위↔소스 원시 단위 변환(시뮬레이터는 항등).
  */
 export interface CameraSource {
-  readonly kind: 'sim' | 'hucoms'; // onvif 는 후속(이번 범위 제외)
+  readonly kind: 'sim' | 'hucoms' | 'rpc'; // onvif 는 후속(이번 범위 제외)
   listCameras(): Promise<CameraList>;
   snapshot(cam: number, opt: SnapshotOpts): Promise<SnapshotResult>;
   move(cam: number, ptz: Ptz): Promise<boolean>;
-  /** (선택) 저지연 스트림 URL. 이번 라운드 미사용(11단계용). */
-  streamUrl?(cam: number): string | null;
+  /**
+   * (선택) MJPEG 스트림. 프레임(JPEG Buffer)을 순서대로 산출한다(설계서 §2).
+   * 미지원 소스는 미구현(→ 라우트 501 → 프론트 폴링 폴백). signal abort 시 상류 중단.
+   * ptz 제공 시 수동 PTZ override(pan/tilt/zoom)를 스트림에 실어 렌더(루프3). 미제공 시 preset 기본.
+   */
+  streamMjpeg?(cam: number, presetIdx: number, signal: AbortSignal, ptz?: Ptz): AsyncGenerator<Buffer>;
   /** (선택) 실 PTZ 소스 로그인. sim 소스는 미구현. */
   login?(user: string, pass: string): Promise<boolean>;
   toNativePtz(viewerPtz: Ptz): unknown;

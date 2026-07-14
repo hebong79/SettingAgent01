@@ -2,21 +2,27 @@ import { describe, it, expect } from 'vitest';
 import { loadPromptPair, renderTemplate } from '../src/brain/prompts.js';
 
 describe('loadPromptPair (yaml system/user 프롬프트)', () => {
-  it('floor_roi.yaml 을 system/user 로 로드', () => {
+  it('floor_roi.yaml 을 system/user 로 로드(픽셀 그라운딩 규약)', () => {
     const { system, user } = loadPromptPair('config/prompts/floor_roi.yaml');
     expect(typeof system).toBe('string');
     expect(typeof user).toBe('string');
     expect(system).toContain('바닥'); // 바닥 점유 영역 지시
-    expect(system).toContain('[앞왼'); // 순서 규약
-    expect(user).toContain('{{vehicle}}'); // 템플릿 플레이스홀더 보존
+    expect(system).toContain('points_2d'); // 절대픽셀 4점 출력 스키마
+    expect(system).toContain('front-left'); // 순서 규약(앞왼 → front-left)
+    expect(system).toContain('{{imgW}}'); // 전송 이미지 픽셀 크기 주입
+    expect(user).toContain('{{vehiclePx}}'); // 픽셀 bbox 플레이스홀더 보존
+    expect(user).toContain('{{imgW}}');
+    expect(user).toContain('{{imgH}}');
   });
 
-  it('user 템플릿 치환', () => {
+  it('user 템플릿 치환(imgW/imgH/vehiclePx)', () => {
     const { user } = loadPromptPair('config/prompts/floor_roi.yaml');
-    const out = renderTemplate(user, { camIdx: '1', presetIdx: '2', vehicle: '{x:0.1}', plate: '(없음)' });
+    const out = renderTemplate(user, { camIdx: '1', presetIdx: '2', imgW: '1288', imgH: '728', vehiclePx: '[258,218,773,509]' });
     expect(out).toContain('camera=1');
     expect(out).toContain('preset=2');
-    expect(out).not.toContain('{{vehicle}}');
+    expect(out).toContain('1288x728px');
+    expect(out).toContain('[258,218,773,509]');
+    expect(out).not.toContain('{{'); // 모든 플레이스홀더 치환
   });
 
   it('system/user 없는 yaml 은 에러', () => {

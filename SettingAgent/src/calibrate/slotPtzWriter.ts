@@ -4,6 +4,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { SetupArtifact } from '../domain/types.js';
+import { quadBoundingRect } from '../domain/geometry.js';
 import type { PlateTarget, SlotPtzArtifact } from './types.js';
 
 /**
@@ -18,7 +19,7 @@ export function expandPlateTargets(artifact: SetupArtifact): PlateTarget[] {
   const targets: PlateTarget[] = [];
   for (const slot of artifact.slots) {
     if (!slot.plateRoiByPreset) continue;
-    for (const [key, rect] of Object.entries(slot.plateRoiByPreset)) {
+    for (const [key, quad] of Object.entries(slot.plateRoiByPreset)) {
       const [camStr, presetStr] = key.split(':');
       const camIdx = Number(camStr);
       const presetIdx = Number(presetStr);
@@ -28,7 +29,8 @@ export function expandPlateTargets(artifact: SetupArtifact): PlateTarget[] {
         presetIdx,
         slotId: slot.slotId,
         globalIdx: globalBySlot.get(slot.slotId) ?? null,
-        plateRoi: rect,
+        // 캘리브레이션 내부 math 는 rect 사용 → quad→축정렬 boundingRect 유도(기존 zoom/centering 재사용).
+        plateRoi: quadBoundingRect(quad),
       });
     }
   }

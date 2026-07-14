@@ -1,9 +1,9 @@
-import type { CameraClient } from '../clients/CameraClient.js';
+import type { ICameraClient } from '../clients/CameraClient.js';
 import type { VpdClient } from '../clients/VpdClient.js';
 import type { LpdClient } from '../clients/LpdClient.js';
 import type { Repository } from '../store/Repository.js';
 import type { ToolsConfig } from '../config/toolsConfig.js';
-import type { GlobalSlotIndex, NormalizedRect, ParkingSlot, Preset, SetupArtifact } from '../domain/types.js';
+import type { GlobalSlotIndex, NormalizedQuad, ParkingSlot, Preset, SetupArtifact } from '../domain/types.js';
 import { buildSlots, type BuiltSlot } from './RoiBuilder.js';
 import { buildSlotsAccumulated } from './RoiAccumulator.js';
 import { buildGlobalIndex, validateCoverage, type IndexableSlot } from './GlobalIndexer.js';
@@ -31,7 +31,7 @@ export interface SetupStatus {
 }
 
 export interface SetupDeps {
-  camera: CameraClient;
+  camera: ICameraClient;
   vpd: VpdClient;
   /** LPD(번호판 검출). cfg.lpdEnabled=true 일 때 슬롯별 번호판 ROI 를 저장. */
   lpd?: LpdClient;
@@ -211,7 +211,7 @@ export class SetupOrchestrator {
     jpg: Buffer,
     built: BuiltSlot[],
     warnings: string[],
-  ): Promise<Map<number, NormalizedRect> | undefined> {
+  ): Promise<Map<number, NormalizedQuad> | undefined> {
     if (!this.deps.cfg.lpdEnabled || !this.deps.lpd || built.length === 0) return undefined;
     try {
       const plates = await this.deps.lpd.detect(jpg);

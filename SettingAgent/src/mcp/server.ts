@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { loadToolsConfig } from '../config/toolsConfig.js';
 import { CameraClient } from '../clients/CameraClient.js';
 import { VpdClient } from '../clients/VpdClient.js';
+import { CRpcClient } from '../clients/CRpcClient.js';
 
 /**
  * SettingAgent 의 능력을 MCP 도구로 노출한다 (아키텍처 §8).
@@ -15,6 +16,7 @@ export function buildMcpServer(): McpServer {
   const cfg = loadToolsConfig();
   const camera = new CameraClient(cfg.camera);
   const vpd = new VpdClient(cfg.vpd);
+  const rpc = new CRpcClient(cfg.unityRpc);
 
   const server = new McpServer({ name: 'parkagent-setting-tools', version: '0.1.0' });
 
@@ -80,6 +82,51 @@ export function buildMcpServer(): McpServer {
     async ({ jpgBase64 }) => {
       const boxes = await vpd.detect(Buffer.from(jpgBase64, 'base64'));
       return { content: [{ type: 'text' as const, text: JSON.stringify({ vehicles: boxes }) }] };
+    },
+  );
+
+  server.registerTool(
+    'unity_rpc',
+    {
+      title: 'Unity RPC 호출',
+      description:
+        'Unity(포트 13110) JSON-RPC 2.0 엔드포인트를 호출한다. ' +
+        '먼저 unity_rpc_catalog 로 사용 가능한 method 를 조회한 뒤 이 도구를 호출한다. ' +
+        'Unity 가 기동 중이지 않으면 연결 오류가 반환된다(크래시 없음).',
+      inputSchema: {
+        method: z.string().min(1).describe('호출할 RPC method 명 (예: system.ping, scene.load)'),
+        params: z.record(z.unknown()).optional().describe('method 에 전달할 파라미터 객체(선택)'),
+      },
+    },
+    async ({ method, params }) => {
+      try {
+        const result = await rpc.callRpc(method, params as Record<string, unknown> | undefined);
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ ok: true, result }) }] };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ ok: false, error: msg }) }] };
+      }
+    },
+  );
+
+  server.registerTool(
+    'unity_rpc_catalog',
+    {
+      title: 'Unity RPC 카탈로그 조회',
+      description:
+        'Unity 가 노출하는 RPC method 목록을 반환한다. ' +
+        'unity_rpc 호출 전에 먼저 이 도구로 사용 가능한 method 를 확인한다. ' +
+        'Unity 미기동 시 연결 오류가 반환된다(크래시 없음).',
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        const catalog = await rpc.getCatalog();
+        return { content: [{ type: 'text' as const, text: JSON.stringify(catalog) }] };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ ok: false, error: msg }) }] };
+      }
     },
   );
 

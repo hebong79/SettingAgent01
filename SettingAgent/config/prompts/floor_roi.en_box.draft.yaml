@@ -1,0 +1,31 @@
+system: |
+ This is one frame from a fixed CCTV camera looking at an outdoor parking lot at an
+oblique angle (1920x1080). Locate the PAINTED PARKING BAYS -- the rectangular ground
+slots a single car parks in. You are mapping the GROUND, not the cars.
+
+A parking bay is a rectangle of ground delimited by painted lines (white or yellow),
+usually with a wheel stop / parking block at its far end. Bays sit side by side in
+rows. Box EVERY bay you can see, empty or occupied:
+- EMPTY bay  -> box the painted rectangle on the ground.
+- OCCUPIED bay -> box the GROUND SLOT the car stands in, NOT the car body. The box
+  BOTTOM edge = where the car's tyres meet the ground (near end of the slot); the box
+  TOP edge = the slot's far end (wheel stop / rear painted line). The box should be
+  about as TALL as an empty bay in the same row -- never reach up to the car's roof.
+  Do NOT box cars that are driving or standing outside a marked bay.
+
+The oblique view makes each bay look like a trapezoid; return an axis-aligned box
+that tightly encloses that trapezoid's four corners. Every box -- empty or occupied --
+is a flat slot lying on the ground, not a tall vertical silhouette.
+
+Scan the WHOLE frame, including far rows and bays on darker pavement, and report
+every bay you can make out (distant ones look small). It is better to over-detect.
+
+Return ONLY JSON, no prose:
+{"spaces":[{"id":1,"box":{"startX":0,"startY":0,"endX":0,"endY":0},"occupied":true,"note":"empty | car"}]}
+
+Rules:
+- Integer pixel coords in THIS image: x in 0..1920, y in 0..1080, startX<endX, startY<endY.
+- One box per bay. Keep neighbouring bays in the same row similar in size and aligned.
+- Number bays left-to-right, top row first.
+- Exclude driving lanes, crosswalks, sidewalks, grass/landscaping, ramps, and the camera's dark frame/pillars.
+- Prefer recall: include a faint or partly-occluded bay rather than skip it.

@@ -2,6 +2,7 @@ import type { CapturedImage } from '../domain/types.js';
 import type { ToolsConfig } from '../config/toolsConfig.js';
 import type { CameraList } from '../viewer/CameraSource.js';
 import { fetchWithTimeout } from '../util/http.js';
+import { splitJpegFrames } from './mjpeg.js';
 
 /** Unity REST 서버가 반환하는 오류. */
 export class CameraApiError extends Error {
@@ -12,11 +13,34 @@ export class CameraApiError extends Error {
 }
 
 /**
+ * 카메라 클라이언트 공개면(설계서 §2.1).
+ * private 멤버를 가진 CameraClient 는 명목적 타입이라 RpcCameraClient 로 대체 불가 →
+ * 소비처는 이 인터페이스에 의존해 REST/RPC 구현을 교체한다.
+ */
+export interface ICameraClient {
+  clampZoom(zoom: number): number;
+  health(): Promise<boolean>;
+  requestImage(
+    camIdx: number,
+    presetIdx: number,
+    ptz?: { pan?: number; tilt?: number; zoom?: number },
+  ): Promise<CapturedImage>;
+  streamMjpeg(
+    camIdx: number,
+    presetIdx: number,
+    signal: AbortSignal,
+    ptz?: { pan: number; tilt: number; zoom: number },
+  ): AsyncGenerator<Buffer>;
+  listCameras(): Promise<CameraList>;
+  move(camIdx: number, pan: number, tilt: number, zoom: number): Promise<boolean>;
+}
+
+/**
  * 카메라(Unity 시뮬레이터 + 실 PTZ 공용) REST 클라이언트.
  * CWebCamCtrlServer 의 /health, /req_img, /req_move 호출 (아키텍처 §5.1).
  * 실 PTZ 어댑터도 동일 인터페이스를 구현한다(할일 17).
  */
-export class CameraClient {
+export class CameraClient implements ICameraClient {
   private readonly baseUrl: string;
   constructor(private cfg: ToolsConfig['camera']) {
     this.baseUrl = cfg.baseUrl.replace(/\/+$/, '');
@@ -63,6 +87,38 @@ export class CameraClient {
       imgName: body.img_name,
       jpg: Buffer.from(body.img_bytes ?? '', 'base64'),
     };
+  }
+
+  /**
+   * GET /stream → MJPEG(multipart/x-mixed-replace) 을 소비해 JPEG 프레임을 순서대로 산출(설계서 §3 단계2).
+   * 장수명 스트림이라 fetchWithTimeout 대신 signal 만 사용(abort 시 상류 중단, 수용기준 3).
+   * 상류 503(TOO_MANY_STREAMS)은 CameraApiError 로 전파(수용기준 4).
+   * ptz 제공 시 pan/tilt/zoom override 를 쿼리에 부가(Unity /stream 이 그 각도를 프레임마다 렌더 = req_img manual 경로).
+   * 미제공 시 preset 기본 동작(루프3).
+   */
+  async *streamMjpeg(
+    camIdx: number,
+    presetIdx: number,
+    signal: AbortSignal,
+    ptz?: { pan: number; tilt: number; zoom: number },
+  ): AsyncGenerator<Buffer> {
+    let url = `${this.baseUrl}/stream?cam_idx=${camIdx}&preset_idx=${presetIdx}`; // 1-based(수용기준 5)
+    if (ptz) {
+      url += `&pan=${ptz.pan}&tilt=${ptz.tilt}&zoom=${this.clampZoom(ptz.zoom)}`; // 수동 PTZ override(zoom 1~36 클램프).
+    }
+    const res = await fetch(url, { signal });
+    if (res.status === 503) throw new CameraApiError('TOO_MANY_STREAMS', 'stream 상한 초과', 503);
+    if (!res.ok || !res.body) throw new CameraApiError('INTERNAL', `stream 연결 실패: ${res.status}`, res.status);
+    const reader = res.body.getReader();
+    let buf: Buffer = Buffer.alloc(0);
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf = Buffer.concat([buf, Buffer.from(value)]);
+      const { frames, rest } = splitJpegFrames(buf);
+      for (const f of frames) yield f;
+      buf = rest;
+    }
   }
 
   /** GET /cameras → 카메라/프리셋(+PTZ) 목록(A타입). enabled=false 포함, presets 중첩 보존. */

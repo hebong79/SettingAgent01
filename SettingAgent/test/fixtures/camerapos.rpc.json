@@ -1,0 +1,18 @@
+{
+  "_comment": "rpcCameraClient.test.ts 픽스처 — camerapos 형식 A(datas[].datas[]).",
+  "datas": [
+    {
+      "cam_id": 1,
+      "datas": [
+        { "cam_id": 1, "preset_id": 1, "sname": "Preset 1", "pan": 22, "tilt": 6.8, "zoom": 1.6 },
+        { "cam_id": 1, "preset_id": 2, "sname": "Preset 2", "pan": 56.6, "tilt": 7.4, "zoom": 1.9 }
+      ]
+    },
+    {
+      "cam_id": 2,
+      "datas": [
+        { "cam_id": 2, "preset_id": 1, "sname": "B-1", "pan": 53.9, "tilt": 14.5, "zoom": 1.7 }
+      ]
+    }
+  ]
+}

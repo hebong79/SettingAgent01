@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import { AddressInfo } from 'node:net';
 import { RealPtzSource } from '../src/viewer/RealPtzSource.js';
+import type { CameraSource } from '../src/viewer/CameraSource.js';
 import type { CameraSourceConfig } from '../src/config/toolsConfig.js';
 
 let server: Server;
@@ -119,6 +120,11 @@ describe('RealPtzSource — Hucoms CGI(모킹)', () => {
       expect(back.tilt).toBeCloseTo(p.tilt, 5);
       expect(back.zoom).toBeCloseTo(p.zoom, 5);
     }
+  });
+
+  it('streamMjpeg 미구현(undefined) — Hucoms 스트림 미지원 → 라우트 501 폴백 근거(계약)', () => {
+    const src: CameraSource = new RealPtzSource(cfg());
+    expect(src.streamMjpeg).toBeUndefined();
   });
 
   it('listCameras → 프리셋 없는 라이브 뷰 1개(camIdx=1, presets 비어있음)', async () => {

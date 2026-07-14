@@ -103,18 +103,75 @@ export interface FloorRoiInput {
   presetIdx: number;
   /** 프리셋 최근 프레임 JPEG(base64). 비전 모델용. */
   imageBase64: string;
-  /** 대상 차량 bbox(집계 대표, 정규화). */
+  /** 대상 차량 bbox(대상 표시용, 정규화). */
   vehicle: NormalizedRect;
-  /** 번호판 bbox(있으면 앞쪽 단서, 정규화). */
-  plate?: NormalizedRect;
   /** 로깅/맥락용(예: `presetKey#clusterId`). */
   slotHint?: string;
 }
 export const FloorRoiResultSchema = z.object({
-  quad: z.array(z.object({ x: z.number(), y: z.number() })).length(4),
+  polygon: z.array(z.object({ x: z.number(), y: z.number() })).length(4),
   confidence: z.number().min(0).max(1).default(0),
 });
 export type FloorRoiResult = z.infer<typeof FloorRoiResultSchema>;
+
+// ── RAW(모델 절대픽셀) 스키마 — Qwen2.5-VL 네이티브 그라운딩 출력 파싱용 ──
+// Qwen2.5-VL 은 절대 픽셀 좌표로 그라운딩하도록 학습됨(points_2d 4코너 우선, 없으면 축정렬 bbox_2d).
+// AgentRuntime 경계에서 "보낸 이미지 (W,H)" 기준 정규화(NormalizedQuad)로 변환된다 →
+// 다운스트림(floorRoi.ts/reviewer)은 정규화 폴리곤(FloorRoiResult)만 소비(계약 불변).
+export const FloorRoiRawSchema = z
+  .object({
+    points_2d: z.array(z.tuple([z.number(), z.number()])).length(4).optional(),
+    bbox_2d: z.tuple([z.number(), z.number(), z.number(), z.number()]).optional(),
+    confidence: z.number().min(0).max(1).default(0),
+  })
+  .refine((v) => v.points_2d !== undefined || v.bbox_2d !== undefined, {
+    message: 'points_2d 또는 bbox_2d 중 하나가 필요',
+  });
+export type FloorRoiRaw = z.infer<typeof FloorRoiRawSchema>;
+
+// occupancy RAW: 면별 픽셀 4점(또는 bbox). points/bbox 둘 다 없어도 통과(폴리곤 미보유 면 graceful).
+export const OccupancyRawSpaceSchema = z.object({
+  id: z.number().int(),
+  occupied: z.boolean(),
+  points_2d: z.array(z.tuple([z.number(), z.number()])).length(4).optional(),
+  bbox_2d: z.tuple([z.number(), z.number(), z.number(), z.number()]).optional(),
+});
+export const OccupancyRawSchema = z.object({
+  spaces: z.array(OccupancyRawSpaceSchema).default([]),
+  confidence: z.number().min(0).max(1).default(0),
+});
+export type OccupancyRaw = z.infer<typeof OccupancyRawSchema>;
+
+// ── 차량 점유율 판정(프리셋 단위 비전 — 면별 occupied 플래그, 좌표 생성 아님) ──
+// floor ROI(4점 폴리곤)와 별개: "몇 면 중 몇 면 점유"를 판정한다. 산술(count/rate)은 결정형 코드가 계산.
+export interface OccupancyInput {
+  camIdx: number;
+  presetIdx: number;
+  /** 프리셋 최근 프레임 JPEG(base64). 비전 모델용. */
+  imageBase64: string;
+  /** 기대 면 수 힌트(선택, expectedByPreset). */
+  expected?: number;
+}
+export const OccupancySpaceSchema = z.object({
+  id: z.number().int(),
+  occupied: z.boolean(),
+  // 점유 바닥 슬롯 4점 OBB. floor_roi.yaml 규약 [앞왼,앞오,뒤오,뒤왼] 정규화 0~1.
+  // optional 유지: 미보유 면도 rate 집계엔 포함, 오버레이만 graceful skip(기존 box 철학 계승).
+  polygon: z.array(z.object({ x: z.number(), y: z.number() })).length(4).optional(),
+});
+export const OccupancyResultSchema = z.object({
+  spaces: z.array(OccupancySpaceSchema).default([]),
+  confidence: z.number().min(0).max(1).default(0),
+});
+export type OccupancyResult = z.infer<typeof OccupancyResultSchema>;
+/** 메서드 반환: LLM 면별 플래그 + 결정형 집계 카운트. */
+export interface OccupancyJudgment {
+  spaces: OccupancyResult['spaces'];
+  occupiedCount: number;
+  total: number;
+  rate: number; // rate = total>0 ? occupiedCount/total : 0
+  confidence: number;
+}
 
 // ── 캘리브레이션 자문(번호판 중심정렬·줌 PTZ) ─────────────────
 // 좌표를 "생성"하지 않는다 — 소폭 보정 제안·수렴/가림 판정만(호출측이 클램프·폴백).
@@ -149,8 +206,12 @@ export interface SetupBrain {
   reviewCheckpoint?(input: CheckpointInput): Promise<CheckpointResult | null>;
   /** 최종화 보조 판정(옵셔널). 비활성 시 null. */
   finalizeCapture?(input: FinalizeCaptureInput): Promise<FinalizeCaptureResult | null>;
-  /** 바닥 점유 영역(floor ROI · 4점) 비전 추론(옵셔널). 비활성/미설정 시 null. */
+  /** 바닥 점유 영역(floor ROI · 4점 회전 사변형) 비전 추론(옵셔널). 비활성/미설정 시 null. */
   recognizeFloorRoi?(input: FloorRoiInput): Promise<FloorRoiResult | null>;
+  /** 프리셋 점유율 판정(옵셔널). 비활성/미설정 시 null(결정형 폴백 없음 — 저장 생략). */
+  judgeOccupancy?(input: OccupancyInput): Promise<OccupancyJudgment | null>;
   /** 캘리브레이션 중심정렬·줌 자문(옵셔널). 비활성/실패 시 null(결정형 폴백). */
   adviseCentering?(input: CenteringAdviceInput): Promise<CenteringAdvice | null>;
+  /** LLM 강제 구동(warm-up/preload · 옵셔널). best-effort — 성공 true, 비활성/실패 false(throw 안 함). */
+  warmup?(): Promise<boolean>;
 }

@@ -41,7 +41,7 @@ afterAll(() => new Promise<void>((r) => server.close(() => r())));
 function cfg(enabled: boolean): LlmConfig {
   const pair = (s: string) => ({ system: s, user: s });
   return {
-    llm: { provider: 'qwen3', model: 'qwen3-8b', baseUrl, temperature: 0.1, maxTokens: 64, enabled },
+    llm: { provider: 'qwen3', model: 'qwen3-8b', baseUrl, temperature: 0.1, maxTokens: 64, enabled, api: 'openai', think: false, imageMaxEdge: 960 },
     mcp: { enabled: false, transport: 'stdio', servers: [] },
     setupPrompts: {
       stage1Enabled: true,

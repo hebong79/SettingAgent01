@@ -1,6 +1,16 @@
 import { describe, it, expect } from 'vitest';
 import { aggregate, type AggregateOptions } from '../src/capture/Aggregator.js';
 import type { DetectionRow } from '../src/capture/types.js';
+import type { NormalizedQuad } from '../src/domain/types.js';
+import { plateAngleRad } from '../src/domain/geometry.js';
+
+/** quad centroid(4모서리 평균). 합성 대표 quad 중심 검증용. */
+function quadCentroid(q: NormalizedQuad): { x: number; y: number } {
+  return {
+    x: (q[0].x + q[1].x + q[2].x + q[3].x) / 4,
+    y: (q[0].y + q[1].y + q[2].y + q[3].y) / 4,
+  };
+}
 
 /**
  * 검증자(qa-tester): Aggregator 결정형 순수함수 (G3 — 핵심).
@@ -135,6 +145,91 @@ describe('Aggregator 프리셋 분리 (G3)', () => {
   });
 });
 
+// 검증자(qa-tester): 대표 quad 방향 보존·중심 최근접·plate 없음 null (설계 케이스 8, 핵심).
+describe('Aggregator 대표 quad 방향 보존 (G3·설계 케이스 8)', () => {
+  /**
+   * quad 를 가진 plate DetectionRow. rect(x,y,w,h)=quad boundingRect(CaptureJob 이 quadBoundingRect 로 채우는 계약 재현).
+   * 회전 quad → boundingRect 는 축정렬이지만, 대표 quad 는 실 4점 방향을 보존해야 한다.
+   */
+  function plateQuad(round: number, quad: NormalizedQuad): DetectionRow {
+    const xs = quad.map((p) => p.x);
+    const ys = quad.map((p) => p.y);
+    const x = Math.min(...xs);
+    const y = Math.min(...ys);
+    return {
+      observationId: round, roundIdx: round, camIdx: 1, presetIdx: 1, kind: 'plate',
+      x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y, conf: 0.9, quad,
+    };
+  }
+
+  it('회전 quad 멤버 → 합성 대표 quad 가 각도·중심 보존(축 순환 median)', () => {
+    // 마름모(회전) 번호판. plateAngleRad ≈ atan2(0.04,0.06). 합성 대표는 이 방향을 보존해야 함.
+    const rot: NormalizedQuad = [
+      { x: 0.33, y: 0.33 },
+      { x: 0.36, y: 0.35 },
+      { x: 0.33, y: 0.37 },
+      { x: 0.30, y: 0.35 },
+    ];
+    const dets = [
+      vehicle(1, 0.3, 0.3), vehicle(2, 0.3, 0.3), vehicle(3, 0.3, 0.3),
+      plateQuad(1, rot), plateQuad(2, rot), plateQuad(3, rot),
+    ];
+    const slots = aggregate(dets, new Map([['1:1', 3]]), OPTS);
+    const veh = slots.find((s) => s.status === 'candidate')!;
+    expect(veh.plateQuad).not.toBeNull();
+    // 합성 규약 정합: plateAngleRad(합성 quad) == θ_rep == 원본 방향.
+    expect(plateAngleRad(veh.plateQuad!)).toBeCloseTo(plateAngleRad(rot), 5);
+    // 강건 중심 = 멤버 centroid 의 median(원본 centroid (0.33, 0.35)).
+    const c = quadCentroid(veh.plateQuad!);
+    expect(c.x).toBeCloseTo(0.33);
+    expect(c.y).toBeCloseTo(0.35);
+    // 축정렬이 아니다(회전 보존): 상변 두 점의 y 가 다르다.
+    expect(veh.plateQuad![0].y).not.toBeCloseTo(veh.plateQuad![1].y);
+  });
+
+  it('각도 이상치 멤버(N≥4) → 강건 대표 각도가 다수 방향 유지(이상치 무시)', () => {
+    // 축정렬(각도 0) 다수 + 크게 기운 1개. 축 순환 median 이 이상치를 무시하고 0 을 대표로.
+    const flat: NormalizedQuad = [
+      { x: 0.30, y: 0.33 }, { x: 0.36, y: 0.33 }, { x: 0.36, y: 0.37 }, { x: 0.30, y: 0.37 },
+    ];
+    const tilt: NormalizedQuad = [
+      { x: 0.33, y: 0.33 }, { x: 0.36, y: 0.35 }, { x: 0.33, y: 0.37 }, { x: 0.30, y: 0.35 },
+    ];
+    // 같은 위치의 plate 5멤버(4 flat + 1 tilt) → 1 클러스터.
+    const dets = [
+      vehicle(1, 0.3, 0.3), vehicle(2, 0.3, 0.3), vehicle(3, 0.3, 0.3),
+      plateQuad(1, flat), plateQuad(2, flat), plateQuad(3, flat), plateQuad(4, flat),
+      plateQuad(5, tilt),
+    ];
+    const slots = aggregate(dets, new Map([['1:1', 5]]), OPTS);
+    const veh = slots.find((s) => s.status === 'candidate')!;
+    expect(veh.plateQuad).not.toBeNull();
+    // 다수(각도 0) 방향이 대표 — 이상치 tilt 에 끌려가지 않음.
+    expect(plateAngleRad(veh.plateQuad!)).toBeCloseTo(0, 5);
+    // 각도 분산(angleSpread)이 산출됨(quad ≥2).
+    expect(veh.angleSpread).not.toBeNull();
+    expect(veh.angleSpread!).toBeGreaterThanOrEqual(0);
+  });
+
+  it('plate 없음 → plateQuad null', () => {
+    const dets = [vehicle(1, 0.3, 0.3), vehicle(2, 0.3, 0.3), vehicle(3, 0.3, 0.3)];
+    const slots = aggregate(dets, new Map([['1:1', 3]]), OPTS);
+    expect(slots[0].plateQuad).toBeNull();
+  });
+
+  it('quad 부재 plate 멤버만(구DB) → 매칭돼도 plateQuad null', () => {
+    // plate 멤버가 quad 없이 rect 만(구스키마) → 대표 quad 부재 → null(Finalizer 폴백 대상).
+    const dets = [
+      vehicle(1, 0.3, 0.3), vehicle(2, 0.3, 0.3), vehicle(3, 0.3, 0.3),
+      plate(1, 0.31, 0.34), plate(2, 0.31, 0.34), plate(3, 0.31, 0.34),
+    ];
+    const slots = aggregate(dets, new Map([['1:1', 3]]), OPTS);
+    const veh = slots.find((s) => s.status === 'candidate')!;
+    expect(veh.plateX).not.toBeNull(); // rect 매칭은 성공
+    expect(veh.plateQuad).toBeNull();  // 하지만 quad 부재 → null
+  });
+});
+
 describe('Aggregator plate 귀속 (G3)', () => {
   it('vehicle ROI 내부 plate 클러스터 → 해당 슬롯 plate_* 채움', () => {
     const dets = [
@@ -183,5 +278,40 @@ describe('Aggregator 결정형 (G3)', () => {
 
   it('빈 입력 → 빈 출력', () => {
     expect(aggregate([], new Map(), OPTS)).toEqual([]);
+  });
+});
+
+// 검증자(qa-tester): 강건 통계(개선 ②③) — 신뢰도 단조성·소표본 폴백·위치 이상치 컷.
+describe('Aggregator 신뢰도·강건 통계 (G3)', () => {
+  it('confidence ∈ [0,1] 이고 occupancy 높을수록 비감소(단조성)', () => {
+    const dets = [vehicle(1, 0.3, 0.3), vehicle(2, 0.3, 0.3), vehicle(3, 0.305, 0.3)];
+    const hi = aggregate(dets, new Map([['1:1', 3]]), OPTS)[0]; // occ=1.0
+    const lo = aggregate(dets, new Map([['1:1', 6]]), OPTS)[0]; // occ=0.5
+    expect(hi.confidence).toBeGreaterThanOrEqual(lo.confidence);
+    for (const c of [hi.confidence, lo.confidence]) {
+      expect(c).toBeGreaterThanOrEqual(0);
+      expect(c).toBeLessThanOrEqual(1);
+    }
+    // plate 부재 → angleSpread null, posSpread 산출.
+    expect(hi.angleSpread).toBeNull();
+    expect(hi.posSpread).toBeGreaterThanOrEqual(0);
+  });
+
+  it('N=2 vehicle 소표본 폴백 → 가중median = median(현행 보존)', () => {
+    // 등가중(conf 동일) 2멤버 → weightedMedian == median(짝수 평균).
+    const dets = [vehicle(1, 0.20, 0.20), vehicle(2, 0.24, 0.20)];
+    const s = aggregate(dets, new Map([['1:1', 2]]), OPTS)[0];
+    expect(s.x).toBeCloseTo(0.22); // median([0.20,0.24]) = 0.22
+    expect(s.support).toBe(2);
+  });
+
+  it('N≥4 위치 이상치 → robustRect 가 이상치 제외(대표는 다수쪽), support 보존', () => {
+    const dets = [
+      vehicle(1, 0.30, 0.30), vehicle(2, 0.301, 0.30), vehicle(3, 0.299, 0.30), vehicle(4, 0.30, 0.301),
+      vehicle(5, 0.34, 0.30), // clusterDist 0.06 이내로 합류하지만 위치 gross outlier
+    ];
+    const s = aggregate(dets, new Map([['1:1', 5]]), OPTS)[0];
+    expect(s.support).toBe(5); // support 는 전체 관측(관측 사실 보존)
+    expect(s.x).toBeCloseTo(0.30, 2); // 대표 중심은 이상치(0.34) 미포함 다수쪽
   });
 });

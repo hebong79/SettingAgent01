@@ -22,6 +22,12 @@ export interface NormalizedPoint {
  */
 export type NormalizedQuad = [NormalizedPoint, NormalizedPoint, NormalizedPoint, NormalizedPoint];
 
+/**
+ * 정규화 가변 다각형 (좌표계 0~1, 런타임 불변식 4~10점, 볼록·시계방향). 차량 바닥 점유 footprint.
+ * 4점 특수화는 [FL,FR,RR,RL] 규약과 호환 — NormalizedQuad(4점 튜플)는 구조적으로 이 타입에 할당 가능(하위호환).
+ */
+export type NormalizedPolygon = NormalizedPoint[];
+
 /** 카메라: camIdx 는 1-based. Unity m_Cameras 와 매핑. */
 export interface Camera {
   camIdx: number;
@@ -48,16 +54,18 @@ export interface ParkingSlot {
   /** key = `${camIdx}:${presetIdx}` → 해당 프리셋 이미지에서 이 면의 **차량 ROI**(VPD, 정규화). */
   roiByPreset: Record<string, NormalizedRect>;
   /**
-   * key = `${camIdx}:${presetIdx}` → 이 면 차량의 **번호판 ROI**(LPD, 정규화).
-   * 셋업 시 VPD 차량 ROI 안에서 LPD 로 번호판 위치를 찾아 보관한다(있을 때만).
-   * ActionAgent 센터라이징의 prior(초기 조준점)로 활용 → 줌/이동 수렴을 가속.
+   * key = `${camIdx}:${presetIdx}` → 이 면 차량의 **번호판 ROI**(LPD OBB, 정규화 4점 사변형).
+   * 셋업 시 VPD 차량 ROI 안에서 LPD 로 번호판 OBB(회전 4점)를 찾아 보관한다(있을 때만).
+   * 점 순서 규약 = ultralytics OBB(TL→TR→BR→BL). 구데이터(rect)는 로드 시 rectToQuad 승격.
+   * ActionAgent 센터라이징의 prior(초기 조준점)로 활용 → 줌/이동 수렴을 가속(quadBoundingRect 유도).
    */
-  plateRoiByPreset?: Record<string, NormalizedRect>;
+  plateRoiByPreset?: Record<string, NormalizedQuad>;
   /**
-   * key = `${camIdx}:${presetIdx}` → 이 면 차량의 **바닥 점유 영역**(LLM 비전 추론, 정규화 4점 사변형).
+   * key = `${camIdx}:${presetIdx}` → 이 면 차량의 **바닥 점유 영역**(LLM 비전 추론, 정규화 가변 다각형 4~10점).
    * roiByPreset(축정렬 차량 bbox)과 별개·가산. 미산출 시 키 없음.
+   * 구데이터(4점 NormalizedQuad)는 구조적 호환으로 그대로 유효.
    */
-  floorRoiByPreset?: Record<string, NormalizedQuad>;
+  floorRoiByPreset?: Record<string, NormalizedPolygon>;
 }
 
 /** 전역 슬롯 인덱스 매핑 (할일 7). 전 카메라·전 프리셋 정렬 결과. */

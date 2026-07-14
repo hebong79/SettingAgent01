@@ -3,6 +3,7 @@
 // 핵심: probe 1회로 부호 포함 게인 추정 → P 제어 → zoom 공식. FOV 불요·부호 무관.
 
 import type { NormalizedRect } from '../domain/types.js';
+import { quadBoundingRect } from '../domain/geometry.js';
 import type { PlateBox } from '../clients/LpdClient.js';
 import type { SlotPtzItem, SlotPtzArtifact } from './types.js';
 
@@ -19,8 +20,9 @@ export function pickNearestPlate(plates: PlateBox[], target: NormalizedRect): Pl
   let best: PlateBox | null = null;
   let bestD = Infinity;
   for (const p of plates) {
-    const cx = p.rect.x + p.rect.w / 2;
-    const cy = p.rect.y + p.rect.h / 2;
+    const pr = quadBoundingRect(p.quad);
+    const cx = pr.x + pr.w / 2;
+    const cy = pr.y + pr.h / 2;
     const d = (cx - tcx) ** 2 + (cy - tcy) ** 2;
     if (d < bestD) {
       bestD = d;

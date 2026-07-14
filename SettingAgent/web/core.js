@@ -106,6 +106,58 @@ export function pollPlan(state, intervalMs = 2000) {
   return { poll, intervalMs };
 }
 
+/**
+ * 정밀수집 상태 → 버튼/안내 UI 의도(순수). 백엔드 라우트 거부 조건과 대칭:
+ *   - stop 은 running 에서만 허용(그 외 stopDisabled=true — 400 `not running` 대칭).
+ *   - start/finalize 는 active(running/stopping/finalizing) 중 금지(중복 start·409 finalize 대칭).
+ * suppressFrameMsg: stopping 중 프레임틱이 cap-msg 를 덮지 않게. stoppingNote: '정지 중…' 안내 표시.
+ * state ∈ idle/running/stopping/finalizing/done/stopped/error.
+ */
+export function captureUiState(state) {
+  const active = state === 'running' || state === 'stopping' || state === 'finalizing';
+  return {
+    startDisabled: active,
+    stopDisabled: state !== 'running',
+    finalizeDisabled: active,
+    suppressFrameMsg: state === 'stopping',
+    stoppingNote: state === 'stopping',
+  };
+}
+
+/**
+ * 옵션(설정) 폼 클라이언트 검증(순수). 백엔드 zod(VpdSchema/LpdSchema/LlmSchema)와 동일 규칙의 사전 검증 —
+ * 저장 전에 형식 오류를 즉시 안내한다(권위 검증은 서버). form={ llm:{provider,model,baseUrl}, vpd:{endpoint,detPath}, lpd:{endpoint,detPath} }.
+ * → 오류 메시지 문자열 배열(빈 배열이면 통과). URL 은 http/https 만 허용(zod .url() 근사).
+ */
+export function settingsFormErrors(form) {
+  const errors = [];
+  const isHttpUrl = (s) => {
+    try {
+      const u = new URL(String(s));
+      return u.protocol === 'http:' || u.protocol === 'https:';
+    } catch {
+      return false;
+    }
+  };
+  if (!String(form?.llm?.model ?? '').trim()) errors.push('LLM model 필수');
+  if (!isHttpUrl(form?.llm?.baseUrl)) errors.push('LLM Base URL 형식 오류(http/https)');
+  if (!isHttpUrl(form?.vpd?.endpoint)) errors.push('VPD endpoint 형식 오류(http/https)');
+  if (!isHttpUrl(form?.lpd?.endpoint)) errors.push('LPD endpoint 형식 오류(http/https)');
+  if (!String(form?.vpd?.detPath ?? '').startsWith('/')) errors.push('VPD detPath 는 / 로 시작');
+  if (!String(form?.lpd?.detPath ?? '').startsWith('/')) errors.push('LPD detPath 는 / 로 시작');
+  return errors;
+}
+
+/**
+ * 정밀수집 라이브 프레임의 유일 키(cam:preset:round). 최신 캡처 1건을 식별.
+ * 직전 키와 같으면(라운드 사이 대기 중 동일 프레임) 재디코드를 스킵하는 데 쓴다.
+ * 인자가 모두 null/undefined 면 null(식별 불가 → 스킵하지 않음).
+ */
+export function capFrameKey(cam, preset, round) {
+  if (cam == null && preset == null && round == null) return null;
+  return `${cam ?? ''}:${preset ?? ''}:${round ?? ''}`;
+}
+
 /** 컨트롤 패널 드래그 리사이즈 폭 클램프(px → [min,max] 정수). */
 export function clampPanelWidth(px, min = 260, max = 720) {
   return Math.min(max, Math.max(min, Math.round(px)));
@@ -236,6 +288,323 @@ export function analyzeArtifact(artifact) {
   };
 }
 
+// ===== 정밀수집 차량 점유율(occupancy) 표시용 순수 로직 =====
+
+/**
+ * 점유율(0~1) → 'NN%'. null/NaN/비수치 → '0%'.
+ */
+export function formatRatePct(rate) {
+  const n = Number(rate);
+  if (!Number.isFinite(n)) return '0%';
+  return `${Math.round(n * 100)}%`;
+}
+
+/**
+ * `GET /capture/runs/:id/occupancy` 결과 rows[] → cam:preset 키 맵.
+ * rows 원소: { camIdx, presetIdx, occupiedCount, total, rate, spacesJson(string|null), ... }.
+ * spacesJson 은 문자열 → JSON.parse(실패/null → 빈 배열로 graceful 강등, throw 안 함).
+ * spaces 요소: { id, occupied, polygon? }(polygon optional — 미보유 요소도 그대로 통과, 오버레이가 skip).
+ */
+export function occupancyByKey(rows) {
+  const out = {};
+  for (const r of rows ?? []) {
+    let spaces = [];
+    if (typeof r.spacesJson === 'string') {
+      try {
+        const parsed = JSON.parse(r.spacesJson);
+        if (Array.isArray(parsed)) spaces = parsed;
+      } catch {
+        spaces = []; // 파싱 실패 → 빈 spaces(백엔드 UNKNOWN 강등 철학과 정합).
+      }
+    }
+    out[presetKey(r.camIdx, r.presetIdx)] = {
+      camIdx: r.camIdx,
+      presetIdx: r.presetIdx,
+      occupiedCount: r.occupiedCount,
+      total: r.total,
+      rate: r.rate,
+      spaces,
+    };
+  }
+  return out;
+}
+
+/**
+ * 점유율 맵 → 표 rows. cam→preset ASC 정렬. 각 행 [key, camIdx, presetIdx, occupiedCount, total, 'NN%'].
+ */
+export function occupancyRows(occByKey) {
+  return Object.entries(occByKey ?? {})
+    .map(([key, o]) => [key, o.camIdx, o.presetIdx, o.occupiedCount, o.total, formatRatePct(o.rate)])
+    .sort((a, b) => a[1] - b[1] || a[2] - b[2]);
+}
+
+/**
+ * 전체 평균 점유율. ΣoccupiedCount / Σtotal. 빈 입력·0분모 → { occupied:0, total:0, rate:0 }.
+ */
+export function occupancyAverage(occByKey) {
+  let occupied = 0;
+  let total = 0;
+  for (const o of Object.values(occByKey ?? {})) {
+    occupied += Number(o.occupiedCount) || 0;
+    total += Number(o.total) || 0;
+  }
+  return { occupied, total, rate: total > 0 ? occupied / total : 0 };
+}
+
+// ===== 미리 정의된 주차면 폴리곤(PtzCamRoi.json) 정규화 순수 로직 =====
+
+/**
+ * `GET /capture/place-roi` raw JSON(PtzCamRoi.json) → 프리셋별 정규화 폴리곤 + 검수 리포트.
+ * 입력 shape: { cameras:[{ camera:{ cam_id, imageWidth, imageHeight }, presets:[{ preset_idx, parking_spaces:[{ idx, points:[[x,y]...] }] }] }] }.
+ * 반환:
+ *   byPreset: { "<camId>:<presetIdx>": [ { idx, points:[{x,y}...] } ] }  // points 는 이미지 크기로 정규화(0..1)
+ *   report:   [ { camId, presetIdx, spaceCount, issues:[문자열] } ]       // 프리셋별 검수
+ * throw 금지(방어적) — malformed 입력도 부분 결과 + issues 로 강등. cam_id↔camIdx, preset_idx↔presetIdx 동일 1-based.
+ */
+export function normalizePtzCamRoi(json) {
+  const byPreset = {};
+  const report = [];
+  if (!json || typeof json !== 'object') return { byPreset, report };
+  const cameras = Array.isArray(json.cameras) ? json.cameras : [];
+  for (const camEntry of cameras) {
+    const cam = camEntry?.camera;
+    const camId = cam?.cam_id;
+    const W = Number(cam?.imageWidth);
+    const H = Number(cam?.imageHeight);
+    const sizeOk = !!cam && Number.isFinite(W) && Number.isFinite(H) && W > 0 && H > 0;
+    const presets = Array.isArray(camEntry?.presets) ? camEntry.presets : [];
+    for (const preset of presets) {
+      const presetIdx = preset?.preset_idx;
+      const rawSpaces = Array.isArray(preset?.parking_spaces) ? preset.parking_spaces : [];
+      const issues = [];
+      if (camId == null) issues.push('cam_id 누락');
+      if (presetIdx == null) issues.push('preset_idx 누락');
+      if (!sizeOk) issues.push('이미지 크기 누락/오류');
+      if (!Array.isArray(preset?.parking_spaces) || rawSpaces.length === 0) issues.push('주차면 없음');
+
+      const normSpaces = [];
+      for (const sp of rawSpaces) {
+        const idx = sp?.idx;
+        if (idx == null) { issues.push('idx 누락'); continue; }
+        const rawPts = sp?.points;
+        if (!Array.isArray(rawPts)) { issues.push(`idx ${idx}: points 누락`); continue; }
+        if (rawPts.length !== 4) issues.push(`idx ${idx}: 점 4개 아님(${rawPts.length}개)`);
+        const pts = rawPts.map((p) => ({
+          x: Array.isArray(p) ? Number(p[0]) : Number(p?.x),
+          y: Array.isArray(p) ? Number(p[1]) : Number(p?.y),
+        }));
+        if (!sizeOk) continue; // 정규화 불가 → 이미 '이미지 크기 누락/오류' 기록, byPreset 미기록.
+        const outOfRange = pts.some(
+          (p) => !Number.isFinite(p.x) || !Number.isFinite(p.y) || p.x < 0 || p.x > W || p.y < 0 || p.y > H,
+        );
+        if (outOfRange) issues.push(`idx ${idx}: 좌표 범위 이탈`);
+        normSpaces.push({ idx, points: pts.map((p) => ({ x: p.x / W, y: p.y / H })) });
+      }
+
+      report.push({ camId, presetIdx, spaceCount: rawSpaces.length, issues });
+      if (sizeOk && normSpaces.length) byPreset[presetKey(camId, presetIdx)] = normSpaces;
+    }
+  }
+  return { byPreset, report };
+}
+
+/**
+ * 정밀수집 바닥(floor) ROI 소스 선택(순수). 토글(useLlm)에 따라 현재 프리셋(key)의 바닥 폴리곤을 반환.
+ *   - useLlm===false(파일 모드): placeRoi[key] 의 각 면({idx,points})을 { quad:points, label:String(idx) } 로.
+ *     프리셋 단위(슬롯/클러스터 없음) — 파일 ROI 를 바닥 실데이터로 승격(R1/R4).
+ *   - useLlm===true(LLM 모드): slots[].floorRoiByPreset[key] 보유분을 { quad, label:'', slotId } 로(기존 슬롯별 floor).
+ * throw 금지 — placeRoi/slots 누락 시 { source, polygons:[] }(graceful).
+ * args: { useLlm, slots, placeRoi, key }.
+ */
+export function selectFloorRoi({ useLlm, slots, placeRoi, key }) {
+  if (useLlm) {
+    const polygons = [];
+    for (const slot of slots ?? []) {
+      const quad = slot?.floorRoiByPreset?.[key];
+      if (quad) polygons.push({ quad, label: '', slotId: slot.slotId });
+    }
+    return { source: 'llm', polygons };
+  }
+  const spaces = placeRoi?.[key] ?? [];
+  const polygons = spaces.map((sp) => ({ quad: sp.points, label: String(sp.idx), idx: sp.idx })); // idx: 선택 하이라이트용(R4).
+  return { source: 'file', polygons };
+}
+
+/** 4점 quad 의 산술 평균 중심(면적가중 아님 — 번호판 근사 중심으로 충분, R4). quad 미보유/4점 아니면 null. */
+export function quadCentroid(quad) {
+  if (!Array.isArray(quad) || quad.length !== 4) return null;
+  let sx = 0;
+  let sy = 0;
+  for (const p of quad) {
+    if (typeof p?.x !== 'number' || typeof p?.y !== 'number') return null;
+    sx += p.x;
+    sy += p.y;
+  }
+  return { x: sx / 4, y: sy / 4 };
+}
+
+/**
+ * 로직 점유 판정(순수, R4/R5). 각 바닥 폴리곤(floorPolygons)에 대해 어떤 번호판(plates) 중심이
+ * 그 폴리곤 내부(pointInQuad 재사용)면 occupied=true, center=그 번호판 중심(첫 매칭).
+ * floorPolygons: [{ idx, quad:[{x,y}×4] }] — 현재 프리셋 파일 바닥ROI.
+ * plates: [{ quad:[{x,y}×4] }] — LPD 번호판 OBB(여러 소스 합집합, 호출측이 구성).
+ * 반환: [{ idx, occupied, center? }] (center 는 occupied 일 때만).
+ * throw 금지 — floorPolygons/plates 누락·비배열 시 []( graceful, 강등 철학).
+ */
+export function computeOccupancy(floorPolygons, plates) {
+  if (!Array.isArray(floorPolygons)) return [];
+  const centers = (Array.isArray(plates) ? plates : [])
+    .map((p) => quadCentroid(p?.quad))
+    .filter((c) => c !== null);
+  return floorPolygons.map((f) => {
+    const center = centers.find((c) => pointInQuad(c.x, c.y, f.quad));
+    return center ? { idx: f.idx, occupied: true, center } : { idx: f.idx, occupied: false };
+  });
+}
+
+// ===== 전체 주차면 목록 · 전역 인덱스(PtzCamRoi.idx) 순수 로직(R2/R3/R4) =====
+// placeRoi = { "cam:preset": [{ idx, points }] }. idx = 파일 전체에서 고유한 '전역 인덱스'(1..N).
+// 프리셋내 인덱스는 배열 위치로만 표현(PtzCamRoi.json 스키마 무변경).
+
+/** placeRoi 를 (cam asc → preset asc → 배열순)으로 나열: [{ key, cam, preset, pos, space }]. 내부 헬퍼. */
+function flattenPlaceRoi(placeRoi) {
+  const items = [];
+  if (!placeRoi || typeof placeRoi !== 'object') return items;
+  const keys = Object.keys(placeRoi).sort((a, b) => {
+    const [ca, pa] = a.split(':').map(Number);
+    const [cb, pb] = b.split(':').map(Number);
+    return ca - cb || pa - pb;
+  });
+  for (const key of keys) {
+    const [cam, preset] = key.split(':').map(Number);
+    const spaces = Array.isArray(placeRoi[key]) ? placeRoi[key] : [];
+    spaces.forEach((space, pos) => items.push({ key, cam, preset, pos, space }));
+  }
+  return items;
+}
+
+/**
+ * 전역 순서(items 배열 순)대로 idx 를 1..N 재부여해 placeRoi 재조립(불변). 내부 헬퍼.
+ * 프리셋내 배열 순서는 원래 파일 순서(pos)를 유지하고 idx 값만 갱신 → 프리셋 소속·좌표 불변.
+ * 원본의 모든 키를 보존(빈 프리셋도 [] 로 유지 — 저장 시 빈 배열 PUT 이 필요).
+ */
+function assemblePlaceRoi(keys, items) {
+  const buckets = {};
+  for (const key of keys) buckets[key] = [];
+  items.forEach((it, i) => buckets[it.key]?.push({ pos: it.pos, space: it.space, idx: i + 1 }));
+  const out = {};
+  for (const key of keys) {
+    out[key] = buckets[key]
+      .sort((a, b) => a.pos - b.pos)
+      .map((e) => ({ ...e.space, idx: e.idx }));
+  }
+  return out;
+}
+
+/** 현재 idx 오름차순으로 정렬한 전역 시퀀스(idx 는 1..N 고유 전제 — normalizeGlobalIdx 통과분). 내부 헬퍼. */
+function orderedByIdx(placeRoi) {
+  return flattenPlaceRoi(placeRoi).sort((a, b) => a.space.idx - b.space.idx);
+}
+
+/**
+ * 전역 인덱스 정규화(R3 마이그레이션). idx 집합이 정확히 1..N 의 순열이면 **손대지 않는다**
+ * (사용자가 재지정한 번호 보존). 중복·누락·0 이하·비정수가 있으면 (cam asc → preset asc → 배열순)
+ * 기준으로 1..N 재부여. Unity 재생성으로 프리셋별 0-based 로 리셋돼도 graceful 재부여.
+ * 반환: { placeRoi, changed, issues[] }. throw 금지 — null/빈 입력 → { placeRoi:{}, changed:false, issues:[] }.
+ */
+export function normalizeGlobalIdx(placeRoi) {
+  const items = flattenPlaceRoi(placeRoi);
+  const keys = Object.keys(placeRoi ?? {});
+  const n = items.length;
+  const issues = [];
+  const seen = new Set();
+  for (const it of items) {
+    const idx = it.space?.idx;
+    if (!Number.isInteger(idx) || idx < 1 || idx > n) {
+      issues.push(`cam${it.cam}:${it.preset} idx ${idx} — 1..${n} 범위의 정수 아님`);
+    } else if (seen.has(idx)) {
+      issues.push(`idx ${idx} 중복(cam${it.cam}:${it.preset})`);
+    } else {
+      seen.add(idx);
+    }
+  }
+  if (!issues.length && seen.size === n) return { placeRoi: placeRoi ?? {}, changed: false, issues };
+  return { placeRoi: assemblePlaceRoi(keys, items), changed: n > 0, issues };
+}
+
+/**
+ * 전역 인덱스 재지정(R4 '수정'). 전역 시퀀스(1..N)에서 fromIdx 를 뽑아 toIdx 위치에 삽입 후 1..N 재부여
+ * (충돌 시 나머지를 밀어 연속 유지). 프리셋 소속·좌표 불변. 불변(새 객체).
+ * fromIdx 부재 / toIdx 비수치 / from===to → 원본 그대로. toIdx 는 1..N 으로 clamp.
+ */
+export function reindexPlaceSpace(placeRoi, fromIdx, toIdx) {
+  const ordered = orderedByIdx(placeRoi);
+  const n = ordered.length;
+  const at = ordered.findIndex((it) => it.space?.idx === fromIdx);
+  const target = Number(toIdx);
+  if (at < 0 || !Number.isFinite(target)) return placeRoi ?? {};
+  const to = Math.min(Math.max(Math.round(target), 1), n);
+  if (to === fromIdx) return placeRoi ?? {};
+  const [moved] = ordered.splice(at, 1);
+  ordered.splice(to - 1, 0, moved);
+  return assemblePlaceRoi(Object.keys(placeRoi ?? {}), ordered);
+}
+
+/**
+ * 주차면 삭제(R4 '삭제'). 해당 전역 인덱스를 제거하고 남은 전부를 상대순서 유지한 채 1..N 재압축.
+ * 없는 idx → 원본 그대로. 프리셋이 비어도 키는 [] 로 유지. 불변(새 객체).
+ */
+export function removePlaceSpace(placeRoi, idx) {
+  const ordered = orderedByIdx(placeRoi);
+  const at = ordered.findIndex((it) => it.space?.idx === idx);
+  if (at < 0) return placeRoi ?? {};
+  ordered.splice(at, 1);
+  return assemblePlaceRoi(Object.keys(placeRoi ?? {}), ordered);
+}
+
+/**
+ * 전체 주차면 평면 목록(R2). 전 카메라·전 프리셋을 하나의 목록으로 전역 인덱스 오름차순 산출.
+ * - 점유: 프리셋별로 computeOccupancy(파일 바닥ROI × LPD 번호판 중심) 재사용.
+ * - parkingSlotsByKey(최종화 후 DB parking_slots)에 slotIdx===globalIdx 행이 있으면 그 행의
+ *   occupied/vpd/lpd 를 우선 사용(DB 태그 보존). 단 그 프리셋의 DB 행 전체가 파일 전역번호 체계와
+ *   일치할 때만 채택 — 구 run(프리셋별 0-based) 처럼 다른 체계면 통째 기각(부분 겹침 오귀속 방지).
+ * 반환: [{ globalIdx, cam, preset, key, occupied, vpd, lpd }] — globalIdx 오름차순.
+ * throw 금지 — placeRoi null/빈 → [](graceful).
+ */
+export function buildFlatSlotRows({ placeRoi, detectByKey, parkingSlotsByKey }) {
+  if (!placeRoi || typeof placeRoi !== 'object') return [];
+  const rows = [];
+  for (const key of Object.keys(placeRoi)) {
+    const [cam, preset] = key.split(':').map(Number);
+    const spaces = Array.isArray(placeRoi[key]) ? placeRoi[key] : [];
+    const detect = detectByKey?.[key];
+    const plates = [
+      ...(detect?.plates ?? []),
+      ...(detect?.vehicles ?? []).map((v) => v.plate).filter(Boolean),
+    ];
+    const floorPolys = spaces.map((sp) => ({ idx: sp.idx, quad: sp.points }));
+    const occById = new Map(computeOccupancy(floorPolys, plates).map((o) => [o.idx, o.occupied]));
+    const dbRows = parkingSlotsByKey?.[key] ?? [];
+    // DB 행 집합이 파일 전역번호 체계와 완전히 일치할 때만 태그 채택. 구 run(0-based {0..6})은
+    // 신 전역번호({1..7})와 부분만 겹쳐 한 칸 시프트된 값을 진짜처럼 표시하므로 통째 기각 → 파일 계산 점유로 폴백.
+    const fileIdx = new Set(spaces.map((sp) => sp.idx));
+    const usable = dbRows.length > 0 && dbRows.every((r) => fileIdx.has(r.slotIdx)) ? dbRows : [];
+    for (const sp of spaces) {
+      const db = usable.find((r) => r.slotIdx === sp.idx);
+      rows.push({
+        globalIdx: sp.idx,
+        cam,
+        preset,
+        key,
+        occupied: db ? !!db.occupied : occById.get(sp.idx) ?? false,
+        vpd: !!db?.vpd,
+        lpd: !!db?.lpd,
+      });
+    }
+  }
+  return rows.sort((a, b) => a.globalIdx - b.globalIdx);
+}
+
 // ===== 주차면(ROI) 편집 + 전역 인덱스 수동 매핑 순수 로직(#1~#4, #7) =====
 
 /**
@@ -347,6 +716,63 @@ export function removeSlot(artifact, slotId) {
   return { ...artifact, slots, presets, globalIndex };
 }
 
+/**
+ * 결번 충돌회피 slotId 생성. (camIdx,presetIdx) 의 기존 sN 최대치+1 부터 시작,
+ * 전체 slotId 집합과 충돌 없을 때까지 증가시켜 반환. 형식 `c{cam}p{preset}s{N}`.
+ * 근거: 삭제로 s2 결번 시 length+1 은 기존 s3 와 충돌 → 최대 sN 파싱 후 +1, 이후 집합 검사로 bump.
+ */
+export function nextSlotId(artifact, camIdx, presetIdx) {
+  const all = new Set((artifact?.slots ?? []).map((s) => s.slotId));
+  const prefix = `c${camIdx}p${presetIdx}s`;
+  let max = 0;
+  for (const id of all) {
+    if (typeof id === 'string' && id.startsWith(prefix)) {
+      const n = Number(id.slice(prefix.length));
+      if (Number.isInteger(n) && n > max) max = n;
+    }
+  }
+  let n = max + 1;
+  while (all.has(`${prefix}${n}`)) n += 1;
+  return `${prefix}${n}`;
+}
+
+/**
+ * 전역 인덱스 기준 슬롯 중간삽입. newSlot 을 atGlobalIdx(1-based) 위치에 꽂고 이후 globalIdx +1.
+ * 대상 preset(camIdx,presetIdx: newSlot.roiByPreset 첫 key 파싱)의 coveredSlotIds 말미 append,
+ * preset 부재 시 신규 preset push. globalIndex 는 명시적 splice(수동 전역위치 보존) — rebuildGlobalIndex
+ * 는 coveredSlotIds 정규정렬로 수동 위치를 무시하므로 재사용하지 않는다. 이미 존재하는 slotId 면 no-op.
+ * 불변(새 artifact 반환).
+ */
+export function insertSlotAt(artifact, atGlobalIdx, newSlot) {
+  const slots = artifact.slots ?? [];
+  if (slots.some((s) => s.slotId === newSlot.slotId)) return artifact; // 중복 방어(no-op).
+  const key = Object.keys(newSlot.roiByPreset ?? {})[0] ?? '';
+  const [kc, kp] = key.split(':').map(Number);
+  const camIdx = Number.isFinite(kc) ? kc : 0;
+  const presetIdx = Number.isFinite(kp) ? kp : 0;
+
+  const nextSlots = [...slots, newSlot]; // slots 배열 순서는 전역순서를 결정하지 않음.
+
+  let found = false;
+  const nextPresets = (artifact.presets ?? []).map((p) => {
+    if (p.camIdx === camIdx && p.presetIdx === presetIdx) {
+      found = true;
+      return { ...p, coveredSlotIds: [...(p.coveredSlotIds ?? []), newSlot.slotId] };
+    }
+    return p;
+  });
+  if (!found) {
+    nextPresets.push({ camIdx, presetIdx, label: `${camIdx}:${presetIdx}`, coveredSlotIds: [newSlot.slotId] });
+  }
+
+  const base = [...(artifact.globalIndex ?? [])].sort((a, b) => a.globalIdx - b.globalIdx);
+  const pos = Math.min(Math.max(1, atGlobalIdx), base.length + 1) - 1;
+  base.splice(pos, 0, { globalIdx: 0, slotId: newSlot.slotId, camIdx, presetIdx });
+  const nextGlobal = base.map((g, i) => ({ ...g, globalIdx: i + 1 }));
+
+  return { ...artifact, slots: nextSlots, presets: nextPresets, globalIndex: nextGlobal };
+}
+
 /** #3 사각형 정규화 클램프: x,y∈[0,1], w,h>0, x+w≤1, y+h≤1. */
 export function clamp01Rect(rect) {
   const MIN = 0.001; // 최소 폭/높이(붕괴 방지)
@@ -371,6 +797,10 @@ export function resizeRect(rect, handle, ndx, ndy) {
   let right = rect.x + rect.w;
   let bottom = rect.y + rect.h;
   switch (handle) {
+    case 'n': top += ndy; break;
+    case 's': bottom += ndy; break;
+    case 'w': left += ndx; break;
+    case 'e': right += ndx; break;
     case 'nw': left += ndx; top += ndy; break;
     case 'ne': right += ndx; top += ndy; break;
     case 'sw': left += ndx; bottom += ndy; break;
@@ -391,6 +821,87 @@ export function resizeRect(rect, handle, ndx, ndy) {
 export function updateSlotRoi(artifact, slotId, key, rect) {
   const slots = (artifact.slots ?? []).map((s) =>
     s.slotId === slotId ? { ...s, roiByPreset: { ...s.roiByPreset, [key]: rect } } : s,
+  );
+  return { ...artifact, slots };
+}
+
+/**
+ * 사각형 평행이동(w,h 유지). x∈[0,1−w], y∈[0,1−h] 로 클램프.
+ * clamp01Rect 는 경계에서 w/h 를 축소하므로 이동엔 부적합 → 별도(VPD Ctrl+드래그 이동용).
+ */
+export function moveRect(rect, ndx, ndy) {
+  const w = rect.w;
+  const h = rect.h;
+  const x = Math.max(0, Math.min(rect.x + ndx, 1 - w));
+  const y = Math.max(0, Math.min(rect.y + ndy, 1 - h));
+  return { x, y, w, h };
+}
+
+/**
+ * 사각형의 8핸들(4코너+4변)/내부 히트테스트(순수, DOM 미참조). 우선순위: 코너>변>내부>외부(null).
+ * tolX/tolY 는 호출측(app.js)에서 HANDLE_PX/overlay.width|height 로 주입(hitTestQuadVertex 패턴).
+ * 반환 핸들 문자열은 resizeRect handle 인자와 1:1('nw/ne/sw/se/n/s/e/w'), 내부는 'in'.
+ */
+export function hitTestRectHandle(rect, nx, ny, tolX, tolY) {
+  if (!rect) return null;
+  const left = rect.x;
+  const right = rect.x + rect.w;
+  const top = rect.y;
+  const bottom = rect.y + rect.h;
+  // 코너(최우선): |dx|<=tolX && |dy|<=tolY.
+  if (Math.abs(nx - left) <= tolX && Math.abs(ny - top) <= tolY) return 'nw';
+  if (Math.abs(nx - right) <= tolX && Math.abs(ny - top) <= tolY) return 'ne';
+  if (Math.abs(nx - left) <= tolX && Math.abs(ny - bottom) <= tolY) return 'sw';
+  if (Math.abs(nx - right) <= tolX && Math.abs(ny - bottom) <= tolY) return 'se';
+  // 변(코너 구간 제외): 변 선분 근접 + 변 범위 안.
+  const inX = nx >= left + tolX && nx <= right - tolX;
+  const inY = ny >= top + tolY && ny <= bottom - tolY;
+  if (Math.abs(ny - top) <= tolY && inX) return 'n';
+  if (Math.abs(ny - bottom) <= tolY && inX) return 's';
+  if (Math.abs(nx - left) <= tolX && inY) return 'w';
+  if (Math.abs(nx - right) <= tolX && inY) return 'e';
+  // 내부.
+  if (nx >= left && nx <= right && ny >= top && ny <= bottom) return 'in';
+  return null;
+}
+
+// ===== floor ROI(가변 다각형 4~10점) 정점 개별 드래그 편집 순수 로직 =====
+// quad 는 N×{x,y} 정규화(0..1) 배열(N≥3), 인덱스 0..N-1.
+
+/**
+ * floor 다각형 정점 히트테스트: 각 정점과 |dx|<=tolX && |dy|<=tolY 인 첫 번째 index(0..N-1) 반환, 없으면 null.
+ * tolX/tolY 는 호출측(app.js)에서 HANDLE_PX/overlay.width, HANDLE_PX/overlay.height 로 주입(core 는 DOM 미참조).
+ */
+export function hitTestQuadVertex(quad, nx, ny, tolX, tolY) {
+  if (!Array.isArray(quad) || quad.length < 3) return null;
+  for (let i = 0; i < quad.length; i++) {
+    if (Math.abs(nx - quad[i].x) <= tolX && Math.abs(ny - quad[i].y) <= tolY) return i;
+  }
+  return null;
+}
+
+/**
+ * floor 다각형의 index 정점만 (x+ndx, y+ndy) 로 이동 후 각 좌표 0..1 clamp. 나머지 정점 불변.
+ * 새 배열 반환(불변) — 다각형은 정점 자유 이동이므로 rect 처럼 역전/최소폭 보정 없음.
+ * index 가 0..N-1 밖이거나 다각형 부적합이면 원본 얕은복사 반환(변형 없음).
+ */
+export function moveQuadVertex(quad, index, ndx, ndy) {
+  if (!Array.isArray(quad) || quad.length < 3 || index < 0 || index >= quad.length) {
+    return Array.isArray(quad) ? quad.slice() : quad;
+  }
+  const clamp01 = (v) => Math.min(1, Math.max(0, v));
+  return quad.map((p, i) =>
+    i === index ? { x: clamp01(p.x + ndx), y: clamp01(p.y + ndy) } : p,
+  );
+}
+
+/**
+ * slotId 슬롯의 floorRoiByPreset[key] 만 quad 로 교체(불변). slot 집합·globalIndex 불변.
+ * updateSlotRoi 미러.
+ */
+export function updateSlotFloorRoi(artifact, slotId, key, quad) {
+  const slots = (artifact.slots ?? []).map((s) =>
+    s.slotId === slotId ? { ...s, floorRoiByPreset: { ...s.floorRoiByPreset, [key]: quad } } : s,
   );
   return { ...artifact, slots };
 }
@@ -573,4 +1084,306 @@ export function createStreamLoop(deps) {
   }
 
   return { start, stop, tick };
+}
+
+/**
+ * 이동(수동 PTZ·프리셋) 시 렌더 경로 결정(순수, DOM 무관). liveMode ∈ {'off','stream','poll'}.
+ * 루프3: Unity /stream 이 pan/tilt/zoom override 를 지원 → 스트림 모드면 새 PTZ 로 stream 재연결('stream-reconnect'),
+ * 그 외(poll 폴백/off)는 폴링 tick('tick', poll 지속갱신 / off 1회 스냅샷 override). origin 무관(스트림이 수동·프리셋 PTZ 를 모두 렌더).
+ * → 'stream-reconnect' | 'tick'.
+ */
+export function moveRenderDirective(liveMode) {
+  return liveMode === 'stream' ? 'stream-reconnect' : 'tick';
+}
+
+// --- 결과 저장/열기(로컬 파일) 순수 로직 --------------------------------
+
+/**
+ * 로컬에서 읽은 JSON 텍스트를 파싱·최소형태검증. SetupArtifact 최소 형태
+ * (presets/slots/globalIndex 배열 존재)만 확인한다(analyzeArtifact 관용도와 정합).
+ * → { ok:true, artifact } | { ok:false, error }.
+ */
+export function parseLoadedArtifact(text) {
+  let obj;
+  try {
+    obj = JSON.parse(text);
+  } catch {
+    return { ok: false, error: '올바른 JSON 파일이 아닙니다(파싱 실패)' };
+  }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+    return { ok: false, error: '형식 오류: 최상위가 객체가 아닙니다' };
+  }
+  if (!Array.isArray(obj.presets) || !Array.isArray(obj.slots) || !Array.isArray(obj.globalIndex)) {
+    return { ok: false, error: '형식 오류: presets/slots/globalIndex 배열이 필요합니다' };
+  }
+  return { ok: true, artifact: obj };
+}
+
+// --- DB 뷰어 표 모델(순수) ----------------------------------------------
+
+/** DB 셀 값 문자열화: null/undefined→'', 객체/Buffer→JSON 또는 [blob], 그 외 String(v). */
+function formatCell(v) {
+  if (v == null) return '';
+  if (typeof v === 'object') {
+    // Buffer/Uint8Array(BLOB)는 JSON 직렬화가 무의미 → [blob] 표기.
+    if (typeof v.byteLength === 'number' && !Array.isArray(v)) return '[blob]';
+    try {
+      return JSON.stringify(v);
+    } catch {
+      return String(v);
+    }
+  }
+  return String(v);
+}
+
+/**
+ * GET /db/table/:name 응답의 {columns, rows} → 표 모델 { headers, cells }.
+ * headers=columns, cells=rows.map(r => columns.map(c => formatCell(r[c]))). 누락 키→''.
+ * throw 금지: columns/rows 가 배열이 아니면 빈 모델 반환(graceful).
+ */
+export function buildDbTableModel({ columns, rows } = {}) {
+  const headers = Array.isArray(columns) ? columns : [];
+  const list = Array.isArray(rows) ? rows : [];
+  const cells = list.map((r) => headers.map((c) => formatCell(r == null ? undefined : r[c])));
+  return { headers, cells };
+}
+
+// --- 시뮬레이터(Unity) 연결·카메라 자동 갱신 순수 로직 ------------------
+
+/**
+ * 목록 갱신 후 이전 선택을 유지한다(순수). prevId 를 가진 항목이 list 에 있으면 prevId 그대로,
+ * 없으면 첫 항목의 key 값, 빈 목록이면 null. 자동 갱신 시 사용자의 cam/preset 선택 튐을 막는다.
+ * @param {number|string|null} prevId 이전에 선택된 키 값
+ * @param {Array<Object>} list 갱신된 목록(cameras 또는 presets)
+ * @param {string} key 비교 키('camIdx' | 'presetIdx')
+ * @returns {number|string|null}
+ */
+export function pickSelected(prevId, list, key = 'camIdx') {
+  const arr = list ?? [];
+  if (arr.some((item) => item[key] === prevId)) return prevId;
+  return arr[0]?.[key] ?? null;
+}
+
+/**
+ * 카메라/프리셋 집합이 실제로 바뀌었는지(순수). camIdx + 각 카메라 presetIdx 목록만 비교(라벨/PTZ 무시).
+ * 변경됐을 때만 드롭다운을 재렌더해 선택 튐·깜빡임을 막는다.
+ * @param {Array<Object>|null|undefined} prev 이전 cameras
+ * @param {Array<Object>|null|undefined} next 새 cameras
+ * @returns {boolean}
+ */
+export function camerasChanged(prev, next) {
+  const sig = (list) =>
+    (list ?? [])
+      .map(
+        (c) =>
+          `${c.camIdx}:${(c.presets ?? [])
+            .map((p) => p.presetIdx)
+            .sort((a, b) => a - b)
+            .join(',')}`,
+      )
+      .sort()
+      .join('|');
+  return sig(prev) !== sig(next);
+}
+
+// ===== 카메라 PTZ 프리셋(camerapos.json) 편집 순수 로직 =====
+// views 원소: { camIdx, presetIdx, label, pan, tilt, zoom }(정규화 CameraView). 불변(새 배열 반환).
+
+/**
+ * 프리셋 upsert: 같은 (camIdx, presetIdx) 가 있으면 갱신, 없으면 추가.
+ * entry = { camIdx, presetIdx, label, pan, tilt, zoom }. 불변(새 배열 반환).
+ */
+export function upsertPreset(views, entry) {
+  const next = (views ?? []).map((v) => ({ ...v }));
+  const i = next.findIndex((v) => v.camIdx === entry.camIdx && v.presetIdx === entry.presetIdx);
+  const e = {
+    camIdx: entry.camIdx,
+    presetIdx: entry.presetIdx,
+    label: entry.label,
+    pan: entry.pan,
+    tilt: entry.tilt,
+    zoom: entry.zoom,
+  };
+  if (i >= 0) next[i] = e;
+  else next.push(e);
+  return next;
+}
+
+/** 프리셋 삭제: (camIdx, presetIdx) 항목 제거. 불변(새 배열 반환). */
+export function removePreset(views, camIdx, presetIdx) {
+  return (views ?? []).filter((v) => !(v.camIdx === camIdx && v.presetIdx === presetIdx));
+}
+
+/** 해당 카메라의 다음 presetIdx(기존 max+1, 없으면 1). 1-based. */
+export function nextPresetId(views, camIdx) {
+  let max = 0;
+  for (const v of views ?? []) {
+    if (v.camIdx === camIdx && v.presetIdx > max) max = v.presetIdx;
+  }
+  return max + 1;
+}
+
+// ===== [기능2] VPD/LPD 검출 박스 선택·편집 순수 로직 =====
+// detect = { vehicles:[{ rect:{x,y,w,h}, plate? }], plates:[{ quad:[{x,y}×4] }] }(정규화). 임시(메모리) 편집.
+
+/**
+ * 검출 박스 히트테스트. 우선순위: 선택 대상(selected)의 rect 핸들/quad 정점 > vehicle rect 내부 > plate quad 내부.
+ * 같은 종류가 겹치면 마지막(=위) 항목을 우선(drawDetectOverlay 그리는 순서와 정합).
+ * args: { nx, ny, detect, tolX, tolY, selected }. selected = { kind:'vehicle'|'plate', index } | null.
+ * → vehicle: { kind:'vehicle', index, handle }('nw'..'se'|'in') / plate: { kind:'plate', index, vertex? } | null.
+ */
+export function hitTestDetections({ nx, ny, detect, tolX, tolY, selected }) {
+  const vehicles = detect?.vehicles ?? [];
+  const plates = detect?.plates ?? [];
+  // 1) 선택 항목의 핸들/정점 우선(리사이즈·정점 드래그 어포던스).
+  if (selected) {
+    if (selected.kind === 'vehicle') {
+      const rect = vehicles[selected.index]?.rect;
+      if (rect) {
+        const h = hitTestRectHandle(rect, nx, ny, tolX, tolY);
+        if (h && h !== 'in') return { kind: 'vehicle', index: selected.index, handle: h };
+      }
+    } else if (selected.kind === 'plate') {
+      const quad = plates[selected.index]?.quad;
+      if (quad) {
+        const vi = hitTestQuadVertex(quad, nx, ny, tolX, tolY);
+        if (vi != null) return { kind: 'plate', index: selected.index, vertex: vi };
+      }
+    }
+  }
+  // 2) vehicle rect 내부(위→아래).
+  for (let i = vehicles.length - 1; i >= 0; i--) {
+    if (pointInRect(nx, ny, vehicles[i]?.rect)) return { kind: 'vehicle', index: i, handle: 'in' };
+  }
+  // 3) plate quad 내부.
+  for (let i = plates.length - 1; i >= 0; i--) {
+    if (pointInQuad(nx, ny, plates[i]?.quad)) return { kind: 'plate', index: i };
+  }
+  return null;
+}
+
+/**
+ * 선택 항목(sel.kind/index) 제거 후 새 detect 반환(불변). 나머지 필드(있으면) 보존.
+ * sel 없음/인덱스 밖이면 vehicles/plates 얕은복사만 반환(변형 없음).
+ */
+export function removeDetection(detect, sel) {
+  const vehicles = (detect?.vehicles ?? []).slice();
+  const plates = (detect?.plates ?? []).slice();
+  if (sel && sel.kind === 'vehicle' && sel.index >= 0 && sel.index < vehicles.length) {
+    vehicles.splice(sel.index, 1);
+  } else if (sel && sel.kind === 'plate' && sel.index >= 0 && sel.index < plates.length) {
+    plates.splice(sel.index, 1);
+  }
+  return { ...detect, vehicles, plates };
+}
+
+// ===== [기능3] 주차면 자동보정 아핀(이동+스케일) 순수 로직 =====
+// 정규화 좌표(0..1). 중심(cx,cy) 기준 스케일 후 (dx,dy) 이동. 회전·원근 미보정.
+
+/** 점에 이동+스케일 적용: new = center + scale*(old-center) + (dx,dy). */
+export function applyTranslateScale(point, { dx = 0, dy = 0, scale = 1, cx = 0.5, cy = 0.5 }) {
+  return {
+    x: cx + scale * (point.x - cx) + dx,
+    y: cy + scale * (point.y - cy) + dy,
+  };
+}
+
+/** 프리셋 주차면(spaces=[{idx,points:[{x,y}×4]}])의 각 점에 applyTranslateScale 적용(불변). idx 보존. */
+export function transformPlaceRoiPreset(spaces, transform) {
+  return (spaces ?? []).map((sp) => ({
+    ...sp,
+    points: (sp.points ?? []).map((p) => applyTranslateScale(p, transform)),
+  }));
+}
+
+// ===== 3D 육면체(주차면 부피) 투영 순수 로직 =====
+// 뷰어는 **추정하지 않는다** — 서버 GET /capture/ground-model 이 준 지면모델로 투영만 한다(이중구현 회피).
+// groundModel: { imgW, imgH, f, n:[nx,ny,nz], d, tiltDeg, conf, source, issues }
+//   지면 = { X ∈ 카메라좌표 | n·X = d }.  n=하향 단위법선, d=카메라 지상고(m), f=초점거리(px).
+//   픽셀 p 의 지면점 X = d·m/(n·m), m = K⁻¹p.  높이 h 점의 상: p_h ≃ p − h·((n·m)/d)·(K·n).
+//   → 상면 4점은 p 에서 수직소실점 반대방향으로 밀려난다. 카메라가 지면 위에 있으므로 화면 위쪽으로 간다.
+
+const CUBOID_EPS = 1e-9;
+
+/**
+ * 바닥 quad(정규화 0..1, 4점) + 지면모델 + 높이 h(m) → 육면체 8점·12모서리(정규화 0..1).
+ * corners[0..3]=바닥(입력 quad 그대로), corners[4..7]=상면(같은 순서). edges=바닥4+상면4+수직4.
+ * h=0 이면 상면=바닥(동일 좌표). 지면모델 없음/퇴화(지평선 위·f≤0·d≤0·비유한) → **null**(호출측이 렌더 skip).
+ * throw 금지 — 기존 2D 바닥 ROI 렌더는 영향받지 않는다(가산 레이어).
+ */
+export function projectCuboid(floorQuad, groundModel, heightM) {
+  const g = groundModel;
+  if (!Array.isArray(floorQuad) || floorQuad.length !== 4) return null;
+  if (!g || !Array.isArray(g.n) || g.n.length !== 3) return null;
+  if (!(g.f > 0) || !(g.d > 0) || !(g.imgW > 0) || !(g.imgH > 0)) return null;
+  const h = Number(heightM);
+  if (!Number.isFinite(h) || h < 0) return null;
+  const [nx, ny, nz] = g.n;
+  if (![nx, ny, nz].every(Number.isFinite)) return null;
+  const cx = g.imgW / 2;
+  const cy = g.imgH / 2;
+  const kn = [g.f * nx + cx * nz, g.f * ny + cy * nz, nz]; // K·n (수직 방향의 동차 이미지 벡터).
+
+  const top = [];
+  for (const p of floorQuad) {
+    if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y)) return null;
+    const u = p.x * g.imgW;
+    const v = p.y * g.imgH;
+    const s = ((u - cx) * nx + (v - cy) * ny + g.f * nz) / (g.f * g.d); // (n·K⁻¹p)/d.
+    if (!(s > CUBOID_EPS)) return null; // 지평선 위/카메라 뒤 → 육면체 미표시(강등, advisory 는 호출측).
+    const w = 1 - h * s * kn[2];
+    if (Math.abs(w) < CUBOID_EPS) return null;
+    const tx = (u - h * s * kn[0]) / w;
+    const ty = (v - h * s * kn[1]) / w;
+    if (!Number.isFinite(tx) || !Number.isFinite(ty)) return null;
+    top.push({ x: tx / g.imgW, y: ty / g.imgH });
+  }
+  return {
+    corners: [...floorQuad.map((p) => ({ x: p.x, y: p.y })), ...top],
+    edges: [
+      [0, 1], [1, 2], [2, 3], [3, 0], // 바닥
+      [4, 5], [5, 6], [6, 7], [7, 4], // 상면
+      [0, 4], [1, 5], [2, 6], [3, 7], // 수직
+    ],
+  };
+}
+
+/**
+ * 지면모델 소스 배지 문자열(§5-2). 어느 소스가 표시 중인지 항상 안다. 모델 없음 → '지면모델: 없음'.
+ * ★ 정합 지표를 함께 보여준다 — f/tilt 가 정확해도 ROI 는 어긋나 있을 수 있기 때문이다:
+ *   metricErr(가로 정합) / tiltErrDeg(세로 정합, PTZ tilt 대조). 둘 중 하나라도 임계 초과면 '정합?' 경고.
+ */
+export function formatGroundBadge(model) {
+  if (!model) return '지면모델: 없음';
+  const src = model.source === 'auto' ? '자동(관측)' : '파일(PtzCamRoi)';
+  const lv = Math.min(4, Math.max(0, Math.round((Number(model.conf) || 0) * 4)));
+  const dots = '●'.repeat(lv) + '○'.repeat(4 - lv);
+  const bad =
+    Number(model.metricErr) > 0.008 ||
+    (model.tiltErrDeg != null && Math.abs(Number(model.tiltErrDeg)) > 1.0);
+  const align = `정합 ${(Number(model.metricErr) * 100).toFixed(1)}%` +
+    (model.tiltErrDeg != null ? `/${Number(model.tiltErrDeg).toFixed(1)}°` : '') +
+    (bad ? ' ⚠ROI 어긋남?' : '');
+  return (
+    `지면모델: ${src}  f=${Math.round(model.f)}px  tilt=${Number(model.tiltDeg).toFixed(1)}°` +
+    `  카메라고 ${Number(model.d).toFixed(1)}m  신뢰도 ${dots}  ${align}`
+  );
+}
+
+/** ground-model 응답의 models[] → cam:preset 키 맵. 없거나 비배열이면 빈 객체(graceful). */
+export function groundModelsByKey(models) {
+  const out = {};
+  for (const m of Array.isArray(models) ? models : []) {
+    out[presetKey(m.camIdx, m.presetIdx)] = m;
+  }
+  return out;
+}
+
+/** 저장 대화상자 제안 파일명. setup_YYYYMMDD_HHmmss.json (로컬시각). date 주입으로 테스트. */
+export function defaultResultFilename(date = new Date()) {
+  const p = (n) => String(n).padStart(2, '0');
+  return (
+    `setup_${date.getFullYear()}${p(date.getMonth() + 1)}${p(date.getDate())}` +
+    `_${p(date.getHours())}${p(date.getMinutes())}${p(date.getSeconds())}.json`
+  );
 }

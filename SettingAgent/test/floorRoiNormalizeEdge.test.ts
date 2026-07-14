@@ -1,0 +1,75 @@
+import { describe, it, expect } from 'vitest';
+import { normalizePolygon, resolveFloorPolygon } from '../src/capture/floorRoi.js';
+import { SqliteStore } from '../src/capture/SqliteStore.js';
+import type { NormalizedPolygon } from '../src/domain/types.js';
+
+/**
+ * 검증자(qa-tester): normalizePolygon 근사공선 붕괴 [D1 수정 검증] (설계서 §2·min4 불변식).
+ *
+ * [이력] 한 점이 다른 3점의 변 위(공선)에 있는 4점 입력이 convexHull 에서 3정점으로 붕괴할 때,
+ * 과거 가드(`hull.length < 3`)는 이를 통과시켜 NormalizedPolygon(4~10) 불변식을 깨고
+ * SqliteStore.upsertFloorRoi 의 `polygon[3].x` 접근에서 크래시했다(03 리포트 §1 D1).
+ * 구현자가 가드를 `hull.length < 4` 로 수정 → 붕괴 시 null → resolveFloorPolygon 이
+ * fallbackPolygon(항상 4점 이상)으로 강등한다. 이 파일은 **수정된(정상) 동작**을 단언한다.
+ */
+
+// (0.5,0.5) 는 (0.2,0.2)-(0.8,0.8) 대각선 위 → 볼록껍질에서 제거되어 3정점으로 붕괴하는 입력.
+const collinearRaw = [
+  { x: 0.2, y: 0.2 },
+  { x: 0.8, y: 0.2 },
+  { x: 0.8, y: 0.8 },
+  { x: 0.5, y: 0.5 },
+];
+
+describe('normalizePolygon 근사공선 4점 붕괴 [D1 수정 후]', () => {
+  it('붕괴(3정점) 입력 → null 반환(호출측 폴백에 위임, 4~10 불변식 보호)', () => {
+    const out = normalizePolygon(collinearRaw);
+    expect(out).toBeNull();
+  });
+
+  it('불변식: normalizePolygon 결과는 null 이거나 4점 이상이어야 한다', () => {
+    const out = normalizePolygon(collinearRaw);
+    expect(out === null || out.length >= 4).toBe(true);
+  });
+
+  it('resolveFloorPolygon: 번호판이 붕괴 삼각형 내부여도 빌더 강등으로 4점 이상 반환', () => {
+    const vehicle = { x: 0.6, y: 0.25, w: 0.1, h: 0.1 };
+    const plate = { x: 0.62, y: 0.3, w: 0.04, h: 0.03 };
+    const poly = resolveFloorPolygon(collinearRaw, vehicle, undefined, plate);
+    expect(poly.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it('불변식: resolveFloorPolygon 은 항상 4점 이상·10점 이하', () => {
+    const vehicle = { x: 0.6, y: 0.25, w: 0.1, h: 0.1 };
+    const plate = { x: 0.62, y: 0.3, w: 0.04, h: 0.03 };
+    const poly = resolveFloorPolygon(collinearRaw, vehicle, undefined, plate);
+    expect(poly.length).toBeGreaterThanOrEqual(4);
+    expect(poly.length).toBeLessThanOrEqual(10);
+  });
+
+  it('D1 크래시 경로 차단: 재현 입력 → resolveFloorPolygon(≥4점) → upsertFloorRoi 크래시 없이 왕복', () => {
+    const vehicle = { x: 0.6, y: 0.25, w: 0.1, h: 0.1 };
+    const plate = { x: 0.62, y: 0.3, w: 0.04, h: 0.03 };
+    const poly: NormalizedPolygon = resolveFloorPolygon(collinearRaw, vehicle, undefined, plate);
+    expect(poly.length).toBeGreaterThanOrEqual(4);
+
+    const store = new SqliteStore(':memory:');
+    const runId = store.createRun({ plannedCount: 1, intervalMs: 1, startedAt: 'T0' });
+    expect(() => store.upsertFloorRoi(runId, '1:1', 1, poly, 'U0')).not.toThrow();
+    const got = store.getFloorRois(runId);
+    expect(got).toHaveLength(1);
+    expect(got[0].polygon).toEqual(poly); // 왕복 동일(폴백 폴리곤 저장/조회 정합).
+    store.close();
+  });
+
+  it('D1 회귀 방지: plate 없이도(예상 번호판 경로) 붕괴 입력이 크래시 없이 처리', () => {
+    const vehicle = { x: 0.6, y: 0.25, w: 0.1, h: 0.1 };
+    const poly = resolveFloorPolygon(collinearRaw, vehicle); // plate=undefined → predictPlateRect 경로.
+    expect(poly.length).toBeGreaterThanOrEqual(4);
+
+    const store = new SqliteStore(':memory:');
+    const runId = store.createRun({ plannedCount: 1, intervalMs: 1, startedAt: 'T0' });
+    expect(() => store.upsertFloorRoi(runId, '1:1', 2, poly, 'U0')).not.toThrow();
+    store.close();
+  });
+});

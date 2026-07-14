@@ -47,6 +47,7 @@ export interface CaptureStatus {
   startedAt?: string;
   endedAt?: string;
   latestAdvisory?: string[];
+  llmFloorUnavailable?: boolean;
 }
 
 export function captureProgress(status: Partial<CaptureStatus> | null | undefined): {
@@ -61,6 +62,23 @@ export function captureResultSummary(
 ): { title: string; lines: string[] };
 export function mapAdvisory(status: Partial<CaptureStatus> | null | undefined): string[];
 export function pollPlan(state: string, intervalMs?: number): { poll: boolean; intervalMs: number };
+export function captureUiState(state: string): {
+  startDisabled: boolean;
+  stopDisabled: boolean;
+  finalizeDisabled: boolean;
+  suppressFrameMsg: boolean;
+  stoppingNote: boolean;
+};
+export function capFrameKey(
+  cam: number | string | null | undefined,
+  preset: number | string | null | undefined,
+  round: number | string | null | undefined,
+): string | null;
+export function settingsFormErrors(form: {
+  llm?: { provider?: string; model?: string; baseUrl?: string };
+  vpd?: { endpoint?: string; detPath?: string };
+  lpd?: { endpoint?: string; detPath?: string };
+} | null | undefined): string[];
 
 export function toPixel(rect: NormalizedRect, imgW: number, imgH: number): PixelRect;
 export function toPixelQuad(quad: NormalizedQuad, imgW: number, imgH: number): PixelPoint[];
@@ -109,12 +127,110 @@ export interface ArtifactAnalysis {
 }
 export function analyzeArtifact(artifact: unknown): ArtifactAnalysis;
 
+// ===== 정밀수집 차량 점유율(occupancy) 표시용 순수 로직 =====
+
+export interface OccupancySpace {
+  id: number;
+  occupied: boolean;
+  polygon?: NormalizedQuad;
+}
+
+export interface OccupancyEntry {
+  camIdx: number;
+  presetIdx: number;
+  occupiedCount: number;
+  total: number;
+  rate: number;
+  spaces: OccupancySpace[];
+}
+
+export type OccupancyTableRow = [string, number, number, number, number, string];
+
+export function formatRatePct(rate: unknown): string;
+export function occupancyByKey(rows: unknown): Record<string, OccupancyEntry>;
+export function occupancyRows(occByKey: unknown): OccupancyTableRow[];
+export function occupancyAverage(occByKey: unknown): { occupied: number; total: number; rate: number };
+
+// ===== 미리 정의된 주차면 폴리곤(PtzCamRoi.json) 정규화 =====
+
+export interface PlaceRoiSpace {
+  idx: number;
+  points: NormalizedPoint[];
+}
+export interface PlaceRoiReport {
+  camId: number | undefined;
+  presetIdx: number | undefined;
+  spaceCount: number;
+  issues: string[];
+}
+export function normalizePtzCamRoi(json: unknown): {
+  byPreset: Record<string, PlaceRoiSpace[]>;
+  report: PlaceRoiReport[];
+};
+
+export interface FloorRoiPolygon {
+  quad: NormalizedPoint[];
+  label: string;
+  slotId?: string;
+  idx?: number; // 파일 모드 전역 인덱스(선택 하이라이트용).
+}
+export function selectFloorRoi(args: {
+  useLlm: boolean;
+  slots?: readonly SlotLike[] | null;
+  placeRoi?: Record<string, PlaceRoiSpace[]> | null;
+  key: string;
+}): { source: 'llm' | 'file'; polygons: FloorRoiPolygon[] };
+
+export function quadCentroid(quad: NormalizedPoint[] | null | undefined): NormalizedPoint | null;
+
+export interface OccupancySpace {
+  idx: number;
+  occupied: boolean;
+  center?: NormalizedPoint;
+}
+export function computeOccupancy(
+  floorPolygons: Array<{ idx: number; quad: NormalizedPoint[] }> | null | undefined,
+  plates: Array<{ quad: NormalizedPoint[] }> | null | undefined,
+): OccupancySpace[];
+
+// ===== 전체 주차면 목록 · 전역 인덱스(PtzCamRoi.idx) 순수 로직(R2/R3/R4) =====
+
+export type PlaceRoiMap = Record<string, PlaceRoiSpace[]>;
+
+export function normalizeGlobalIdx(placeRoi: PlaceRoiMap | null | undefined): {
+  placeRoi: PlaceRoiMap;
+  changed: boolean;
+  issues: string[];
+};
+export function reindexPlaceSpace(
+  placeRoi: PlaceRoiMap | null | undefined,
+  fromIdx: number,
+  toIdx: number,
+): PlaceRoiMap;
+export function removePlaceSpace(placeRoi: PlaceRoiMap | null | undefined, idx: number): PlaceRoiMap;
+
+export interface FlatSlotRow {
+  globalIdx: number;
+  cam: number;
+  preset: number;
+  key: string;
+  occupied: boolean;
+  vpd: boolean;
+  lpd: boolean;
+}
+export function buildFlatSlotRows(args: {
+  placeRoi?: PlaceRoiMap | null;
+  detectByKey?: Record<string, { vehicles?: Array<{ plate?: { quad: NormalizedPoint[] } }>; plates?: Array<{ quad: NormalizedPoint[] }> }> | null;
+  // vpd/lpd 는 SqliteStore.getParkingSlots(ParkingSlotView) 의 검출 객체(없으면 null) — 존재 여부만 태그로 쓴다.
+  parkingSlotsByKey?: Record<string, Array<{ slotIdx: number; vpd?: NormalizedRect | null; lpd?: NormalizedQuad | null; occupied?: boolean }>> | null;
+}): FlatSlotRow[];
+
 export interface SlotLike {
   slotId: string;
   zone?: string;
   // 편집 순수 함수는 형태만 읽는다(엄격한 quad 튜플 강제 X) — 호출측 입력 부담 완화.
   roiByPreset?: Record<string, NormalizedRect>;
-  plateRoiByPreset?: Record<string, NormalizedRect>;
+  plateRoiByPreset?: Record<string, NormalizedPoint[] | NormalizedQuad>;
   floorRoiByPreset?: Record<string, NormalizedPoint[] | NormalizedQuad>;
 }
 export interface PresetLike {
@@ -160,6 +276,31 @@ export function removeSlot<T extends ArtifactLike>(artifact: T, slotId: string):
 export function clamp01Rect(rect: NormalizedRect): NormalizedRect;
 export function resizeRect(rect: NormalizedRect, handle: string, ndx: number, ndy: number): NormalizedRect;
 export function updateSlotRoi<T extends ArtifactLike>(artifact: T, slotId: string, key: string, rect: NormalizedRect): T;
+export function moveRect(rect: NormalizedRect, ndx: number, ndy: number): NormalizedRect;
+export type RectHandle = 'n' | 's' | 'e' | 'w' | 'nw' | 'ne' | 'sw' | 'se';
+export function hitTestRectHandle(
+  rect: NormalizedRect | null | undefined,
+  nx: number,
+  ny: number,
+  tolX: number,
+  tolY: number,
+): RectHandle | 'in' | null;
+export function nextSlotId(
+  artifact: ArtifactLike | null | undefined,
+  camIdx: number,
+  presetIdx: number,
+): string;
+export function insertSlotAt<T extends ArtifactLike>(artifact: T, atGlobalIdx: number, newSlot: SlotLike): T;
+export function hitTestQuadVertex(
+  quad: NormalizedPoint[] | null | undefined,
+  nx: number, ny: number, tolX: number, tolY: number,
+): number | null;
+export function moveQuadVertex(
+  quad: NormalizedPoint[], index: number, ndx: number, ndy: number,
+): NormalizedPoint[];
+export function updateSlotFloorRoi<T extends ArtifactLike>(
+  artifact: T, slotId: string, key: string, quad: NormalizedPoint[],
+): T;
 export function validateManualIndex(
   globalIndex: readonly { globalIdx: number; slotId?: string }[] | undefined,
 ): { ok: boolean; duplicates: number[]; gaps: number[] };
@@ -213,3 +354,134 @@ export interface StreamLoop {
 }
 
 export function createStreamLoop(deps: StreamLoopDeps): StreamLoop;
+
+export function moveRenderDirective(
+  liveMode: 'off' | 'stream' | 'poll',
+): 'stream-reconnect' | 'tick';
+
+export function parseLoadedArtifact(
+  text: string,
+): { ok: true; artifact: ArtifactLike } | { ok: false; error: string };
+export function defaultResultFilename(date?: Date): string;
+
+export function pickSelected<K extends string>(
+  prevId: number | string | null,
+  list: ReadonlyArray<Record<string, unknown>> | null | undefined,
+  key?: K,
+): number | string | null;
+export function camerasChanged(
+  prev: CameraListItem[] | null | undefined,
+  next: CameraListItem[] | null | undefined,
+): boolean;
+
+export function buildDbTableModel(
+  input?: { columns?: string[]; rows?: Array<Record<string, unknown>> },
+): { headers: string[]; cells: string[][] };
+
+// ===== 카메라 PTZ 프리셋(camerapos.json) 편집 순수 로직 =====
+
+export interface CameraposView {
+  camIdx: number;
+  presetIdx: number;
+  label: string;
+  pan?: number;
+  tilt?: number;
+  zoom?: number;
+}
+export function upsertPreset(views: CameraposView[] | null | undefined, entry: CameraposView): CameraposView[];
+export function removePreset(
+  views: CameraposView[] | null | undefined,
+  camIdx: number,
+  presetIdx: number,
+): CameraposView[];
+export function nextPresetId(views: CameraposView[] | null | undefined, camIdx: number): number;
+
+// ===== [기능2] VPD/LPD 검출 박스 선택·편집 순수 로직 =====
+
+export interface DetectVehicle {
+  rect: NormalizedRect;
+  plate?: { quad: NormalizedPoint[]; recovered?: boolean };
+}
+export interface DetectPlate {
+  quad: NormalizedPoint[];
+  recovered?: boolean;
+}
+export interface DetectResult {
+  vehicles?: DetectVehicle[];
+  plates?: DetectPlate[];
+  [k: string]: unknown;
+}
+export type DetectSelection = { kind: 'vehicle' | 'plate'; index: number };
+export type DetectHit =
+  | { kind: 'vehicle'; index: number; handle: RectHandle | 'in' }
+  | { kind: 'plate'; index: number; vertex?: number }
+  | null;
+export function hitTestDetections(args: {
+  nx: number;
+  ny: number;
+  detect: DetectResult | null | undefined;
+  tolX: number;
+  tolY: number;
+  selected?: DetectSelection | null;
+}): DetectHit;
+export function removeDetection(
+  detect: DetectResult | null | undefined,
+  sel: DetectSelection | null | undefined,
+): DetectResult;
+
+// ===== [기능3] 주차면 자동보정 아핀(이동+스케일) 순수 로직 =====
+
+export interface TranslateScale {
+  dx?: number;
+  dy?: number;
+  scale?: number;
+  cx?: number;
+  cy?: number;
+}
+export function applyTranslateScale(point: NormalizedPoint, transform: TranslateScale): NormalizedPoint;
+export function transformPlaceRoiPreset(
+  spaces: PlaceRoiSpace[] | null | undefined,
+  transform: TranslateScale,
+): PlaceRoiSpace[];
+
+// ===== 3D 육면체(주차면 부피) 투영 =====
+
+/** 서버 GET /capture/ground-model 이 주는 프리셋 지면모델(src/ground/types.ts:GroundModel 과 1:1). */
+export interface ViewerGroundModel {
+  camIdx: number;
+  presetIdx: number;
+  imgW: number;
+  imgH: number;
+  f: number;
+  n: [number, number, number];
+  d: number;
+  tiltDeg: number;
+  /** 카메라 보고 PTZ tilt(camerapos). 미상이면 null. */
+  ptzTiltDeg?: number | null;
+  /** 세로 정합 지표(추정 tilt − PTZ tilt). 미상이면 null. */
+  tiltErrDeg?: number | null;
+  /** 가로 정합 지표(주차면 metric 재구성 잔차 0~1). */
+  metricErr?: number;
+  conf: number;
+  source: 'file' | 'auto';
+  issues: string[];
+}
+
+export interface Cuboid {
+  /** 0..3=바닥(입력 quad), 4..7=상면(같은 순서). 정규화 0..1. */
+  corners: NormalizedPoint[];
+  /** 12 모서리(바닥4 + 상면4 + 수직4). */
+  edges: Array<[number, number]>;
+}
+
+export function projectCuboid(
+  floorQuad: NormalizedPoint[] | null | undefined,
+  groundModel: ViewerGroundModel | null | undefined,
+  heightM: number,
+): Cuboid | null;
+
+export function formatGroundBadge(model: ViewerGroundModel | null | undefined): string;
+
+export function groundModelsByKey(
+  models: ViewerGroundModel[] | null | undefined,
+): Record<string, ViewerGroundModel>;

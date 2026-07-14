@@ -11,6 +11,7 @@ import {
   buildSlotPtzJson,
 } from '../src/calibrate/controlMath.js';
 import type { PlateBox } from '../src/clients/LpdClient.js';
+import { rectToQuad, quadBoundingRect } from '../src/domain/geometry.js';
 import type { SlotPtzItem } from '../src/calibrate/types.js';
 
 /**
@@ -18,7 +19,7 @@ import type { SlotPtzItem } from '../src/calibrate/types.js';
  * 부호 포함 게인 추정·P 제어 클램프·zoom 공식·수렴 판정·JSON 조립.
  */
 
-const plate = (x: number, y: number, w = 0.05, h = 0.03): PlateBox => ({ rect: { x, y, w, h }, confidence: 0.9, cls: 'plate' });
+const plate = (x: number, y: number, w = 0.05, h = 0.03): PlateBox => ({ quad: rectToQuad({ x, y, w, h }), confidence: 0.9, cls: 'plate' });
 
 describe('plateCenterError', () => {
   it('정중앙 번호판 → 오차 0', () => {
@@ -37,7 +38,8 @@ describe('pickNearestPlate', () => {
   const target = { x: 0.5, y: 0.5, w: 0.05, h: 0.03 };
   it('다수 중 prior 중심 최근접 선택', () => {
     const got = pickNearestPlate([plate(0.1, 0.1), plate(0.49, 0.49), plate(0.9, 0.9)], target);
-    expect(got!.rect.x).toBeCloseTo(0.49);
+    // PlateBox 는 quad 만 보유 → boundingRect 유도로 위치 확인(경계면: quad→rect).
+    expect(quadBoundingRect(got!.quad).x).toBeCloseTo(0.49);
   });
   it('빈 배열 → null', () => {
     expect(pickNearestPlate([], target)).toBeNull();

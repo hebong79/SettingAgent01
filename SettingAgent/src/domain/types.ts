@@ -4,6 +4,7 @@ export type {
   NormalizedRect,
   NormalizedPoint,
   NormalizedQuad,
+  NormalizedPolygon,
   Camera,
   Preset,
   ParkingSlot,

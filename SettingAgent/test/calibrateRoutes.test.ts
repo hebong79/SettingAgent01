@@ -11,6 +11,7 @@ import type { LpdClient, PlateBox } from '../src/clients/LpdClient.js';
 import type { VpdClient } from '../src/clients/VpdClient.js';
 import type { Repository } from '../src/store/Repository.js';
 import type { SetupArtifact } from '../src/domain/types.js';
+import { rectToQuad } from '../src/domain/geometry.js';
 import type { ToolsConfig } from '../src/config/toolsConfig.js';
 
 /**
@@ -36,7 +37,7 @@ function artifact(): SetupArtifact {
   return {
     createdAt: 'T', presets: [],
     globalIndex: [{ globalIdx: 1, slotId: 'c1p1s1', camIdx: 1, presetIdx: 1 }],
-    slots: [{ slotId: 'c1p1s1', zone: 'z', roiByPreset: { '1:1': { x: 0.6, y: 0.6, w: 0.1, h: 0.05 } }, plateRoiByPreset: { '1:1': { x: 0.62, y: 0.62, w: 0.05, h: 0.03 } } }],
+    slots: [{ slotId: 'c1p1s1', zone: 'z', roiByPreset: { '1:1': { x: 0.6, y: 0.6, w: 0.1, h: 0.05 } }, plateRoiByPreset: { '1:1': rectToQuad({ x: 0.62, y: 0.62, w: 0.05, h: 0.03 }) } }],
   };
 }
 
@@ -63,7 +64,7 @@ function fakeLpd(): LpdClient {
     detect: async (jpg: Buffer): Promise<PlateBox[]> => {
       const { pan, tilt, zoom } = JSON.parse(jpg.toString());
       const cx = 0.7 - pan * 0.02, cy = 0.8 - tilt * 0.02, w = Math.min(0.9, 0.05 * zoom), h = 0.03;
-      return [{ rect: { x: cx - w / 2, y: cy - h / 2, w, h }, confidence: 0.9, cls: 'plate' }];
+      return [{ quad: rectToQuad({ x: cx - w / 2, y: cy - h / 2, w, h }), confidence: 0.9, cls: 'plate' }];
     },
   } as unknown as LpdClient;
 }

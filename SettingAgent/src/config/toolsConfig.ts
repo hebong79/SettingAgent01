@@ -15,7 +15,7 @@ const CameraSchema = z.object({
   zoomMax: z.number().positive(),
 });
 
-const VpdSchema = z.object({
+export const VpdSchema = z.object({
   endpoint: z.string().url(),
   detPath: z.string().startsWith('/'),
   apiKeyEnv: z.string().optional(),
@@ -27,7 +27,7 @@ const VpdSchema = z.object({
  * LPD(번호판 검출, da_lpd_api) REST. SettingAgent 는 사용하지 않으나,
  * 실 서버 사양(포트/경로)을 정확히 보관하기 위해 포함(ActionAgent 가 사용 예정).
  */
-const LpdSchema = z.object({
+export const LpdSchema = z.object({
   endpoint: z.string().url(),
   detPath: z.string().startsWith('/'),
   apiKeyEnv: z.string().optional(),
@@ -61,10 +61,20 @@ const SetupSchema = z.object({
 const CaptureSchema = z.object({
   /** 기본 반복 횟수(정지조건). 시작 시 UI 값으로 덮어쓸 수 있음. */
   defaultCount: z.number().int().positive(),
-  /** 라운드 주기(ms, 점유 변화 포착). */
+  /** 라운드 주기(ms, 점유 변화 포착 — 라운드 간 대기). */
   intervalMs: z.number().int().positive(),
+  /**
+   * 라운드 내 프리셋 이동 최소 간격(ms, floor). 한 타깃 사이클(이동+캡처+검출)이
+   * 이 값보다 짧으면 남은 시간만큼 대기해 연속 이동이 버스트되지 않게 한다.
+   * intervalMs(라운드 간)와 구분되는 타깃 간 간격. 0 이면 페이싱 없음(기존 동작).
+   */
+  moveIntervalMs: z.number().int().nonnegative().default(1000),
   /** K라운드마다 LLM 체크포인트(llm.enabled 시). */
   checkpointEvery: z.number().int().positive(),
+  /** 체크포인트 트리거 모드: 'rounds'(done%K==0) | 'time'(경과 ≥ intervalMs). 기본 rounds(하위호환). */
+  checkpointTriggerMode: z.enum(['rounds', 'time']).default('rounds'),
+  /** time 모드 주기(ms). rounds 모드에서는 무시. */
+  checkpointIntervalMs: z.number().int().positive().default(60000),
   /** SQLite 파일 경로(테스트는 주입으로 :memory:). */
   dbFile: z.string().min(1),
   /** 집계 클러스터 거리 임계(중심 간 거리, 정규화). */
@@ -73,6 +83,12 @@ const CaptureSchema = z.object({
   clusterMinSupport: z.number().int().positive(),
   /** 집계용 최소 신뢰도(setup 과 독립값 허용). */
   minConfidence: z.number().min(0).max(1),
+  /**
+   * 캡처 전 카메라를 프리셋 PTZ 로 실제 이동(/req_move)할지.
+   * true 면 시뮬/실 카메라의 활성 화면이 프리셋마다 물리적으로 이동(미리보기와 동일하게 보임).
+   * false 면 /req_img 스냅샷만(활성 화면 정지). 기본 true.
+   */
+  moveBeforeCapture: z.boolean().default(true),
 });
 
 /**
@@ -101,6 +117,15 @@ const CalibrateSchema = z.object({
   outFile: z.string().min(1),
   /** LLM 자문 사용 여부(false 면 순수 결정형, 설계서 §0-C). */
   llmAdvise: z.boolean(),
+});
+
+/**
+ * Unity JSON-RPC 2.0 서버 연결 설정 (포트 13110 /rpc, /rpc/catalog).
+ * MCP 툴 unity_rpc · unity_rpc_catalog 에서 사용(아키텍처 §8).
+ */
+const UnityRpcSchema = z.object({
+  baseUrl: z.string().url(),
+  timeoutMs: z.number().int().positive(),
 });
 
 const ServerSchema = z.object({
@@ -145,6 +170,26 @@ export type CameraSourceConfig = z.infer<typeof CameraSourceConfigSchema>;
 const StoreSchema = z.object({
   dataDir: z.string().min(1),
   captureDir: z.string().min(1),
+  /** 정밀수집 결과 저장/열기(save/*) 폴더. */
+  saveDir: z.string().min(1),
+  /** 결과 artifact 보조 미러(reports/*) 폴더. save/ 와 동일 JSON 복사. */
+  reportsDir: z.string().min(1).default('reports'),
+  /** 미리 정의된 주차면 폴리곤 파일(dataDir 상대). finalize/detect 의 PtzCamRoi 소스. */
+  placeRoiFile: z.string().min(1).default('Place01/PtzCamRoi.json'),
+});
+
+/**
+ * 지면모델(GroundModel) 산출 설정 — 3D 육면체 렌더용(설계 §5-1).
+ * 순수 가산: enabled=false 면 GET /capture/ground-model 이 404, 기존 렌더는 픽셀 단위로 동일.
+ */
+const GroundSchema = z.object({
+  enabled: z.boolean().default(true),
+  /** 조건수 게이트(px). 깊이변이 이보다 짧은 프리셋은 f 공동추정 표본에서 제외(설계 §4-4 실측 근거). */
+  minDepthEdgePx: z.number().positive().default(250),
+  /** 주차면 폭(m) — metric 스케일 1순위 앵커. 설계 §4-5 에서 2.53~2.58m 실측 확인. */
+  slotWidthM: z.number().positive().default(2.5),
+  /** 주차면 깊이(m) — 폭/깊이 대응 뒤집힘 판별용. 설계 §4-5 에서 5.01~5.13m 실측 확인. */
+  slotDepthM: z.number().positive().default(5.0),
 });
 
 /** mapConfig 자동 프리셋 로딩 파일 경로(설계서 §8). camerapos 필수, preset 선택. */
@@ -190,11 +235,21 @@ export const ToolsConfigSchema = z.object({
   presetProvider: PresetProviderSchema,
   capture: CaptureSchema,
   calibrate: CalibrateSchema,
+  ground: GroundSchema,
   server: ServerSchema,
   store: StoreSchema,
   viewer: ViewerSchema,
+  /** Unity JSON-RPC 2.0 서버 설정(MCP unity_rpc 툴). */
+  unityRpc: UnityRpcSchema,
   /** 다중 카메라 소스(옵셔널). 미설정 시 단일 sim 폴백. */
   cameraSources: z.array(CameraSourceConfigSchema).optional(),
+  /**
+   * 뷰어 카메라 소스 선택. cameraSources(다중/고급) 미설정 시 이 값으로 단일 소스를 구성.
+   * precedence: cameraSources(명시·길이>0) > cameraMode.
+   */
+  cameraMode: z.enum(['simulator', 'real']).default('simulator'),
+  /** 리얼(Hucoms) 카메라 접속정보. cameraMode='real' 일 때 필요(자격증명 미포함 — UI 세션). */
+  realCamera: CameraSourceConfigSchema.optional(),
 });
 
 export type ToolsConfig = z.infer<typeof ToolsConfigSchema>;
@@ -209,32 +264,44 @@ export const DEFAULT_TOOLS_CONFIG: ToolsConfig = {
   },
   map: { cameraposFile: 'config/camerapos.json', presetFile: 'config/preset.json' },
   discovery: { enabled: false, maxCameras: 32, maxPresetsPerCamera: 32 },
-  presetProvider: { type: 'unity-api', unityUrl: '', refreshOnRun: false },
+  presetProvider: { type: 'camerapos', unityUrl: '', refreshOnRun: false },
   capture: {
-    defaultCount: 50, intervalMs: 30000, checkpointEvery: 10, dbFile: 'data/observations.sqlite',
-    clusterDist: 0.06, clusterMinSupport: 3, minConfidence: 0.5,
+    defaultCount: 50, intervalMs: 30000, moveIntervalMs: 1000, checkpointEvery: 10,
+    checkpointTriggerMode: 'rounds', checkpointIntervalMs: 60000, dbFile: 'data/observations.sqlite',
+    clusterDist: 0.06, clusterMinSupport: 3, minConfidence: 0.5, moveBeforeCapture: true,
   },
   calibrate: {
     targetPlateWidth: 0.2, centerTol: 0.03, widthTol: 0.02, maxIterations: 15,
     probeStepDeg: 1.0, maxStepDeg: 5.0, fallbackGainPanDeg: 20, fallbackGainTiltDeg: 15,
     settleMs: 300, outFile: 'data/slot_ptz.json', llmAdvise: true,
   },
+  ground: { enabled: true, minDepthEdgePx: 250, slotWidthM: 2.5, slotDepthM: 5.0 },
   server: { port: 13020, apiKeyEnv: 'SETTING_API_KEY' },
-  store: { dataDir: 'data', captureDir: 'data/captures' },
+  store: { dataDir: 'data', captureDir: 'data/captures', saveDir: 'save', reportsDir: 'reports', placeRoiFile: 'Place01/PtzCamRoi.json' },
   viewer: { enabled: true, allowMove: true, defaultFps: 3, staticDir: 'web', controlToken: '' },
+  unityRpc: { baseUrl: 'http://localhost:13110', timeoutMs: 10000 },
   // cameraSources 는 기본값 미설정(undefined → sourceRegistry 가 단일 sim 으로 폴백).
+  cameraMode: 'simulator',
+  // realCamera 는 기본값 미설정(cameraMode='real' 전환 시 사용자가 추가).
 };
 
 /** tools.config.json 을 로드한다. 파일이 없으면 기본값을 검증해 반환. 섹션 단위 병합. */
 export function loadToolsConfig(path = 'config/tools.config.json'): ToolsConfig {
   if (existsSync(path)) {
-    const raw = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, Record<string, unknown>>;
+    const raw = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>;
     const merged: Record<string, unknown> = {};
     for (const key of Object.keys(DEFAULT_TOOLS_CONFIG) as Array<keyof ToolsConfig>) {
-      merged[key] = { ...DEFAULT_TOOLS_CONFIG[key], ...(raw[key] ?? {}) };
+      const def = DEFAULT_TOOLS_CONFIG[key];
+      // 객체 섹션만 스프레드 병합. 스칼라(cameraMode 등)를 스프레드하면 문자 인덱스 객체로 깨지므로 값으로 대입.
+      if (def !== null && typeof def === 'object' && !Array.isArray(def)) {
+        merged[key] = { ...(def as Record<string, unknown>), ...((raw[key] as Record<string, unknown>) ?? {}) };
+      } else {
+        merged[key] = raw[key] ?? def;
+      }
     }
-    // cameraSources 는 옵셔널 배열(DEFAULT 에 없어 위 순회에서 누락) → 있으면 그대로 통과.
+    // cameraSources·realCamera 는 옵셔널(DEFAULT 에 없어 위 순회에서 누락) → 있으면 그대로 통과.
     if (raw.cameraSources !== undefined) merged.cameraSources = raw.cameraSources;
+    if (raw.realCamera !== undefined) merged.realCamera = raw.realCamera;
     return ToolsConfigSchema.parse(merged);
   }
   return ToolsConfigSchema.parse(DEFAULT_TOOLS_CONFIG);

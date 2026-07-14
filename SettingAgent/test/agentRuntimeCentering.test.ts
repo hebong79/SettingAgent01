@@ -42,7 +42,7 @@ afterAll(() => new Promise<void>((r) => server.close(() => r())));
 function cfg(enabled: boolean): LlmConfig {
   const pair = (s: string) => ({ system: s, user: s });
   return {
-    llm: { provider: 'gemma', model: 'gemma4:12b', baseUrl, temperature: 0.1, maxTokens: 256, enabled },
+    llm: { provider: 'gemma', model: 'gemma4:12b', baseUrl, temperature: 0.1, maxTokens: 256, enabled, api: 'openai', think: false, imageMaxEdge: 960 },
     mcp: { enabled: false, transport: 'stdio', servers: [] },
     setupPrompts: {
       stage1Enabled: true, stage2Enabled: true, stage3Enabled: true,

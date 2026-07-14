@@ -6,8 +6,10 @@ import type {
   CaptureRunRow,
   CheckpointRow,
   DetectionRow,
+  ParkingSlotRow,
+  ParkingSlotView,
 } from './types.js';
-import type { NormalizedQuad } from '../domain/types.js';
+import type { NormalizedQuad, NormalizedPolygon } from '../domain/types.js';
 
 /**
  * 관측·검출·집계 누적용 SQLite DAO (설계서 §5).
@@ -30,7 +32,7 @@ export class SqliteStore {
     this.db.close();
   }
 
-  /** 6테이블 + 인덱스 보장(IF NOT EXISTS — 재생성 무해). */
+  /** 8테이블 + 인덱스 보장(IF NOT EXISTS — 재생성 무해). */
   private ensureSchema(): void {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS capture_run (
@@ -50,7 +52,8 @@ export class SqliteStore {
         observation_id INTEGER,
         cam_idx INTEGER, preset_idx INTEGER,
         kind TEXT,
-        x REAL, y REAL, w REAL, h REAL, conf REAL
+        x REAL, y REAL, w REAL, h REAL, conf REAL,
+        px0 REAL, py0 REAL, px1 REAL, py1 REAL, px2 REAL, py2 REAL, px3 REAL, py3 REAL
       );
       CREATE TABLE IF NOT EXISTS aggregated_slot (
         run_id INTEGER, preset_key TEXT, cluster_id INTEGER,
@@ -58,6 +61,9 @@ export class SqliteStore {
         x REAL, y REAL, w REAL, h REAL,
         support INTEGER, occupancy_rate REAL,
         plate_x REAL, plate_y REAL, plate_w REAL, plate_h REAL,
+        plate_px0 REAL, plate_py0 REAL, plate_px1 REAL, plate_py1 REAL,
+        plate_px2 REAL, plate_py2 REAL, plate_px3 REAL, plate_py3 REAL,
+        confidence REAL, pos_spread REAL, angle_spread REAL,
         status TEXT
       );
       CREATE TABLE IF NOT EXISTS checkpoint (
@@ -72,12 +78,56 @@ export class SqliteStore {
       CREATE TABLE IF NOT EXISTS floor_roi (
         run_id INTEGER, preset_key TEXT, cluster_id INTEGER,
         x0 REAL, y0 REAL, x1 REAL, y1 REAL, x2 REAL, y2 REAL, x3 REAL, y3 REAL,
+        polygon_json TEXT,
         updated_at TEXT,
         PRIMARY KEY (run_id, preset_key, cluster_id)
       );
+      CREATE TABLE IF NOT EXISTS occupancy (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id INTEGER, cam_idx INTEGER, preset_idx INTEGER, at_round INTEGER,
+        occupied_count INTEGER, total INTEGER, rate REAL,
+        spaces_json TEXT, updated_at TEXT
+      );
+      CREATE TABLE IF NOT EXISTS parking_slots (
+        run_id INTEGER, cam_idx INTEGER, preset_idx INTEGER, preset_key TEXT,
+        slot_idx INTEGER,
+        roi_json TEXT,
+        vpd_json TEXT,
+        lpd_json TEXT,
+        occupied INTEGER,
+        occupancy_rate REAL,
+        pan REAL, tilt REAL, zoom REAL,
+        updated_at TEXT,
+        PRIMARY KEY (run_id, preset_key, slot_idx)
+      );
       CREATE INDEX IF NOT EXISTS idx_det_obs ON detection(observation_id);
       CREATE INDEX IF NOT EXISTS idx_obs_run_preset ON observation(run_id, preset_idx);
+      CREATE INDEX IF NOT EXISTS idx_occ_run ON occupancy(run_id, cam_idx, preset_idx, at_round);
     `);
+
+    // 기존 파일 DB 마이그레이션: CREATE TABLE IF NOT EXISTS 는 신컬럼을 못 붙임.
+    // pragma table_info 로 quad 컬럼 존재 확인 후 없으면 ADD COLUMN(구DB 는 NULL → rectToQuad 폴백).
+    this.addColumnsIfMissing('detection', ['px0', 'py0', 'px1', 'py1', 'px2', 'py2', 'px3', 'py3']);
+    this.addColumnsIfMissing(
+      'aggregated_slot',
+      ['plate_px0', 'plate_py0', 'plate_px1', 'plate_py1', 'plate_px2', 'plate_py2', 'plate_px3', 'plate_py3'],
+    );
+    // 강건 통계 3필드(신뢰도·위치퍼짐·각도분산). 구DB → ALTER(값 NULL, read 시 0/null 폴백).
+    this.addColumnsIfMissing('aggregated_slot', ['confidence', 'pos_spread', 'angle_spread']);
+    // 구 floor_roi(4점 x0..y3만) 파일 DB → polygon_json 컬럼 추가(NULL → 읽기 시 4점 폴백).
+    this.addColumnsIfMissing('floor_roi', ['polygon_json'], 'TEXT');
+    // 구 parking_slots(preset PTZ 없음) 파일 DB → pan/tilt/zoom 추가(NULL → 뷰 null 폴백).
+    this.addColumnsIfMissing('parking_slots', ['pan', 'tilt', 'zoom'], 'REAL');
+  }
+
+  /** 테이블에 없는 컬럼만 ALTER TABLE ADD COLUMN(better-sqlite3 IF NOT EXISTS 미지원 → 존재검사). */
+  private addColumnsIfMissing(table: string, columns: string[], type = 'REAL'): void {
+    const existing = new Set(
+      (this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((r) => r.name),
+    );
+    for (const col of columns) {
+      if (!existing.has(col)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`);
+    }
   }
 
   // ── 런 ──────────────────────────────────────────────────
@@ -139,14 +189,22 @@ export class SqliteStore {
     observationId: number,
     camIdx: number,
     presetIdx: number,
-    dets: Array<{ kind: 'vehicle' | 'plate'; x: number; y: number; w: number; h: number; conf: number }>,
+    dets: Array<{ kind: 'vehicle' | 'plate'; x: number; y: number; w: number; h: number; conf: number; quad?: NormalizedQuad }>,
   ): void {
     const stmt = this.db.prepare(
-      `INSERT INTO detection (observation_id, cam_idx, preset_idx, kind, x, y, w, h, conf)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO detection (observation_id, cam_idx, preset_idx, kind, x, y, w, h, conf,
+                              px0, py0, px1, py1, px2, py2, px3, py3)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const tx = this.db.transaction((rows: typeof dets) => {
-      for (const d of rows) stmt.run(observationId, camIdx, presetIdx, d.kind, d.x, d.y, d.w, d.h, d.conf);
+      for (const d of rows) {
+        const q = d.quad;
+        stmt.run(
+          observationId, camIdx, presetIdx, d.kind, d.x, d.y, d.w, d.h, d.conf,
+          q ? q[0].x : null, q ? q[0].y : null, q ? q[1].x : null, q ? q[1].y : null,
+          q ? q[2].x : null, q ? q[2].y : null, q ? q[3].x : null, q ? q[3].y : null,
+        );
+      }
     });
     tx(dets);
   }
@@ -158,12 +216,23 @@ export class SqliteStore {
       .prepare(
         `SELECT d.observation_id AS observationId, o.round_idx AS roundIdx,
                 d.cam_idx AS camIdx, d.preset_idx AS presetIdx,
-                d.kind AS kind, d.x AS x, d.y AS y, d.w AS w, d.h AS h, d.conf AS conf
+                d.kind AS kind, d.x AS x, d.y AS y, d.w AS w, d.h AS h, d.conf AS conf,
+                d.px0 AS px0, d.py0 AS py0, d.px1 AS px1, d.py1 AS py1,
+                d.px2 AS px2, d.py2 AS py2, d.px3 AS px3, d.py3 AS py3
          FROM detection d JOIN observation o ON o.id = d.observation_id
          WHERE o.run_id = ?`,
       )
-      .all(runId) as DetectionRow[];
-    return rows;
+      .all(runId) as Array<
+      DetectionRow & {
+        px0: number | null; py0: number | null; px1: number | null; py1: number | null;
+        px2: number | null; py2: number | null; px3: number | null; py3: number | null;
+      }
+    >;
+    return rows.map((r) => {
+      const { px0, py0, px1, py1, px2, py2, px3, py3, ...base } = r;
+      const quad = quadFromCols(px0, py0, px1, py1, px2, py2, px3, py3);
+      return quad ? { ...base, quad } : (base as DetectionRow);
+    });
   }
 
   /** 프리셋별 총 관측 라운드 수(occupancyRate 분모). `${cam}:${preset}` → distinct round 수. */
@@ -185,16 +254,22 @@ export class SqliteStore {
     const ins = this.db.prepare(
       `INSERT INTO aggregated_slot
         (run_id, preset_key, cluster_id, cam_idx, preset_idx, x, y, w, h, support, occupancy_rate,
-         plate_x, plate_y, plate_w, plate_h, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         plate_x, plate_y, plate_w, plate_h,
+         plate_px0, plate_py0, plate_px1, plate_py1, plate_px2, plate_py2, plate_px3, plate_py3,
+         confidence, pos_spread, angle_spread, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const tx = this.db.transaction((rows: AggregatedSlot[]) => {
       del.run(runId);
       for (const s of rows) {
+        const q = s.plateQuad;
         ins.run(
           runId, s.presetKey, s.clusterId, s.camIdx, s.presetIdx,
           s.x, s.y, s.w, s.h, s.support, s.occupancyRate,
-          s.plateX, s.plateY, s.plateW, s.plateH, s.status,
+          s.plateX, s.plateY, s.plateW, s.plateH,
+          q ? q[0].x : null, q ? q[0].y : null, q ? q[1].x : null, q ? q[1].y : null,
+          q ? q[2].x : null, q ? q[2].y : null, q ? q[3].x : null, q ? q[3].y : null,
+          s.confidence, s.posSpread, s.angleSpread, s.status,
         );
       }
     });
@@ -206,11 +281,30 @@ export class SqliteStore {
       .prepare(
         `SELECT preset_key AS presetKey, cluster_id AS clusterId, cam_idx AS camIdx, preset_idx AS presetIdx,
                 x, y, w, h, support, occupancy_rate AS occupancyRate,
-                plate_x AS plateX, plate_y AS plateY, plate_w AS plateW, plate_h AS plateH, status
+                plate_x AS plateX, plate_y AS plateY, plate_w AS plateW, plate_h AS plateH,
+                plate_px0 AS px0, plate_py0 AS py0, plate_px1 AS px1, plate_py1 AS py1,
+                plate_px2 AS px2, plate_py2 AS py2, plate_px3 AS px3, plate_py3 AS py3,
+                confidence, pos_spread AS posSpread, angle_spread AS angleSpread, status
          FROM aggregated_slot WHERE run_id = ? ORDER BY preset_key, cluster_id`,
       )
-      .all(runId) as AggregatedSlot[];
-    return rows;
+      .all(runId) as Array<
+      Omit<AggregatedSlot, 'plateQuad' | 'confidence' | 'posSpread' | 'angleSpread'> & {
+        px0: number | null; py0: number | null; px1: number | null; py1: number | null;
+        px2: number | null; py2: number | null; px3: number | null; py3: number | null;
+        confidence: number | null; posSpread: number | null; angleSpread: number | null;
+      }
+    >;
+    return rows.map((r) => {
+      const { px0, py0, px1, py1, px2, py2, px3, py3, confidence, posSpread, angleSpread, ...base } = r;
+      // 구DB(신컬럼 없음) 행은 NULL → (0, 0, null) 폴백(AggregatedSlot 타입 충족).
+      return {
+        ...base,
+        confidence: confidence ?? 0,
+        posSpread: posSpread ?? 0,
+        angleSpread: angleSpread ?? null,
+        plateQuad: quadFromCols(px0, py0, px1, py1, px2, py2, px3, py3) ?? null,
+      };
+    });
   }
 
   /** 집계 결과의 status 를 cluster 단위로 갱신(좌표 불변 — 메타만). */
@@ -248,47 +342,208 @@ export class SqliteStore {
       .run(runId, createdAt, artifactJson);
   }
 
-  // ── 바닥 점유 영역(floor ROI · 4점 사변형) ────────────────
-  /** floor quad 를 (run, presetKey, clusterId) 키로 upsert(LLM 산출 — 집계와 수명주기 분리). */
-  upsertFloorRoi(runId: number, presetKey: string, clusterId: number, quad: NormalizedQuad, updatedAt: string): void {
+  // ── 바닥 점유 영역(floor ROI · 가변 다각형 4~10점) ──────────
+  /**
+   * floor 다각형을 (run, presetKey, clusterId) 키로 upsert(LLM 산출 — 집계와 수명주기 분리).
+   * polygon_json 을 authoritative 로 기록하고, x0..y3 에는 앞 4점을 병행 기록(구 뷰어/구 코드 하위호환).
+   */
+  upsertFloorRoi(runId: number, presetKey: string, clusterId: number, polygon: NormalizedPolygon, updatedAt: string): void {
     this.db
       .prepare(
-        `INSERT INTO floor_roi (run_id, preset_key, cluster_id, x0, y0, x1, y1, x2, y2, x3, y3, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO floor_roi (run_id, preset_key, cluster_id, x0, y0, x1, y1, x2, y2, x3, y3, polygon_json, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(run_id, preset_key, cluster_id) DO UPDATE SET
            x0=excluded.x0, y0=excluded.y0, x1=excluded.x1, y1=excluded.y1,
            x2=excluded.x2, y2=excluded.y2, x3=excluded.x3, y3=excluded.y3,
-           updated_at=excluded.updated_at`,
+           polygon_json=excluded.polygon_json, updated_at=excluded.updated_at`,
       )
       .run(
         runId, presetKey, clusterId,
-        quad[0].x, quad[0].y, quad[1].x, quad[1].y, quad[2].x, quad[2].y, quad[3].x, quad[3].y,
-        updatedAt,
+        polygon[0].x, polygon[0].y, polygon[1].x, polygon[1].y,
+        polygon[2].x, polygon[2].y, polygon[3].x, polygon[3].y,
+        JSON.stringify(polygon), updatedAt,
       );
   }
 
-  getFloorRois(runId: number): Array<{ presetKey: string; clusterId: number; quad: NormalizedQuad }> {
+  getFloorRois(runId: number): Array<{ presetKey: string; clusterId: number; polygon: NormalizedPolygon }> {
     const rows = this.db
       .prepare(
-        `SELECT preset_key AS presetKey, cluster_id AS clusterId, x0, y0, x1, y1, x2, y2, x3, y3
+        `SELECT preset_key AS presetKey, cluster_id AS clusterId, x0, y0, x1, y1, x2, y2, x3, y3, polygon_json AS polygonJson
          FROM floor_roi WHERE run_id = ? ORDER BY preset_key, cluster_id`,
       )
       .all(runId) as Array<{
       presetKey: string;
       clusterId: number;
       x0: number; y0: number; x1: number; y1: number; x2: number; y2: number; x3: number; y3: number;
+      polygonJson: string | null;
+    }>;
+    return rows.map((r) => {
+      // polygon_json 우선(가변 정점), 없으면(구 런) x0..y3 → 4점 폴리곤 폴백.
+      let polygon: NormalizedPolygon | null = null;
+      if (r.polygonJson) {
+        try {
+          const parsed = JSON.parse(r.polygonJson);
+          if (Array.isArray(parsed) && parsed.length >= 4) polygon = parsed as NormalizedPolygon;
+        } catch {
+          polygon = null;
+        }
+      }
+      if (!polygon) {
+        polygon = [
+          { x: r.x0, y: r.y0 },
+          { x: r.x1, y: r.y1 },
+          { x: r.x2, y: r.y2 },
+          { x: r.x3, y: r.y3 },
+        ];
+      }
+      return { presetKey: r.presetKey, clusterId: r.clusterId, polygon };
+    });
+  }
+
+  // ── 차량 점유율(LLM 판정 · 체크포인트별 이력) ──────────────
+  /** 점유율 판정 1건 append(체크포인트마다 행 추가 — 점유 변화 추적). 산술(count/rate)은 호출측 결정형 산출. */
+  insertOccupancy(
+    runId: number,
+    o: {
+      camIdx: number;
+      presetIdx: number;
+      atRound: number;
+      occupiedCount: number;
+      total: number;
+      rate: number;
+      spacesJson: string;
+      updatedAt: string;
+    },
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO occupancy (run_id, cam_idx, preset_idx, at_round, occupied_count, total, rate, spaces_json, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(runId, o.camIdx, o.presetIdx, o.atRound, o.occupiedCount, o.total, o.rate, o.spacesJson, o.updatedAt);
+  }
+
+  /** 프리셋별 최신(at_round 최대) 점유율 1행씩. */
+  getLatestOccupancy(runId: number): Array<{
+    camIdx: number;
+    presetIdx: number;
+    atRound: number;
+    occupiedCount: number;
+    total: number;
+    rate: number;
+    spacesJson: string | null;
+    updatedAt: string;
+  }> {
+    return this.db
+      .prepare(
+        `SELECT o.cam_idx AS camIdx, o.preset_idx AS presetIdx, o.at_round AS atRound,
+                o.occupied_count AS occupiedCount, o.total AS total, o.rate AS rate,
+                o.spaces_json AS spacesJson, o.updated_at AS updatedAt
+         FROM occupancy o
+         JOIN (SELECT cam_idx, preset_idx, MAX(at_round) mr FROM occupancy WHERE run_id = ? GROUP BY cam_idx, preset_idx) m
+           ON o.cam_idx = m.cam_idx AND o.preset_idx = m.preset_idx AND o.at_round = m.mr
+         WHERE o.run_id = ? ORDER BY o.cam_idx, o.preset_idx`,
+      )
+      .all(runId, runId) as Array<{
+      camIdx: number;
+      presetIdx: number;
+      atRound: number;
+      occupiedCount: number;
+      total: number;
+      rate: number;
+      spacesJson: string | null;
+      updatedAt: string;
+    }>;
+  }
+
+  // ── 파일 바닥ROI 기준 주차면(finalize 조립 산출 · §06) ──────
+  /** run 기준 delete+insert(멱등, replaceAggregatedSlots 미러). *_json 은 이미 직렬화된 문자열. */
+  replaceParkingSlots(runId: number, rows: ParkingSlotRow[]): void {
+    const del = this.db.prepare(`DELETE FROM parking_slots WHERE run_id = ?`);
+    const ins = this.db.prepare(
+      `INSERT INTO parking_slots
+        (run_id, cam_idx, preset_idx, preset_key, slot_idx, roi_json, vpd_json, lpd_json, occupied, occupancy_rate, pan, tilt, zoom, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const tx = this.db.transaction((list: ParkingSlotRow[]) => {
+      del.run(runId);
+      for (const r of list) {
+        ins.run(
+          runId, r.camIdx, r.presetIdx, r.presetKey, r.slotIdx,
+          r.roiJson, r.vpdJson, r.lpdJson, r.occupied, r.occupancyRate,
+          r.pan ?? null, r.tilt ?? null, r.zoom ?? null, r.updatedAt,
+        );
+      }
+    });
+    tx(rows);
+  }
+
+  getParkingSlots(runId: number): ParkingSlotView[] {
+    const rows = this.db
+      .prepare(
+        `SELECT cam_idx AS camIdx, preset_idx AS presetIdx, preset_key AS presetKey, slot_idx AS slotIdx,
+                roi_json AS roiJson, vpd_json AS vpdJson, lpd_json AS lpdJson,
+                occupied, occupancy_rate AS occupancyRate, pan, tilt, zoom
+         FROM parking_slots WHERE run_id = ? ORDER BY cam_idx, preset_idx, slot_idx`,
+      )
+      .all(runId) as Array<{
+      camIdx: number;
+      presetIdx: number;
+      presetKey: string;
+      slotIdx: number;
+      roiJson: string | null;
+      vpdJson: string | null;
+      lpdJson: string | null;
+      occupied: number | null;
+      occupancyRate: number | null;
+      pan: number | null;
+      tilt: number | null;
+      zoom: number | null;
     }>;
     return rows.map((r) => ({
+      camIdx: r.camIdx,
+      presetIdx: r.presetIdx,
       presetKey: r.presetKey,
-      clusterId: r.clusterId,
-      quad: [
-        { x: r.x0, y: r.y0 },
-        { x: r.x1, y: r.y1 },
-        { x: r.x2, y: r.y2 },
-        { x: r.x3, y: r.y3 },
-      ] as NormalizedQuad,
+      slotIdx: r.slotIdx,
+      roi: parseJsonOrNull<ParkingSlotView['roi']>(r.roiJson) ?? [],
+      vpd: parseJsonOrNull<ParkingSlotView['vpd']>(r.vpdJson),
+      lpd: parseJsonOrNull<ParkingSlotView['lpd']>(r.lpdJson),
+      occupied: r.occupied === 1,
+      occupancyRate: r.occupancyRate ?? null,
+      pan: r.pan ?? null,
+      tilt: r.tilt ?? null,
+      zoom: r.zoom ?? null,
     }));
   }
+}
+
+/** JSON 문자열 파싱(널·파싱실패 → null). parking_slots 의 *_json 컬럼 복원용. */
+function parseJsonOrNull<T>(s: string | null): T | null {
+  if (s == null) return null;
+  try {
+    return JSON.parse(s) as T;
+  } catch {
+    return null;
+  }
+}
+
+/** quad 8컬럼(NULL 가능) → NormalizedQuad. 어느 하나라도 NULL 이면 undefined(구DB·plate 부재). */
+function quadFromCols(
+  px0: number | null, py0: number | null, px1: number | null, py1: number | null,
+  px2: number | null, py2: number | null, px3: number | null, py3: number | null,
+): NormalizedQuad | undefined {
+  if (
+    px0 === null || py0 === null || px1 === null || py1 === null ||
+    px2 === null || py2 === null || px3 === null || py3 === null
+  ) {
+    return undefined;
+  }
+  return [
+    { x: px0, y: py0 },
+    { x: px1, y: py1 },
+    { x: px2, y: py2 },
+    { x: px3, y: py3 },
+  ];
 }
 
 function mapRun(r: Record<string, unknown>): CaptureRunRow {

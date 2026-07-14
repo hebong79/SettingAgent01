@@ -6,6 +6,7 @@ import type { SetupBrain } from '../src/brain/SetupBrain.js';
 import type { Repository } from '../src/store/Repository.js';
 import type { ToolsConfig } from '../src/config/toolsConfig.js';
 import type { SetupArtifact } from '../src/domain/types.js';
+import { rectToQuad } from '../src/domain/geometry.js';
 import type { SlotPtzArtifact } from '../src/calibrate/types.js';
 
 /**
@@ -25,7 +26,7 @@ function artifact(): SetupArtifact {
   return {
     createdAt: 'T', presets: [],
     globalIndex: [{ globalIdx: 7, slotId: 'c1p1s1', camIdx: 1, presetIdx: 1 }],
-    slots: [{ slotId: 'c1p1s1', zone: 'z', roiByPreset: { '1:1': { x: 0.6, y: 0.6, w: 0.1, h: 0.05 } }, plateRoiByPreset: { '1:1': { x: 0.62, y: 0.62, w: 0.05, h: 0.03 } } }],
+    slots: [{ slotId: 'c1p1s1', zone: 'z', roiByPreset: { '1:1': { x: 0.6, y: 0.6, w: 0.1, h: 0.05 } }, plateRoiByPreset: { '1:1': rectToQuad({ x: 0.62, y: 0.62, w: 0.05, h: 0.03 }) } }],
   };
 }
 
@@ -60,7 +61,7 @@ function makeMockModel() {
       const cy = 0.8 - last.tilt * 0.02;
       const w = Math.min(0.9, 0.05 * last.zoom);
       const h = 0.03;
-      return [{ rect: { x: cx - w / 2, y: cy - h / 2, w, h }, confidence: 0.9, cls: 'plate' }];
+      return [{ quad: rectToQuad({ x: cx - w / 2, y: cy - h / 2, w, h }), confidence: 0.9, cls: 'plate' }];
     },
   } as unknown as LpdClient;
 
@@ -138,7 +139,7 @@ describe('PtzCalibrator maxIter 미수렴', () => {
   it('절대 안 맞는 모킹 → converged false, 상한 종료', async () => {
     // 항상 우하단·과대폭 고정(보정 무반응) → 미수렴.
     const stuckLpd = {
-      detect: async (): Promise<PlateBox[]> => [{ rect: { x: 0.8, y: 0.8, w: 0.5, h: 0.03 }, confidence: 0.9, cls: 'plate' }],
+      detect: async (): Promise<PlateBox[]> => [{ quad: rectToQuad({ x: 0.8, y: 0.8, w: 0.5, h: 0.03 }), confidence: 0.9, cls: 'plate' }],
     } as unknown as LpdClient;
     const { cal, getSaved } = makeCalibrator({ lpd: stuckLpd });
     cal.start();
@@ -158,7 +159,7 @@ describe('PtzCalibrator 다수 번호판', () => {
     const lpd = {
       detect: async (jpg: Buffer): Promise<PlateBox[]> => {
         const real = await origDetect(jpg);
-        return [...real, { rect: { x: 0.05, y: 0.05, w: 0.05, h: 0.03 }, confidence: 0.95, cls: 'plate' }];
+        return [...real, { quad: rectToQuad({ x: 0.05, y: 0.05, w: 0.05, h: 0.03 }), confidence: 0.95, cls: 'plate' }];
       },
     } as unknown as LpdClient;
     const { cal, getSaved } = makeCalibrator({ camera: m.camera, lpd });

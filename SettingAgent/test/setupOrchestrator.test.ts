@@ -5,6 +5,7 @@ import type { VpdClient } from '../src/clients/VpdClient.js';
 import type { LpdClient, PlateBox } from '../src/clients/LpdClient.js';
 import type { Repository } from '../src/store/Repository.js';
 import type { CapturedImage, SetupArtifact, VehicleBox } from '../src/domain/types.js';
+import { rectToQuad } from '../src/domain/geometry.js';
 
 const vb = (x: number, y: number): VehicleBox => ({ rect: { x, y, w: 0.1, h: 0.1 }, confidence: 0.9, cls: 'car' });
 
@@ -158,7 +159,7 @@ describe('SetupOrchestrator', () => {
 
   it('lpdEnabled: 번호판 ROI 를 슬롯에 저장(plateRoiByPreset)', async () => {
     const { repo } = fakeRepo();
-    const plate: PlateBox = { rect: { x: 0.22, y: 0.12, w: 0.04, h: 0.02 }, confidence: 0.95, cls: 'car_license_plate' };
+    const plate: PlateBox = { quad: rectToQuad({ x: 0.22, y: 0.12, w: 0.04, h: 0.02 }), confidence: 0.95, cls: 'car_license_plate' };
     const lpd = { detect: async () => [plate] } as unknown as LpdClient;
     const orch = new SetupOrchestrator({
       camera: fakeCamera(),
@@ -171,7 +172,8 @@ describe('SetupOrchestrator', () => {
     });
     const artifact = await orch.run([{ camIdx: 1, presetIdx: 1 }]);
     const slot = artifact.slots.find((s) => s.slotId === 'c1p1s1')!;
-    expect(slot.plateRoiByPreset?.['1:1']).toEqual({ x: 0.22, y: 0.12, w: 0.04, h: 0.02 });
+    // 저장은 실 OBB quad(방향 보존). 축정렬 fixture → rectToQuad 와 동일.
+    expect(slot.plateRoiByPreset?.['1:1']).toEqual(rectToQuad({ x: 0.22, y: 0.12, w: 0.04, h: 0.02 }));
   });
 
   it('lpdEnabled=false 면 번호판 ROI 미저장', async () => {

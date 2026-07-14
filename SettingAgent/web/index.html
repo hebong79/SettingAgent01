@@ -20,6 +20,8 @@
         <button class="tab" data-tab="inspect">주차면 검수</button>
         <button class="tab" data-tab="precise">정밀 수집</button>
         <button class="tab" data-tab="analyze">분석</button>
+        <button class="tab" data-tab="options">옵션</button>
+        <button class="tab" data-tab="db">DB</button>
       </nav>
       <div class="badges">
         <span id="badge-backend" class="badge">backend</span>
@@ -38,6 +40,18 @@
             <label><input id="roi-vehicle" type="checkbox" checked /> 차량</label>
             <label><input id="roi-plate" type="checkbox" checked /> 번호판</label>
             <label><input id="roi-floor" type="checkbox" checked /> 바닥</label>
+            <label><input id="roi-occupancy" type="checkbox" checked /> 점유</label>
+            <label><input id="roi-detect" type="checkbox" checked /> 검출</label>
+            <label title="주차면을 3D 육면체로 표시(지면모델 기반). 기존 바닥 ROI 는 그대로 유지">
+              <input id="roi-cuboid" type="checkbox" /> 육면체
+            </label>
+            <label class="field compact" title="육면체 높이(m). 승용차 ≈ 1.5m">
+              높이
+              <input id="cuboid-h" type="range" min="0.5" max="3.0" step="0.05" value="1.5" />
+              <span id="cuboid-h-val">1.5m</span>
+            </label>
+            <span id="ground-badge" class="badge ground-badge" title="지면모델 산출 근거">지면모델: 없음</span>
+            <button id="det-delete" disabled title="선택한 검출 박스 삭제(임시·메모리만) — Delete/Backspace, Esc 해제">검출 삭제</button>
             <button id="roi-clear" title="화면에 그려진 주차면·선택 표시 초기화">표시 초기화</button>
           </div>
         </div>
@@ -74,6 +88,15 @@
             <label class="field">프리셋 <select id="sel-preset"></select></label>
             <button id="btn-goto" class="primary">이동</button>
           </div>
+          <div class="preset-edit">
+            <label class="field full">프리셋 이름 <input id="preset-label" type="text" autocomplete="off" placeholder="프리셋 이름" /></label>
+            <div class="toolbar">
+              <button id="preset-save" title="선택 프리셋을 현재 PTZ로 갱신">프리셋 저장</button>
+              <button id="preset-new" title="현재 PTZ를 새 프리셋으로 추가">새 프리셋</button>
+              <button id="preset-delete" title="선택 프리셋 삭제">삭제</button>
+            </div>
+            <div id="preset-msg" class="map-msg"></div>
+          </div>
         </section>
 
         <section class="panel-section">
@@ -88,7 +111,7 @@
             <div class="zoom-col">
               <button data-dir="zoomIn">+ zoom</button>
               <button data-dir="zoomOut">− zoom</button>
-              <label class="field compact">step <input id="step" type="number" value="500" /></label>
+              <label class="field compact">step <input id="step" type="number" value="2" /></label>
             </div>
           </div>
           <div class="abs-row">
@@ -108,14 +131,18 @@
           <span id="login-status"></span>
         </section>
 
+        <!-- 주차면 목록·편집: PtzCamRoi.json(placeRoi) 전용 5종(선택·수정·삭제·저장·열기). 선택=행 클릭. -->
         <section class="panel-section">
           <div class="section-title">주차면 목록 · 편집</div>
           <div class="roi-edit-bar toolbar">
-            <span id="sel-slot-info" class="sel-slot-info">선택된 주차면 없음</span>
-            <button id="roi-delete" disabled title="선택 주차면 삭제(저장 시 반영)">삭제</button>
-            <button id="map-save" class="primary" title="편집 내용을 산출물에 저장">저장</button>
+            <span id="place-sel-info" class="sel-slot-info">선택된 주차면 없음</span>
+            <input id="place-gidx" class="slot-insert-idx" type="number" min="1" placeholder="번호" title="변경할 전역 인덱스(1..N)" />
+            <button id="place-edit" title="선택 주차면의 전역 인덱스를 입력값으로 변경(나머지는 밀어서 1..N 유지)">수정</button>
+            <button id="place-delete" disabled title="선택 주차면 삭제(저장 시 반영)">삭제</button>
+            <button id="place-save" class="primary" title="전 프리셋을 PtzCamRoi.json 에 저장">저장</button>
+            <button id="place-open" title="로컬 PtzCamRoi.json 열기(미저장 — 저장으로 확정)">열기</button>
           </div>
-          <div id="map-msg" class="map-msg"></div>
+          <div id="place-msg" class="map-msg"></div>
           <div id="slot-list" class="slot-list"></div>
         </section>
 
@@ -130,12 +157,20 @@
           <div class="capture-grid">
             <label class="field">반복 횟수 <input id="cap-count" type="number" min="1" value="50" /></label>
             <label class="field">주기(초) <input id="cap-interval" type="number" min="1" value="30" /></label>
-            <label class="field">체크포인트 <input id="cap-checkpoint" type="number" min="1" value="10" /></label>
+            <div class="field cap-trigger">
+              <label><input type="radio" name="cap-trigmode" value="rounds" checked /> 라운드 주기</label>
+              <label><input type="radio" name="cap-trigmode" value="time" /> 시간 주기</label>
+            </div>
+            <label class="field" id="cap-checkpoint-field">체크포인트(라운드) <input id="cap-checkpoint" type="number" min="1" value="10" /></label>
+            <label class="field" id="cap-ckint-field" hidden>체크포인트 간격(초) <input id="cap-ckint" type="number" min="1" value="60" /></label>
+            <label class="field check"><input id="cap-floor-llm" type="checkbox" /> 바닥 LLM 사용</label>
+            <label class="field check"><input id="cap-vpd-onplace" type="checkbox" checked /> 주차면 위 차량만 검출(번호판 포함)</label>
           </div>
           <div class="cap-actions toolbar">
             <button id="cap-start" class="primary">시작</button>
             <button id="cap-stop">정지</button>
             <button id="cap-finalize">최종화</button>
+            <button id="cap-detect-run" title="현재 프리셋 1회 VPD/LPD 검출">검출 실행</button>
           </div>
           <div class="cap-progress">
             <progress id="cap-bar" max="100" value="0"></progress>
@@ -144,6 +179,21 @@
           </div>
           <div id="cap-advisory" class="cap-advisory"></div>
           <div id="cap-msg" class="cap-msg"></div>
+
+          <!-- [기능3] 주차면 자동보정(이동+스케일, sharp 상호상관). 회전·원근 미보정. -->
+          <div id="align-box" class="precise-head" style="margin-top:16px">
+            <div>
+              <h3>주차면 자동보정</h3>
+              <p>기준 프레임 대비 이동·스케일 추정 → 주차면 ROI 정합 (회전·원근 미보정)</p>
+            </div>
+          </div>
+          <div class="cap-actions toolbar">
+            <button id="align-save-ref" title="현재 프리셋 프레임을 자동보정 기준으로 저장">기준 저장</button>
+            <button id="align-run" class="primary" title="기준 대비 현재 프레임 정합 → 주차면 이동/스케일">주차면 자동보정</button>
+            <button id="align-undo" title="자동보정 직전 상태로 되돌리기">되돌리기</button>
+            <button id="align-apply" title="보정된 주차면을 PtzCamRoi.json 에 저장">저장</button>
+          </div>
+          <div id="align-msg" class="cap-msg"></div>
 
           <!-- PTZ 캘리브레이션: 주차면별 번호판 중심정렬·줌 → slot_ptz.json -->
           <div class="precise-head" style="margin-top:16px">
@@ -189,6 +239,10 @@
           </section>
         </div>
         <section class="panel-section">
+          <div class="section-title">프리셋별 차량 점유율</div>
+          <div id="an-occupancy" class="an-table-wrap"></div>
+        </section>
+        <section class="panel-section">
           <div class="section-title">주차면 목록 (전역 인덱스 순)</div>
           <div id="an-slots" class="an-table-wrap"></div>
         </section>
@@ -205,6 +259,18 @@
             <div id="an-manual" class="an-manual an-table-wrap"></div>
             <div id="an-slotmap" class="an-slotmap" title="박스 클릭 → 좌측 표 행과 동기화"></div>
           </div>
+          <!-- 산출물(setup_artifact) 주차면 편집·결과 파일 도구. 정밀수집 패널에서 이관(그 패널은 PtzCamRoi 전용). -->
+          <p class="an-manual-help">산출물(<code>setup_artifact.json</code>) 주차면 추가·삭제·저장 및 결과 파일 저장/열기. (선택은 정밀수집 화면의 주차면 목록에서)</p>
+          <div class="roi-edit-bar toolbar">
+            <span id="sel-slot-info" class="sel-slot-info">선택된 주차면 없음</span>
+            <input id="slot-insert-idx" class="slot-insert-idx" type="number" min="1" placeholder="위치" title="삽입할 전역 인덱스(1..N+1, 비우면 맨 끝)" />
+            <button id="slot-add" title="현재 프리셋에 주차면 추가(전역 인덱스 중간삽입)">추가</button>
+            <button id="roi-delete" disabled title="선택 주차면 삭제(저장 시 반영)">삭제</button>
+            <button id="map-save" class="primary" title="편집 내용을 산출물에 저장">저장</button>
+            <button id="result-save" title="현재 결과를 로컬 JSON 파일로 저장">결과 저장</button>
+            <button id="result-open" title="로컬 JSON 파일에서 결과 열기">결과 열기</button>
+          </div>
+          <div id="map-msg" class="map-msg"></div>
         </section>
         <section class="panel-section">
           <div class="section-title">LLM 설치 리포트 (report)</div>
@@ -214,6 +280,97 @@
           <div class="section-title">원본 JSON</div>
           <pre id="an-raw" class="an-raw"></pre>
         </section>
+      </section>
+
+      <!-- 옵션(설정) 뷰: '옵션' 탭에서 전체폭 표시. llm.config/tools.config 편집 대상 값 편집·저장. -->
+      <section id="options-view" class="analyze-view options-view" hidden>
+        <div class="analyze-head">
+          <div>
+            <h2>옵션 (설정)</h2>
+            <p>LLM · VPD · LPD 엔드포인트 편집. <b>API 키는 서버 env 로만 주입</b>되어 편집·표시하지 않습니다. 저장 후 <b>서버 재시작 필요</b>.</p>
+          </div>
+          <div class="toolbar">
+            <button id="opt-reload">새로고침</button>
+            <button id="opt-save" class="primary">저장</button>
+          </div>
+        </div>
+        <div id="opt-restart-banner" class="opt-restart-banner" hidden>
+          ⚠ 저장되었습니다. 변경을 적용하려면 SettingAgent 서버를 재시작하세요. (config 는 nodemon 감시 밖 — 자동 반영되지 않음)
+        </div>
+        <div id="opt-msg" class="opt-msg"></div>
+        <div class="an-grid">
+          <section class="panel-section">
+            <div class="section-title">LLM (두뇌)</div>
+            <label class="field full">활성 모델 (런타임 전환 · 재시작 불필요)
+              <select id="opt-llm-active"></select>
+            </label>
+            <div id="opt-llm-active-msg" class="opt-keyname"></div>
+            <label class="field full">Provider
+              <select id="opt-llm-provider">
+                <option value="qwen3">qwen3</option>
+                <option value="gemma">gemma</option>
+                <option value="claude">claude</option>
+                <option value="codex">codex</option>
+                <option value="gemini">gemini</option>
+                <option value="openai-compatible">openai-compatible</option>
+              </select>
+            </label>
+            <label class="field full">Model <input id="opt-llm-model" type="text" autocomplete="off" /></label>
+            <label class="field full">Base URL <input id="opt-llm-baseurl" type="text" autocomplete="off" /></label>
+            <div id="opt-llm-keyname" class="opt-keyname"></div>
+          </section>
+          <section class="panel-section">
+            <div class="section-title">VPD (차량 검출)</div>
+            <label class="field full">Endpoint <input id="opt-vpd-endpoint" type="text" autocomplete="off" /></label>
+            <label class="field full">Det Path <input id="opt-vpd-detpath" type="text" autocomplete="off" /></label>
+            <div id="opt-vpd-keyname" class="opt-keyname"></div>
+          </section>
+          <section class="panel-section">
+            <div class="section-title">LPD (번호판 검출)</div>
+            <label class="field full">Endpoint <input id="opt-lpd-endpoint" type="text" autocomplete="off" /></label>
+            <label class="field full">Det Path <input id="opt-lpd-detpath" type="text" autocomplete="off" /></label>
+            <div id="opt-lpd-keyname" class="opt-keyname"></div>
+          </section>
+        </div>
+
+        <!-- Unity RPC 콘솔: 13020 → Unity 13110 프록시 호출(결정형 제어). controlToken 설정 시 토큰 필요. -->
+        <div class="an-grid">
+          <section class="panel-section">
+            <div class="section-title">Unity RPC 콘솔</div>
+            <label class="field full">Control Token (viewer.controlToken 설정 시)
+              <input id="viewer-token" type="text" autocomplete="off" placeholder="미설정이면 비워둠" />
+            </label>
+            <label class="field full">Method
+              <select id="rpc-method"></select>
+            </label>
+            <label class="field full">Params (JSON, 비우면 없음)
+              <textarea id="rpc-params" rows="4" autocomplete="off" placeholder='{ "cam": 1, "value": 10 }'></textarea>
+            </label>
+            <div class="toolbar">
+              <button id="rpc-reload">카탈로그 새로고침</button>
+              <button id="rpc-call" class="primary">호출</button>
+            </div>
+            <pre id="rpc-result" class="rpc-result"></pre>
+          </section>
+        </div>
+      </section>
+
+      <!-- DB 뷰어: 'DB' 탭에서 전체폭 표시. observations.sqlite 테이블 선택·검색·조회(읽기 전용). -->
+      <section id="db-view" class="analyze-view db-view" hidden>
+        <div class="analyze-head">
+          <div>
+            <h2>DB 뷰어</h2>
+            <p>observations.sqlite 테이블 조회(읽기 전용).</p>
+          </div>
+          <div class="toolbar">
+            <select id="db-table-select"></select>
+            <input id="db-search" type="search" placeholder="검색(전 컬럼)" />
+            <button id="db-prev">이전</button>
+            <button id="db-next">다음</button>
+            <span id="db-meta" class="muted"></span>
+          </div>
+        </div>
+        <div id="db-table" class="db-table-wrap"></div>
       </section>
     </main>
 
@@ -225,6 +382,34 @@
         <div class="modal-actions">
           <button id="cap-result-finalize" class="primary">최종화</button>
           <button id="cap-result-close">확인</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- floor ROI LLM 동작불가 경고 메시지 박스(런당 1회, 닫기). -->
+    <div id="floor-llm-warn-modal" class="modal" hidden>
+      <div class="modal-box floor-llm-warn-box">
+        <h3>⚠ 바닥 점유영역 자동 생성 경고</h3>
+        <div class="modal-body">
+          LLM이 동작하지 않아 바닥 점유영역을 자동(폴백)으로 생성했습니다.<br />
+          llm.config.json 확인이 필요합니다.
+        </div>
+        <div class="modal-actions">
+          <button id="floor-llm-warn-close" class="primary">확인</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 차량 점유율 LLM 동작불가 경고 메시지 박스(런당 1회, 닫기). -->
+    <div id="occ-llm-warn-modal" class="modal" hidden>
+      <div class="modal-box floor-llm-warn-box">
+        <h3>⚠ 차량 점유율 자동 판정 경고</h3>
+        <div class="modal-body">
+          LLM이 동작하지 않아 차량 점유율 판정을 저장하지 못했습니다.<br />
+          llm.config.json 확인이 필요합니다.
+        </div>
+        <div class="modal-actions">
+          <button id="occ-llm-warn-close" class="primary">확인</button>
         </div>
       </div>
     </div>

@@ -1,9 +1,11 @@
+import { join } from 'node:path';
 import { loadToolsConfig } from './config/toolsConfig.js';
 import { loadLlmConfig } from './config/llmConfig.js';
-import { CameraClient } from './clients/CameraClient.js';
+import { RpcCameraClient } from './clients/RpcCameraClient.js';
 import { VpdClient } from './clients/VpdClient.js';
 import { LpdClient } from './clients/LpdClient.js';
 import { Repository } from './store/Repository.js';
+import { SaveStore } from './store/SaveStore.js';
 import { SetupOrchestrator } from './setup/SetupOrchestrator.js';
 import { createPresetProvider } from './setup/presetProvider.js';
 import { AgentRuntime } from './brain/AgentRuntime.js';
@@ -12,9 +14,11 @@ import { buildSourceRegistry } from './viewer/sourceRegistry.js';
 import { SqliteStore } from './capture/SqliteStore.js';
 import { CheckpointReviewer } from './capture/CheckpointReviewer.js';
 import { FloorRoiReviewer } from './capture/FloorRoiReviewer.js';
+import { OccupancyReviewer } from './capture/OccupancyReviewer.js';
 import { CaptureJob } from './capture/CaptureJob.js';
 import { Finalizer } from './capture/Finalizer.js';
 import { PtzCalibrator } from './calibrate/PtzCalibrator.js';
+import { CRpcClient } from './clients/CRpcClient.js';
 import { loadExpectedFaces } from './setup/mapTargets.js';
 import { logger } from './util/logger.js';
 
@@ -23,10 +27,14 @@ async function main(): Promise<void> {
   const tools = loadToolsConfig();
   const llm = loadLlmConfig();
 
-  const camera = new CameraClient(tools.camera);
+  // Unity JSON-RPC(방식 B). 뷰어 RPC 콘솔 + 카메라 도구(13110 /rpc) 공용 — camera 이전에 생성해 주입 재사용.
+  const rpc = new CRpcClient(tools.unityRpc);
+  // 카메라: 죽은 13100 REST 대신 13110 RPC 로 동작(setPTZ/captureJPG/ping). 프리셋 PTZ 는 camerapos.json.
+  const camera = new RpcCameraClient({ rpc, cameraCfg: tools.camera, cameraposFile: tools.map.cameraposFile });
   const vpd = new VpdClient(tools.vpd);
   const lpd = new LpdClient(tools.lpd);
   const repo = new Repository(tools.store.dataDir);
+  const saveStore = new SaveStore(tools.store.saveDir, tools.store.reportsDir);
   const brain = new AgentRuntime(llm);
   const orchestrator = new SetupOrchestrator({ camera, vpd, lpd, repo, cfg: tools.setup, brain });
 
@@ -44,13 +52,17 @@ async function main(): Promise<void> {
   const floorReviewer = new FloorRoiReviewer({
     store: sqlite, brain, maxPerCheckpoint: llm.floorRoi?.maxPerCheckpoint,
   });
+  const occupancyReviewer = new OccupancyReviewer({ store: sqlite, brain });
   const captureJob = new CaptureJob({
-    camera, vpd, lpd, store: sqlite, reviewer, floorReviewer, cfg: tools.capture,
+    camera, vpd, lpd, store: sqlite, reviewer, floorReviewer, occupancyReviewer, brain, cfg: tools.capture,
     lpdEnabled: tools.setup.lpdEnabled, expectedByPreset,
+    placeRoiFile: join(tools.store.dataDir, tools.store.placeRoiFile),
   });
   const finalizer = new Finalizer({
     store: sqlite, repo, brain, cfg: tools.capture,
-    roiPadding: tools.setup.roiPadding, yBandTolerance: tools.setup.yBandTolerance, expectedByPreset,
+    roiPadding: tools.setup.roiPadding, yBandTolerance: tools.setup.yBandTolerance, expectedByPreset, saveStore,
+    placeRoiFile: join(tools.store.dataDir, tools.store.placeRoiFile),
+    camera,
   });
 
   // 주차면별 번호판 중심정렬·줌 PTZ 캘리브레이션(/calibrate/*). 결정형 비례제어 + LLM 자문(toggle).
@@ -60,11 +72,15 @@ async function main(): Promise<void> {
   const sources = tools.viewer.enabled ? buildSourceRegistry(tools) : undefined;
 
   const app = buildServer({
-    orchestrator, repo, camera, vpd, brain, mapFiles: tools.map, discovery: tools.discovery,
+    orchestrator, repo, camera, vpd, lpd, brain, mapFiles: tools.map, discovery: tools.discovery,
     presetProvider, refreshOnRun: tools.presetProvider.refreshOnRun,
-    captureJob, finalizer, sqlite, capture: tools.capture,
+    captureJob, finalizer, sqlite, capture: tools.capture, saveStore,
+    placeRoiFile: join(tools.store.dataDir, tools.store.placeRoiFile),
+    refFrameDir: join(tools.store.dataDir, 'refframes'),
+    ground: tools.ground,
     calibrator, calibrate: tools.calibrate,
-    viewer: tools.viewer, sources,
+    viewer: tools.viewer, sources, rpc,
+    dbFile: tools.capture.dbFile,
   });
   await app.listen({ port: tools.server.port, host: '0.0.0.0' });
   logger.info(

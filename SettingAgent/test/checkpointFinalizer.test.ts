@@ -1,7 +1,11 @@
 import { describe, it, expect, afterEach } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { CheckpointReviewer, clusterRef, advisoryLines } from '../src/capture/CheckpointReviewer.js';
 import { Finalizer } from '../src/capture/Finalizer.js';
 import { SqliteStore } from '../src/capture/SqliteStore.js';
+import { SaveStore } from '../src/store/SaveStore.js';
 import type { AggregatedSlot } from '../src/capture/types.js';
 import type { Repository } from '../src/store/Repository.js';
 import type { SetupArtifact } from '../src/domain/types.js';
@@ -16,14 +20,16 @@ import type { ToolsConfig } from '../src/config/toolsConfig.js';
  */
 
 const captureCfg: ToolsConfig['capture'] = {
-  defaultCount: 50, intervalMs: 1000, checkpointEvery: 10, dbFile: ':memory:',
-  clusterDist: 0.06, clusterMinSupport: 3, minConfidence: 0.5,
+  defaultCount: 50, intervalMs: 1000, moveIntervalMs: 1000, checkpointEvery: 10,
+  checkpointTriggerMode: 'rounds', checkpointIntervalMs: 60000, dbFile: ':memory:',
+  clusterDist: 0.06, clusterMinSupport: 3, minConfidence: 0.5, moveBeforeCapture: true,
 };
 
 const slot = (over: Partial<AggregatedSlot> = {}): AggregatedSlot => ({
   presetKey: '1:1', clusterId: 1, camIdx: 1, presetIdx: 1,
   x: 0.2, y: 0.2, w: 0.1, h: 0.1, support: 3, occupancyRate: 0.5,
-  plateX: null, plateY: null, plateW: null, plateH: null, status: 'candidate', ...over,
+  plateX: null, plateY: null, plateW: null, plateH: null, plateQuad: null,
+  confidence: 0, posSpread: 0, angleSpread: null, status: 'candidate', ...over,
 });
 
 const fakeRepo = (): { repo: Repository; saved: SetupArtifact[] } => {
@@ -192,6 +198,33 @@ describe('Finalizer 결정형 강등 (G4 — LLM off)', () => {
     const finalizer = new Finalizer({ store, repo, cfg: captureCfg, roiPadding: 0, yBandTolerance: 0.1, now: () => 'T' });
     const r = await finalizer.finalize(runId);
     expect(r.slots).toBe(1); // 노이즈 제외, 안정 1개만
+  });
+});
+
+describe('Finalizer 자동 스냅샷 저장(save/)', () => {
+  let dir: string | undefined;
+  afterEach(() => { if (dir) { rmSync(dir, { recursive: true, force: true }); dir = undefined; } });
+
+  it('saveStore 주입 → finalize 시 save/ 에 스냅샷 1건 생성(내용=artifact)', async () => {
+    const store = mem();
+    const runId = seedStableRun(store);
+    const { repo } = fakeRepo();
+    dir = mkdtempSync(join(tmpdir(), 'fin-save-'));
+    const saveStore = new SaveStore(dir);
+    const finalizer = new Finalizer({ store, repo, cfg: captureCfg, roiPadding: 0, yBandTolerance: 0.1, now: () => 'T', saveStore });
+    const r = await finalizer.finalize(runId);
+    const list = saveStore.list();
+    expect(list).toHaveLength(1);
+    expect(saveStore.load(list[0].name)).toEqual(r.artifact);
+  });
+
+  it('saveStore 미주입 → 예외 없이 finalize(기존 동작 불변)', async () => {
+    const store = mem();
+    const runId = seedStableRun(store);
+    const { repo } = fakeRepo();
+    const finalizer = new Finalizer({ store, repo, cfg: captureCfg, roiPadding: 0, yBandTolerance: 0.1, now: () => 'T' });
+    const r = await finalizer.finalize(runId);
+    expect(r.slots).toBe(1);
   });
 });
 

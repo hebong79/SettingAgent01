@@ -50,7 +50,7 @@ function mk(repo: Repository): { app: FastifyInstance; dir: string } {
   const dir = mkdtempSync(join(tmpdir(), 'mapput-static-'));
   writeFileSync(join(dir, 'index.html'), '<!doctype html><html><body>SPA</body></html>');
   const orchestrator = new SetupOrchestrator({ camera: fakeCamera(), vpd: fakeVpd(), repo, cfg: setupCfg, sleep: async () => {}, now: () => 'T' });
-  const sources = buildSourceRegistry({ camera: DEFAULT_TOOLS_CONFIG.camera, cameraSources: undefined });
+  const sources = buildSourceRegistry({ camera: DEFAULT_TOOLS_CONFIG.camera, cameraSources: undefined, unityRpc: DEFAULT_TOOLS_CONFIG.unityRpc, map: DEFAULT_TOOLS_CONFIG.map, cameraMode: 'simulator', realCamera: undefined });
   const app = buildServer({
     orchestrator, repo, camera: fakeCamera(), vpd: fakeVpd(),
     viewer: { enabled: true, allowMove: true, defaultFps: 3, staticDir: dir, controlToken: '' },

@@ -2,8 +2,10 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import Database from 'better-sqlite3';
 import { SqliteStore } from '../src/capture/SqliteStore.js';
 import type { AggregatedSlot } from '../src/capture/types.js';
+import type { NormalizedQuad } from '../src/domain/types.js';
 
 /**
  * 검증자(qa-tester): SqliteStore DAO (G2 — 적재/조회 단위테스트).
@@ -25,6 +27,10 @@ const aggSlot = (over: Partial<AggregatedSlot> = {}): AggregatedSlot => ({
   plateY: null,
   plateW: null,
   plateH: null,
+  plateQuad: null,
+  confidence: 0,
+  posSpread: 0,
+  angleSpread: null,
   status: 'candidate',
   ...over,
 });
@@ -184,6 +190,205 @@ describe('SqliteStore 집계 멱등 upsert (G2)', () => {
     expect(got.status).toBe('merged');
     // 좌표는 그대로(불변식).
     expect({ x: got.x, y: got.y, w: got.w, h: got.h }).toEqual({ x: 0.42, y: 0.43, w: 0.11, h: 0.12 });
+  });
+});
+
+// 검증자(qa-tester): quad 8컬럼 왕복 + 구스키마 마이그레이션 (설계 케이스 9, 핵심).
+describe('SqliteStore quad 왕복·구스키마 마이그레이션 (G2·설계 케이스 9)', () => {
+  const quad: NormalizedQuad = [
+    { x: 0.31, y: 0.34 },
+    { x: 0.36, y: 0.35 },
+    { x: 0.33, y: 0.38 },
+    { x: 0.30, y: 0.36 },
+  ];
+
+  it('detection: plate quad 8값 insert→get 왕복 일치; vehicle 은 quad undefined', () => {
+    store = new SqliteStore(':memory:');
+    const runId = store.createRun({ plannedCount: 1, intervalMs: 1, startedAt: 'T0' });
+    const obs = store.insertObservation({ runId, roundIdx: 1, camIdx: 1, presetIdx: 1, capturedAt: 'C', pan: 0, tilt: 0, zoom: 1, imgName: 'x' });
+    store.insertDetections(obs, 1, 1, [
+      { kind: 'vehicle', x: 0.3, y: 0.3, w: 0.1, h: 0.1, conf: 0.9 },
+      { kind: 'plate', x: 0.30, y: 0.34, w: 0.06, h: 0.04, conf: 0.8, quad },
+    ]);
+    const dets = store.getDetectionsForRun(runId);
+    const v = dets.find((d) => d.kind === 'vehicle')!;
+    const p = dets.find((d) => d.kind === 'plate')!;
+    expect(v.quad).toBeUndefined();       // vehicle 행은 quad NULL → undefined
+    expect(p.quad).toEqual(quad);         // plate quad 8값 정확 왕복(점순서 보존)
+  });
+
+  it('aggregated_slot: plateQuad 8값 왕복; null 은 null 로 복원', () => {
+    store = new SqliteStore(':memory:');
+    const runId = store.createRun({ plannedCount: 1, intervalMs: 1, startedAt: 'T0' });
+    store.replaceAggregatedSlots(runId, [
+      aggSlot({ clusterId: 1, plateX: 0.30, plateY: 0.34, plateW: 0.06, plateH: 0.04, plateQuad: quad }),
+      aggSlot({ clusterId: 2, x: 0.6, plateQuad: null }),
+    ]);
+    const got = store.getAggregatedSlots(runId);
+    expect(got.find((s) => s.clusterId === 1)!.plateQuad).toEqual(quad);
+    expect(got.find((s) => s.clusterId === 2)!.plateQuad).toBeNull();
+  });
+
+  it('구스키마(quad 컬럼 없는 파일 DB) 최초 오픈 시 ALTER TABLE 마이그레이션 → quad NULL 로 정상 read', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sqlite-mig-'));
+    try {
+      const dbPath = join(dir, 'legacy.sqlite');
+      // 1) quad 컬럼이 없는 "구 스키마" DB 를 직접 생성(신 SqliteStore 의 CREATE 문 없이).
+      const raw = new Database(dbPath);
+      raw.exec(`
+        CREATE TABLE capture_run (id INTEGER PRIMARY KEY AUTOINCREMENT, started_at TEXT, ended_at TEXT,
+          planned_count INTEGER, done_count INTEGER, interval_ms INTEGER, status TEXT, stop_reason TEXT);
+        CREATE TABLE observation (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER, round_idx INTEGER,
+          cam_idx INTEGER, preset_idx INTEGER, captured_at TEXT, pan REAL, tilt REAL, zoom REAL, img_name TEXT);
+        CREATE TABLE detection (id INTEGER PRIMARY KEY AUTOINCREMENT, observation_id INTEGER,
+          cam_idx INTEGER, preset_idx INTEGER, kind TEXT, x REAL, y REAL, w REAL, h REAL, conf REAL);
+        CREATE TABLE aggregated_slot (run_id INTEGER, preset_key TEXT, cluster_id INTEGER,
+          cam_idx INTEGER, preset_idx INTEGER, x REAL, y REAL, w REAL, h REAL, support INTEGER, occupancy_rate REAL,
+          plate_x REAL, plate_y REAL, plate_w REAL, plate_h REAL, status TEXT);
+      `);
+      // 구 데이터: quad 컬럼 없는 detection 1행.
+      const oid = raw.prepare(`INSERT INTO observation (run_id, round_idx, cam_idx, preset_idx, captured_at, pan, tilt, zoom, img_name)
+        VALUES (1,1,1,1,'C',0,0,1,'x')`).run().lastInsertRowid;
+      raw.prepare(`INSERT INTO detection (observation_id, cam_idx, preset_idx, kind, x, y, w, h, conf)
+        VALUES (?,1,1,'plate',0.3,0.34,0.06,0.04,0.8)`).run(oid);
+      raw.close();
+
+      // 2) 신 SqliteStore 로 재오픈 → addColumnsIfMissing 가 quad 8+8 컬럼 ALTER 추가(크래시 없음).
+      const s = new SqliteStore(dbPath);
+      store = s;
+      const dets = s.getDetectionsForRun(1);
+      expect(dets).toHaveLength(1);
+      expect(dets[0].kind).toBe('plate');
+      expect(dets[0].quad).toBeUndefined(); // 구DB quad 컬럼 = NULL → undefined(Finalizer rectToQuad 폴백 대상)
+      // 3) 마이그레이션 후 신규 insert(quad 포함)도 정상 왕복.
+      const oid2 = s.insertObservation({ runId: 1, roundIdx: 2, camIdx: 1, presetIdx: 1, capturedAt: 'C', pan: 0, tilt: 0, zoom: 1, imgName: 'y' });
+      s.insertDetections(oid2, 1, 1, [{ kind: 'plate', x: 0.30, y: 0.34, w: 0.06, h: 0.04, conf: 0.9, quad }]);
+      const after = s.getDetectionsForRun(1).find((d) => d.roundIdx === 2)!;
+      expect(after.quad).toEqual(quad);
+    } finally {
+      store?.close();
+      store = undefined;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// 검증자(qa-tester): 강건 통계 3필드(confidence/posSpread/angleSpread) 왕복·마이그레이션 하위호환.
+describe('SqliteStore 신뢰도 3필드 왕복·마이그레이션 (G2)', () => {
+  it('confidence/posSpread/angleSpread 왕복 일치(비영값)', () => {
+    store = new SqliteStore(':memory:');
+    const runId = store.createRun({ plannedCount: 1, intervalMs: 1, startedAt: 'T0' });
+    const slot = aggSlot({ confidence: 0.83, posSpread: 0.012, angleSpread: 0.05 });
+    store.replaceAggregatedSlots(runId, [slot]);
+    const [got] = store.getAggregatedSlots(runId);
+    expect(got.confidence).toBeCloseTo(0.83);
+    expect(got.posSpread).toBeCloseTo(0.012);
+    expect(got.angleSpread!).toBeCloseTo(0.05);
+    expect(got).toEqual(slot);
+  });
+
+  it('angleSpread null 은 null 로 복원', () => {
+    store = new SqliteStore(':memory:');
+    const runId = store.createRun({ plannedCount: 1, intervalMs: 1, startedAt: 'T0' });
+    store.replaceAggregatedSlots(runId, [aggSlot({ confidence: 0.5, posSpread: 0.02, angleSpread: null })]);
+    const [got] = store.getAggregatedSlots(runId);
+    expect(got.angleSpread).toBeNull();
+  });
+
+  it('구 aggregated_slot(신컬럼 없음) 재오픈 → ALTER 무크래시, read (0,0,null) 폴백', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sqlite-agg-mig-'));
+    try {
+      const dbPath = join(dir, 'legacy-agg.sqlite');
+      // 신뢰도 3컬럼·plate quad 컬럼이 없는 구 aggregated_slot 스키마 직접 생성.
+      const raw = new Database(dbPath);
+      raw.exec(`
+        CREATE TABLE aggregated_slot (run_id INTEGER, preset_key TEXT, cluster_id INTEGER,
+          cam_idx INTEGER, preset_idx INTEGER, x REAL, y REAL, w REAL, h REAL, support INTEGER, occupancy_rate REAL,
+          plate_x REAL, plate_y REAL, plate_w REAL, plate_h REAL, status TEXT);
+      `);
+      raw.prepare(`INSERT INTO aggregated_slot
+        (run_id, preset_key, cluster_id, cam_idx, preset_idx, x, y, w, h, support, occupancy_rate,
+         plate_x, plate_y, plate_w, plate_h, status)
+        VALUES (1,'1:1',1,1,1,0.2,0.2,0.1,0.1,3,0.5,NULL,NULL,NULL,NULL,'candidate')`).run();
+      raw.close();
+
+      const s = new SqliteStore(dbPath);
+      store = s;
+      const [got] = s.getAggregatedSlots(1);
+      expect(got.confidence).toBe(0);       // 구DB NULL → 0
+      expect(got.posSpread).toBe(0);        // 구DB NULL → 0
+      expect(got.angleSpread).toBeNull();   // 구DB NULL → null
+      expect(got.plateQuad).toBeNull();
+      // 마이그레이션 후 신규 insert(3필드 포함)도 정상 왕복.
+      s.replaceAggregatedSlots(1, [aggSlot({ confidence: 0.7, posSpread: 0.01, angleSpread: 0.03 })]);
+      const [after] = s.getAggregatedSlots(1);
+      expect(after.confidence).toBeCloseTo(0.7);
+      expect(after.angleSpread!).toBeCloseTo(0.03);
+    } finally {
+      store?.close();
+      store = undefined;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// 검증자(qa-tester): parking_slots preset PTZ(pan/tilt/zoom) 컬럼 마이그레이션 하위호환 (변경1).
+// 근거: 01_architect_plan.md 변경1 2단계 + 02_developer_changes.md 마이그레이션 1줄(addColumnsIfMissing).
+describe('SqliteStore parking_slots PTZ 마이그레이션 (변경1)', () => {
+  it('구 parking_slots(pan/tilt/zoom 없음) 재오픈 → ALTER 추가, 기존 행 NULL, 이후 신규 insert 정상', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sqlite-slot-mig-'));
+    try {
+      const dbPath = join(dir, 'legacy-slots.sqlite');
+      // 1) pan/tilt/zoom 컬럼이 없는 "구 스키마" parking_slots 를 직접 생성(구DB 재현).
+      const raw = new Database(dbPath);
+      raw.exec(`
+        CREATE TABLE capture_run (id INTEGER PRIMARY KEY AUTOINCREMENT, started_at TEXT, ended_at TEXT,
+          planned_count INTEGER, done_count INTEGER, interval_ms INTEGER, status TEXT, stop_reason TEXT);
+        CREATE TABLE parking_slots (
+          run_id INTEGER, cam_idx INTEGER, preset_idx INTEGER, preset_key TEXT, slot_idx INTEGER,
+          roi_json TEXT, vpd_json TEXT, lpd_json TEXT, occupied INTEGER, occupancy_rate REAL, updated_at TEXT,
+          PRIMARY KEY (run_id, preset_key, slot_idx));
+      `);
+      // 구 데이터: pan/tilt/zoom 컬럼 없는 행 1개(occupied=1).
+      raw.prepare(`INSERT INTO parking_slots
+        (run_id, cam_idx, preset_idx, preset_key, slot_idx, roi_json, vpd_json, lpd_json, occupied, occupancy_rate, updated_at)
+        VALUES (1,1,1,'1:1',1,'[{"x":0.2,"y":0.2}]',NULL,NULL,1,0.5,'T')`).run();
+      raw.close();
+
+      // 2) 신 SqliteStore 재오픈 → addColumnsIfMissing 가 pan/tilt/zoom ALTER 추가(크래시 없음).
+      const s = new SqliteStore(dbPath);
+      store = s;
+      // 컬럼이 실제로 추가되었는지 PRAGMA 로 확인.
+      const cols = new Set(
+        (s as unknown as { db: Database.Database }).db
+          .prepare(`PRAGMA table_info(parking_slots)`).all()
+          .map((r) => (r as { name: string }).name),
+      );
+      expect(cols.has('pan')).toBe(true);
+      expect(cols.has('tilt')).toBe(true);
+      expect(cols.has('zoom')).toBe(true);
+
+      // 기존 행은 신컬럼 NULL 로 읽힘(하위호환).
+      const [old] = s.getParkingSlots(1);
+      expect(old.slotIdx).toBe(1);
+      expect(old.pan).toBeNull();
+      expect(old.tilt).toBeNull();
+      expect(old.zoom).toBeNull();
+      expect(old.occupied).toBe(true); // 구 필드는 정상 유지
+
+      // 3) 마이그레이션 후 신규 insert(PTZ 포함)도 정상 왕복.
+      s.replaceParkingSlots(1, [{
+        camIdx: 1, presetIdx: 1, presetKey: '1:1', slotIdx: 1,
+        roiJson: '[{"x":0.2,"y":0.2}]', vpdJson: null, lpdJson: null,
+        occupied: 0, occupancyRate: null, pan: 7, tilt: 8, zoom: 9, updatedAt: 'T2',
+      }]);
+      const [after] = s.getParkingSlots(1);
+      expect([after.pan, after.tilt, after.zoom]).toEqual([7, 8, 9]);
+    } finally {
+      store?.close();
+      store = undefined;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

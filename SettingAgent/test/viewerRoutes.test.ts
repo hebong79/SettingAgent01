@@ -256,6 +256,19 @@ describe('viewerRoutes — /viewer/api/*', () => {
     }
   });
 
+  it('정적 서빙: GET /viewer/app.js → Cache-Control: no-store (루프4 캐시 무효화)', async () => {
+    const sources = new Map<string, CameraSource>([['sim', spySource()]]);
+    const { app, dir } = await mkApp({ sources });
+    try {
+      const r = await app.inject({ method: 'GET', url: '/viewer/app.js' });
+      expect(r.statusCode).toBe(200);
+      expect(r.headers['cache-control']).toBe('no-store');
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('GET /viewer → 302 redirect /viewer/', async () => {
     const sources = new Map<string, CameraSource>([['sim', spySource()]]);
     const { app, dir } = await mkApp({ sources });

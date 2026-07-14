@@ -34,7 +34,7 @@ function mk(enabled: boolean): { app: FastifyInstance; dir?: string } {
   }
   const dir = mkdtempSync(join(tmpdir(), 'venabled-static-'));
   writeFileSync(join(dir, 'index.html'), '<!doctype html><html><body>SPA</body></html>');
-  const sources = buildSourceRegistry({ camera: DEFAULT_TOOLS_CONFIG.camera, cameraSources: undefined });
+  const sources = buildSourceRegistry({ camera: DEFAULT_TOOLS_CONFIG.camera, cameraSources: undefined, unityRpc: DEFAULT_TOOLS_CONFIG.unityRpc, map: DEFAULT_TOOLS_CONFIG.map, cameraMode: 'simulator', realCamera: undefined });
   const app = buildServer({
     orchestrator, repo, camera: fakeCamera(), vpd: fakeVpd(),
     viewer: { enabled: true, allowMove: true, defaultFps: 3, staticDir: dir, controlToken: '' }, sources,
@@ -64,7 +64,7 @@ describe('viewer.enabled 토글', () => {
     ({ app, dir } = mk(true));
     const v = await app.inject({ method: 'GET', url: '/viewer/api/health' });
     expect(v.statusCode).toBe(200);
-    expect(JSON.parse(v.body)).toMatchObject({ status: 'ok', sources: ['sim'] });
+    expect(JSON.parse(v.body)).toMatchObject({ status: 'ok', sources: ['rpc'] });
     const h = await app.inject({ method: 'GET', url: '/health' });
     expect(h.statusCode).toBe(200);
     expect(JSON.parse(h.body).status).toBe('ok');

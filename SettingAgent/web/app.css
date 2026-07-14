@@ -268,6 +268,28 @@ input[type="radio"] {
   white-space: nowrap;
 }
 
+/* 육면체 높이 슬라이더(프로젝트 최초의 range 입력) + 지면모델 소스 배지. */
+.roi-toggles input[type='range'] {
+  width: 92px;
+  accent-color: #b47cff; /* 육면체 렌더 색과 일치. */
+}
+
+.roi-toggles #cuboid-h-val {
+  min-width: 44px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.ground-badge {
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.ground-badge.warn {
+  border-color: #d08a2a;
+  color: #e8b463;
+}
+
 .viewport-shell {
   display: grid;
   flex: 1 1 auto;
@@ -297,7 +319,7 @@ input[type="radio"] {
   position: absolute;
   left: 0;
   top: 0;
-  pointer-events: none;
+  pointer-events: auto; /* 오버레이에서 슬롯 선택·크기조정(코너/변) 드래그 수신 — none 이면 img 로 통과되어 편집 불가 */
 }
 
 .stream-controls {
@@ -567,11 +589,25 @@ body.resizing {
   color: #c6d0d8;
 }
 
+/* 슬롯 중간삽입 전역 인덱스 입력(요구 B). */
+.slot-insert-idx {
+  width: 3.5rem;
+}
+
 .map-msg {
   font-size: 12px;
   color: var(--faint);
   margin-bottom: 6px;
   min-height: 16px;
+}
+
+.map-msg.error {
+  color: #ff6b6b;
+}
+
+/* 카메라 PTZ 프리셋 편집(생성/수정/삭제) 컨테이너. */
+.preset-edit {
+  margin-top: 10px;
 }
 
 /* #7 전역 인덱스 수동 매핑. */
@@ -731,6 +767,12 @@ body.resizing {
   align-items: stretch;
 }
 
+/* 체크박스 라벨은 그리드 안에서도 가로 배치(체크박스 옆에 텍스트). */
+.capture-grid .field.check {
+  flex-direction: row;
+  align-items: center;
+}
+
 .cap-actions {
   margin-top: 10px;
 }
@@ -838,6 +880,15 @@ body.resizing {
 .cap-msg {
   margin-top: 6px;
   color: #9be7b5;
+}
+
+/* floor ROI LLM 동작불가 경고 메시지박스(모달) — 눈에 띄는 경고색. */
+.floor-llm-warn-box {
+  border: 2px solid var(--warn);
+}
+
+.floor-llm-warn-box h3 {
+  color: var(--warn);
 }
 
 /* ── 분석 탭 ─────────────────────────────────────────── */
@@ -960,6 +1011,81 @@ body.resizing {
   color: #b9c6d1;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
+}
+
+/* ④ 옵션(설정) 페이지 */
+.opt-restart-banner {
+  padding: 8px 12px;
+  border: 1px solid var(--warn);
+  border-radius: 6px;
+  color: var(--warn);
+  background: rgba(255, 214, 10, 0.08);
+  font-size: 13px;
+}
+
+.opt-msg {
+  color: var(--muted);
+  font-size: 13px;
+  min-height: 16px;
+}
+
+.opt-keyname {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 4px;
+}
+
+/* Unity RPC 콘솔 결과(JSON pre) */
+.rpc-result {
+  margin-top: 8px;
+  padding: 8px;
+  max-height: 220px;
+  overflow: auto;
+  background: var(--bg-soft, #1113);
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* §08 DB 뷰어(읽기 전용 테이블) */
+.db-table-wrap {
+  flex: 1 1 auto;
+  overflow: auto;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.db-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.db-table th,
+.db-table td {
+  border-bottom: 1px solid var(--line-soft);
+  padding: 5px 8px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.db-table th {
+  position: sticky;
+  top: 0;
+  background: var(--surface-3);
+  color: #cbd5df;
+  font-size: 12px;
+}
+
+.db-table tbody tr:hover {
+  background: rgba(47, 140, 255, 0.08);
+}
+
+.db-view #db-search {
+  min-width: 200px;
 }
 
 @media (max-width: 980px) {

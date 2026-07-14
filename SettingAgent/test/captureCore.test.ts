@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 // 순수 ESM 모듈(브라우저 API 미참조) 직접 import. 타입은 core.d.ts 제공.
-import { captureProgress, mapAdvisory, pollPlan } from '../web/core.js';
+import { captureProgress, mapAdvisory, pollPlan, captureUiState } from '../web/core.js';
 
 /**
  * 검증자(qa-tester): SettingViewer core.js 정밀수집 순수로직 (G5).
@@ -64,5 +64,85 @@ describe('pollPlan (폴링 여부·간격)', () => {
   it('intervalMs 기본 2000·주입값 반영', () => {
     expect(pollPlan('running').intervalMs).toBe(2000);
     expect(pollPlan('running', 500).intervalMs).toBe(500);
+  });
+});
+
+describe('captureUiState (F1 — 정지버튼 UI 의도·라우트 거부조건 대칭)', () => {
+  // 백엔드 라우트 거부조건과의 대칭:
+  //   stop 400 `not running`  ↔ stopDisabled = state !== 'running'
+  //   finalize 409 active      ↔ finalizeDisabled = active(running/stopping/finalizing)
+  //   중복 start               ↔ startDisabled = active
+
+  it("running → 정지만 허용(stopDisabled=false), start/finalize 금지", () => {
+    expect(captureUiState('running')).toEqual({
+      startDisabled: true,
+      stopDisabled: false,
+      finalizeDisabled: true,
+      suppressFrameMsg: false,
+      stoppingNote: false,
+    });
+  });
+
+  it("stopping → 전 버튼 비활성 + 프레임틱 문구 억제 + '정지 중…' 안내", () => {
+    expect(captureUiState('stopping')).toEqual({
+      startDisabled: true,
+      stopDisabled: true,
+      finalizeDisabled: true,
+      suppressFrameMsg: true,
+      stoppingNote: true,
+    });
+  });
+
+  it('finalizing → 전 버튼 비활성(문구 억제/안내는 없음)', () => {
+    expect(captureUiState('finalizing')).toEqual({
+      startDisabled: true,
+      stopDisabled: true,
+      finalizeDisabled: true,
+      suppressFrameMsg: false,
+      stoppingNote: false,
+    });
+  });
+
+  it('비활성 상태(idle/done/stopped/error) → start/finalize 허용, stop 금지', () => {
+    const expected = {
+      startDisabled: false,
+      stopDisabled: true,
+      finalizeDisabled: false,
+      suppressFrameMsg: false,
+      stoppingNote: false,
+    };
+    for (const s of ['idle', 'done', 'stopped', 'error']) {
+      expect(captureUiState(s)).toEqual(expected);
+    }
+  });
+
+  it('대칭 불변식: stopDisabled 는 running 에서만 false, 그 외 전부 true', () => {
+    for (const s of ['idle', 'stopping', 'finalizing', 'done', 'stopped', 'error']) {
+      expect(captureUiState(s).stopDisabled).toBe(true);
+    }
+    expect(captureUiState('running').stopDisabled).toBe(false);
+  });
+
+  it('대칭 불변식: active(running/stopping/finalizing) 에서만 start/finalize 금지', () => {
+    for (const s of ['running', 'stopping', 'finalizing']) {
+      const ui = captureUiState(s);
+      expect(ui.startDisabled).toBe(true);
+      expect(ui.finalizeDisabled).toBe(true);
+    }
+    for (const s of ['idle', 'done', 'stopped', 'error']) {
+      const ui = captureUiState(s);
+      expect(ui.startDisabled).toBe(false);
+      expect(ui.finalizeDisabled).toBe(false);
+    }
+  });
+
+  it('불변식: stopping 에서만 suppressFrameMsg·stoppingNote 활성(프레임틱 덮어쓰기 방지)', () => {
+    for (const s of ['idle', 'running', 'finalizing', 'done', 'stopped', 'error']) {
+      const ui = captureUiState(s);
+      expect(ui.suppressFrameMsg).toBe(false);
+      expect(ui.stoppingNote).toBe(false);
+    }
+    expect(captureUiState('stopping').suppressFrameMsg).toBe(true);
+    expect(captureUiState('stopping').stoppingNote).toBe(true);
   });
 });
