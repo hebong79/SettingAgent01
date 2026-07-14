@@ -1,0 +1,173 @@
+/**
+ * 리더 경험적 검증 (goal/loop B 모드) — 임시 하네스. 검증 후 삭제한다.
+ * 모킹 0. 실제 VPD seg REST + 실제 프레임 + 실제 지면모델.
+ *
+ * G1 접지선 정합  : 접지점이 슬롯 안인가 + 슬롯중앙과의 거리(m)
+ * G2 재투영 정합  : 육면체 재투영 bbox vs VPD bbox IoU >= 0.7
+ * G3 육안         : 육면체 픽셀 8점을 JSON 덤프 -> python/cv2 오버레이
+ * G4 앵커 반응표  : 슬롯 ROI 를 지면에서 4종 이동 -> 지표 반응
+ */
+import { readFile, writeFile } from 'node:fs/promises';
+import { buildGroundInputs } from './src/ground/groundInputs.js';
+import { estimateGroundModels } from './src/ground/groundModel.js';
+import { parseCameraViews } from './src/setup/mapTargets.js';
+import { buildVehicleCuboids, type SegVehicle } from './src/ground/contact.js';
+import { computeAnchorMetrics } from './src/ground/anchor.js';
+import { filterVehiclesOnPlace } from './src/capture/onPlaceFilter.js';
+import {
+  projectCuboidPixels, backprojectToGround, projectGroundToPixel, add3, scale3,
+} from './src/ground/project.js';
+import {
+  DEFAULT_CONTACT_OPTIONS, DEFAULT_ANCHOR_OPTIONS, type Px, type Vec3,
+} from './src/ground/contactTypes.js';
+
+const GROUND = { enabled: true, minDepthEdgePx: 250, slotWidthM: 2.5, slotDepthM: 5.0 };
+const VPD_SEG = 'http://192.168.0.125:9081/vpd/api/v2/seg/imgupload';
+const CAM = 1;
+
+const raw = JSON.parse(await readFile('data/Place01/PtzCamRoi.json', 'utf8'));
+const views = parseCameraViews(JSON.parse(await readFile('config/camerapos.json', 'utf8')));
+const camInput = buildGroundInputs(raw, views).find((c) => c.camIdx === CAM)!;
+const est = estimateGroundModels(camInput, GROUND);
+console.log(`지면모델: fovBaseV=${est.fovBaseV?.toFixed(3)}° models=${est.models.length} issues=${est.issues.length}`);
+
+/** PtzCamRoi 원본 픽셀 슬롯 폴리곤(프리셋별). */
+function slotsPx(presetIdx: number): Px[][] {
+  const p = raw.cameras[0].presets.find((x: any) => x.preset_idx === presetIdx);
+  return (p?.parking_spaces ?? []).map((s: any) => s.points.map(([x, y]: [number, number]) => ({ x, y })));
+}
+
+/** 실제 VPD seg 호출. */
+async function segReal(jpg: Buffer): Promise<{ masks: number[][][]; bboxes: number[][]; confs: number[]; classes: string[] }> {
+  const form = new FormData();
+  form.append('file', new Blob([new Uint8Array(jpg)], { type: 'image/jpeg' }), 'f.jpg');
+  const res = await fetch(VPD_SEG, { method: 'POST', body: form });
+  if (!res.ok) throw new Error(`VPD seg HTTP ${res.status}`);
+  const b: any = await res.json();
+  return { masks: b.masks ?? [], bboxes: b.bboxes ?? [], confs: b.confidences ?? [], classes: b.classes ?? [] };
+}
+
+const iou = (a: number[], b: number[]) => {
+  const x1 = Math.max(a[0], b[0]), y1 = Math.max(a[1], b[1]);
+  const x2 = Math.min(a[2], b[2]), y2 = Math.min(a[3], b[3]);
+  const i = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+  const ua = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - i;
+  return ua <= 0 ? 0 : i / ua;
+};
+const med = (v: number[]) => { if (!v.length) return NaN; const s = [...v].sort((p, q) => p - q); const m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
+
+/** 슬롯 폴리곤을 지면에서 (du, dw) 만큼 평행이동한 새 픽셀 폴리곤. */
+function shiftSlotsOnGround(polys: Px[][], g: any, u: Vec3, w: Vec3, du: number, dw: number): Px[][] {
+  const d: Vec3 = add3(scale3(u, du), scale3(w, dw));
+  const out: Px[][] = [];
+  for (const poly of polys) {
+    const np: Px[] = [];
+    for (const p of poly) {
+      const X = backprojectToGround(p, g);
+      if (!X) return polys;                       // 역투영 실패 -> 원본 유지(보수적)
+      const q = projectGroundToPixel(add3(X, d), g);
+      if (!q) return polys;
+      np.push(q);
+    }
+    out.push(np);
+  }
+  return out;
+}
+
+const overlay: any = {};
+const g1rows: string[] = [], g2rows: string[] = [], g4rows: string[] = [];
+
+for (const preset of [1, 2, 3]) {
+  const model = est.models.find((m) => m.presetIdx === preset);
+  if (!model) { console.log(`preset${preset}: 지면모델 없음 — skip`); continue; }
+  const jpg = await readFile(`data/refframes/cam${CAM}_p${preset}.jpg`);
+  const s = await segReal(jpg);
+  const slots = slotsPx(preset);
+
+  // conf 하한 + ★ 주차면 필터(모드 A) — 프로덕션 filterVehiclesOnPlace 재사용.
+  // 이걸 안 걸면 원경(타 프리셋 슬롯) 차량이 들어와 앵커 지표를 오염시킨다.
+  const { imgW, imgH } = model;
+  const nPolys = slots.map((poly) => poly.map((p) => ({ x: p.x / imgW, y: p.y / imgH })));
+  const cand = s.masks.map((m, i) => ({
+    i,
+    rect: (() => {
+      const b = s.bboxes[i];
+      return { x: b[0] / imgW, y: b[1] / imgH, w: (b[2] - b[0]) / imgW, h: (b[3] - b[1]) / imgH };
+    })(),
+    mask: m.map(([x, y]) => ({ x, y })),
+    cls: s.classes[i] ?? 'car',
+    confidence: s.confs[i] ?? 0,
+  })).filter((v) => v.confidence >= 0.5 && v.mask.length >= 3);
+  const onPlace = filterVehiclesOnPlace(cand, nPolys);
+  const vehicles: SegVehicle[] = onPlace.kept.map((v) => ({ mask: v.mask, cls: v.cls, confidence: v.confidence }));
+  const keptIdx = onPlace.kept.map((v) => v.i);
+  console.log(`  [주차면 필터] conf통과 ${cand.length} → 주차면 위 ${vehicles.length} (제외 ${onPlace.filteredOut}, degraded=${onPlace.degraded})`);
+
+  const r = buildVehicleCuboids({
+    vehicles, slotPolysPx: slots, ground: model,
+    slotWidthM: GROUND.slotWidthM, slotDepthM: GROUND.slotDepthM,
+    opts: DEFAULT_CONTACT_OPTIONS,
+  });
+
+  console.log(`\n===== preset${preset} =====`);
+  console.log(`VPD 검출 ${s.masks.length} → conf>=0.5 ${vehicles.length} → 육면체 ${r.cuboids.length} / 거부 ${r.rejected.length}`);
+  console.log(`슬롯축 spreadDeg=${r.axes?.spreadDeg?.toFixed(2) ?? 'null'}  issues=${JSON.stringify(r.issues)}`);
+
+  // ── G1: 접지점 ↔ 슬롯 (지면 m)
+  const slotsG = slots.map((poly) => poly.map((p) => backprojectToGround(p, model)).filter(Boolean) as Vec3[]);
+  const slotCtr = slotsG.map((pts) => scale3(pts.reduce((a, b) => add3(a, b), [0, 0, 0] as Vec3), 1 / pts.length));
+  for (const c of r.cuboids) {
+    const dists = slotCtr.map((sc) => Math.hypot(...(([0, 1, 2] as const).map((k) => c.centerGround[k] - sc[k]) as [number, number, number])));
+    const dmin = Math.min(...dists);
+    g1rows.push(`| p${preset} | #${c.boxIdx} | ${c.confidence.toFixed(2)} | ${dmin.toFixed(2)} | ${(c.cleanRatio * 100).toFixed(0)}% | ${(c.inlierRatio * 100).toFixed(0)}% | ${c.widthM.toFixed(2)}/${c.heightM.toFixed(2)} | ${c.source.W}/${c.source.H} | ${c.issues.join(';') || '-'} |`);
+  }
+
+  // ── G2: 재투영 IoU
+  const ious: number[] = [];
+  overlay[`p${preset}`] = [];
+  for (const c of r.cuboids) {
+    const px = projectCuboidPixels(c.floorGround, c.heightM, model);
+    if (!px) continue;
+    const xs = px.map((p) => p.x), ys = px.map((p) => p.y);
+    const rb = [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+    const vb = s.bboxes[keptIdx[c.boxIdx]];
+    const v = iou(rb, vb);
+    ious.push(v);
+    overlay[`p${preset}`].push({ px: px.map((p) => [Math.round(p.x), Math.round(p.y)]), vpd: vb, iou: v, conf: c.confidence });
+  }
+  g2rows.push(`| p${preset} | ${r.cuboids.length} | ${ious.length ? med(ious).toFixed(3) : '-'} | ${ious.length ? Math.min(...ious).toFixed(3) : '-'} | ${ious.filter((v) => v >= 0.7).length}/${ious.length} |`);
+
+  // ── G4: 앵커 반응표 (실데이터)
+  if (r.axes) {
+    const { u, w } = r.axes;
+    const base = computeAnchorMetrics(r.cuboids, slots, model, r.axes, DEFAULT_ANCHOR_OPTIONS);
+    const cases: [string, number, number][] = [
+      ['기준(무변환)', 0, 0], ['폭축 +2.5m', 2.5, 0], ['폭축 +1.25m', 1.25, 0],
+      ['깊이축 +2.5m', 0, 2.5], ['대각 +1.5/+1.5m', 1.5, 1.5],
+    ];
+    for (const [name, du, dw] of cases) {
+      const sp = du === 0 && dw === 0 ? slots : shiftSlotsOnGround(slots, model, u, w, du, dw);
+      const a = computeAnchorMetrics(r.cuboids, sp, model, r.axes, DEFAULT_ANCHOR_OPTIONS);
+      const f = (x: number | null) => (x === null ? 'null' : x.toFixed(3));
+      g4rows.push(`| p${preset} | ${name} | ${f(a.depthDevM)} | ${f(a.phaseDevM)} | ${f(a.unmatchedRate)} | ${a.n} |`);
+    }
+    void base;
+  }
+}
+
+await writeFile('../_leader_overlay.json', JSON.stringify(overlay), 'utf8');
+
+console.log('\n\n## G1 접지선 정합 (슬롯중앙까지 거리 m)');
+console.log('| 프리셋 | 차량 | conf | 슬롯중앙거리(m) | clean | inlier | W/H(m) | 출처 | issues |');
+console.log('|---|---|---|---|---|---|---|---|---|');
+g1rows.forEach((r) => console.log(r));
+
+console.log('\n## G2 재투영 IoU (기준 >= 0.7)');
+console.log('| 프리셋 | 육면체 | IoU median | IoU min | >=0.7 |');
+console.log('|---|---|---|---|---|');
+g2rows.forEach((r) => console.log(r));
+
+console.log('\n## G4 ★ 앵커 반응표 (실데이터)');
+console.log('| 프리셋 | 인위 변환 | depthDevM | phaseDevM | unmatchedRate | n |');
+console.log('|---|---|---|---|---|---|');
+g4rows.forEach((r) => console.log(r));

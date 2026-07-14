@@ -18,6 +18,8 @@ const CameraSchema = z.object({
 export const VpdSchema = z.object({
   endpoint: z.string().url(),
   detPath: z.string().startsWith('/'),
+  /** 세그멘테이션(마스크) 경로. 미설정이면 seg 기능 비활성(GET /capture/vehicle-cuboids → 404). */
+  segPath: z.string().startsWith('/').optional(),
   apiKeyEnv: z.string().optional(),
   timeoutMs: z.number().int().positive(),
   maxRetries: z.number().int().nonnegative(),
@@ -256,7 +258,7 @@ export type ToolsConfig = z.infer<typeof ToolsConfigSchema>;
 
 export const DEFAULT_TOOLS_CONFIG: ToolsConfig = {
   camera: { baseUrl: 'http://localhost:13100', imageTimeoutMs: 7000, moveTimeoutMs: 3000, zoomMin: 1.0, zoomMax: 36.0 },
-  vpd: { endpoint: 'http://127.0.0.1:9081', detPath: '/vpd/api/v2/det/imgupload', apiKeyEnv: 'VPD_API_KEY', timeoutMs: 8000, maxRetries: 3 },
+  vpd: { endpoint: 'http://127.0.0.1:9081', detPath: '/vpd/api/v2/det/imgupload', segPath: '/vpd/api/v2/seg/imgupload', apiKeyEnv: 'VPD_API_KEY', timeoutMs: 8000, maxRetries: 3 },
   lpd: { endpoint: 'http://127.0.0.1:9082', detPath: '/lpd/api/v1/imgupload', apiKeyEnv: 'LPD_API_KEY', timeoutMs: 8000, maxRetries: 3 },
   setup: {
     presetSettleMs: 1000, betweenPresetMs: 500, minConfidence: 0.5, roiPadding: 0.05, yBandTolerance: 0.1,

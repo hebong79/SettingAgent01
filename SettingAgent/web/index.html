@@ -45,12 +45,16 @@
             <label title="주차면을 3D 육면체로 표시(지면모델 기반). 기존 바닥 ROI 는 그대로 유지">
               <input id="roi-cuboid" type="checkbox" /> 육면체
             </label>
+            <label title="차량을 3D 육면체로 표시(VPD seg 마스크 접지선 기반). 켤 때 현재 프리셋을 1회 촬영·검출한다">
+              <input id="roi-vcuboid" type="checkbox" /> 차량육면체
+            </label>
             <label class="field compact" title="육면체 높이(m). 승용차 ≈ 1.5m">
               높이
               <input id="cuboid-h" type="range" min="0.5" max="3.0" step="0.05" value="1.5" />
               <span id="cuboid-h-val">1.5m</span>
             </label>
             <span id="ground-badge" class="badge ground-badge" title="지면모델 산출 근거">지면모델: 없음</span>
+            <span id="anchor-badge" class="badge ground-badge" hidden title="2 DOF 앵커 지표(차량 접지선 vs 슬롯 격자)">앵커: —</span>
             <button id="det-delete" disabled title="선택한 검출 박스 삭제(임시·메모리만) — Delete/Backspace, Esc 해제">검출 삭제</button>
             <button id="roi-clear" title="화면에 그려진 주차면·선택 표시 초기화">표시 초기화</button>
           </div>

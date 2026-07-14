@@ -16,6 +16,10 @@ import type { SetupTarget } from '../setup/SetupOrchestrator.js';
 import { loadSetupTargets, viewsToTargets, parseCameraViews, type MapFiles } from '../setup/mapTargets.js';
 import { buildGroundInputs } from '../ground/groundInputs.js';
 import { estimateGroundModels } from '../ground/groundModel.js';
+import { buildVehicleCuboids, type SegVehicle } from '../ground/contact.js';
+import { computeAnchorMetrics } from '../ground/anchor.js';
+import { filterVehiclesOnPlace } from '../capture/onPlaceFilter.js';
+import { DEFAULT_ANCHOR_OPTIONS, DEFAULT_CONTACT_OPTIONS } from '../ground/contactTypes.js';
 import type { GroundModel } from '../ground/types.js';
 import { writeCamerapos } from '../setup/cameraposWriter.js';
 import type { PresetProvider } from '../setup/presetProvider.js';
@@ -426,6 +430,137 @@ export function registerCaptureRoutes(app: FastifyInstance, deps: CaptureRouteDe
       return { error: e.code === 'ENOENT' ? 'PtzCamRoi.json 없음' : 'ground-model 산출 실패', detail: e.message };
     }
   });
+
+  // ★ 차량 3D 육면체(VPD seg 마스크 접지선 기반) + 2 DOF 앵커 지표 — 신규·가산 라우트(로드맵 5단계).
+  //   기존 경로 무변경: CaptureJob 은 detect() 를 계속 쓴다 → **마스크가 DB 로 흐르지 않는다**(점유 회귀 0).
+  //   404: vpd.segPath 미배선 / ground·place-roi 미설정. 그 외 실패는 전부 200 + issues·summary 로 드러난다.
+  if (deps.camera && deps.vpd) {
+    const { camera, vpd } = deps;
+    app.get('/capture/vehicle-cuboids', async (req, reply) => {
+      if (!vpd.canSegment()) {
+        reply.code(404);
+        return { error: 'vpd.segPath 미설정 — 세그멘테이션 미배선' };
+      }
+      if (!deps.placeRoiFile || !deps.ground?.enabled) {
+        reply.code(404);
+        return { error: 'ground/place-roi 미설정' };
+      }
+      const q = req.query as { cam?: string; preset?: string; onPlace?: string };
+      const cam = Number(q.cam);
+      const preset = Number(q.preset);
+      const onPlace = q.onPlace === undefined ? true : q.onPlace !== '0'; // 모드 A 기본 on(§D).
+      if (!Number.isInteger(cam) || cam <= 0 || !Number.isInteger(preset) || preset <= 0) {
+        reply.code(400);
+        return { error: 'invalid cam/preset (1-based 정수)' };
+      }
+      const ground = deps.ground;
+      try {
+        // 지면모델: /capture/ground-model 과 **같은 경로**로 산출(이중구현 금지). Unity camera 블록 미사용(C3).
+        const raw = JSON.parse(await readFile(deps.placeRoiFile, 'utf8'));
+        let views: ReturnType<typeof parseCameraViews> = [];
+        if (deps.mapFiles?.cameraposFile) {
+          try {
+            views = parseCameraViews(JSON.parse(await readFile(deps.mapFiles.cameraposFile, 'utf8')));
+          } catch {
+            /* camerapos 없음 → zoom 미상 강등(모델 issues 에 기록됨) */
+          }
+        }
+        let model: GroundModel | undefined;
+        for (const camInput of buildGroundInputs(raw, views)) {
+          if (camInput.camIdx !== cam) continue;
+          model = estimateGroundModels(camInput, ground).models.find((m) => m.presetIdx === preset);
+        }
+        if (!model) {
+          // #12 지면모델 없음 → 육면체 미산출(기존 정책과 동일). 조용히 빈 배열이 아니라 사유를 남긴다.
+          return {
+            cam,
+            preset,
+            cuboids: [],
+            rejected: [],
+            anchor: { depthDevM: null, phaseDevM: null, unmatchedRate: null, n: 0, issues: [] },
+            summary: { detected: 0, cuboidCount: 0, rejectedCount: 0, segDegraded: false, maskMismatch: 0 },
+            issues: [`cam${cam} preset${preset} 지면모델 없음 — 육면체 미산출`],
+          };
+        }
+
+        // 슬롯 폴리곤(정규화) → 원본 픽셀. 지면모델은 원본 픽셀에서만 성립한다(groundModel §1-2).
+        const place = await loadNormalizedPlaceRoi(deps.placeRoiFile);
+        const polysNorm = place?.byPreset.get(`${cam}:${preset}`)?.map((s) => s.points) ?? null;
+        const slotPolysPx = (polysNorm ?? []).map((pts) =>
+          pts.map((p) => ({ x: p.x * model!.imgW, y: p.y * model!.imgH })),
+        );
+
+        const img = await camera.requestImage(cam, preset);
+        const seg = await vpd.segment(img.jpg); // 500(검출 0대) → 빈 배열 강등(throw 없음).
+        const withMask = seg.boxes.filter((b) => b.mask);
+        const toPx = (b: (typeof withMask)[number]): SegVehicle => ({
+          vpdIdx: b.vpdIdx, // ★ 원본 VPD 검출 인덱스 — 마스크 drop(VpdClient)·주차면 필터(아래)를 통과해 보존된다.
+          mask: b.mask!.map((p) => ({ x: p.x * model!.imgW, y: p.y * model!.imgH })),
+          cls: b.cls,
+          confidence: b.confidence,
+          bboxPx: {
+            x1: b.rect.x * model!.imgW,
+            y1: b.rect.y * model!.imgH,
+            x2: (b.rect.x + b.rect.w) * model!.imgW,
+            y2: (b.rect.y + b.rect.h) * model!.imgH,
+          },
+        });
+        const allVehicles = withMask.map(toPx); // ★ 필터 **전** 전량 — 가림 배제([2])의 근거.
+
+        // [0.5] 주차면 필터(모드 A) — 원경·통행 차량이 앵커를 오염시키는 것을 막는다(§D).
+        //   기존 filterVehiclesOnPlace 재사용(신규 기하 0줄). rect 기반이므로 seg 응답에 그대로 걸린다.
+        //   폴리곤 부재 → 전량 통과 + degraded(드롭 금지 — 기존 정책 동일).
+        const filt = onPlace
+          ? filterVehiclesOnPlace(
+              withMask.map((b, i) => ({ rect: b.rect, i })),
+              polysNorm,
+            )
+          : { kept: withMask.map((b, i) => ({ rect: b.rect, i })), filteredOut: 0, degraded: false };
+        const vehicles: SegVehicle[] = filt.kept.map((k) => allVehicles[k.i]); // ★ 같은 배열 참조 유지(자기 제외 규약).
+
+        const built = buildVehicleCuboids({
+          vehicles,
+          occluderMasks: allVehicles.map((v) => v.mask), // ⚠️ 필터 전 전량(필터로 뺀 차도 가리기는 한다).
+          slotPolysPx,
+          ground: model,
+          slotWidthM: ground.slotWidthM,
+          slotDepthM: ground.slotDepthM,
+          opts: DEFAULT_CONTACT_OPTIONS,
+        });
+        const anchor = computeAnchorMetrics(
+          built.cuboids,
+          slotPolysPx,
+          model,
+          built.axes,
+          { ...DEFAULT_ANCHOR_OPTIONS, periodM: ground.slotWidthM },
+        );
+        return {
+          cam,
+          preset,
+          imgW: model.imgW,
+          imgH: model.imgH,
+          cuboids: built.cuboids,
+          rejected: built.rejected,
+          anchor,
+          summary: {
+            detected: allVehicles.length,
+            onPlace,
+            kept: vehicles.length,
+            filteredOut: filt.filteredOut,
+            onPlaceDegraded: filt.degraded,
+            cuboidCount: built.cuboids.length,
+            rejectedCount: built.rejected.length,
+            segDegraded: seg.segDegraded,
+            maskMismatch: seg.maskMismatch,
+          },
+          issues: [...built.issues, ...model.issues],
+        };
+      } catch (err) {
+        reply.code(502);
+        return { error: 'vehicle-cuboids failed', detail: err instanceof Error ? err.message : String(err) };
+      }
+    });
+  }
 
   // 주차면 자동보정 기준 프레임 저장·상호상관(§04). camera+refFrameDir 주입 시에만 등록(가산).
   if (deps.camera && deps.refFrameDir) {

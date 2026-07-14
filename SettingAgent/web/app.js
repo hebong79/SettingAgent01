@@ -99,6 +99,8 @@ const state = {
   dbTotal: 0, // 최근 조회 total(prev/next 활성화 판정).
   groundByKey: {}, // cam:preset → 지면모델(GET /capture/ground-model). 육면체 투영의 유일한 근거(추정은 서버 소유).
   groundLoaded: false, // 지면모델 1회 로드 가드(실패해도 세션 1회).
+  vcuboidByKey: {}, // cam:preset → 차량 육면체 응답(GET /capture/vehicle-cuboids). 토글 켤 때만 로드(카메라 1회 촬영).
+  vcuboidLoading: new Set(), // 중복 요청 가드(프리셋 키 단위).
 };
 
 const DB_LIMIT = 200; // DB 뷰어 페이지 크기(서버 clamp 상한 1000 내).
@@ -265,7 +267,9 @@ function drawRoiOverlay() {
   drawFileFloorRoi(ctx); // 파일 기반 바닥 ROI(PtzCamRoi.json) — 파일 모드 바닥 레이어 → mapping 가드 이전.
   drawDetectOverlay(ctx); // 라이브 VPD/LPD 검출 오버레이(§04) — 수집 중/미최종화에도 표시 → mapping 가드 이전.
   drawCuboidOverlay(ctx); // 3D 육면체(가산 레이어) — 산출물 없이도(수집 중/파일 모드) 그린다 → mapping 가드 이전.
+  drawVehicleCuboidOverlay(ctx); // 차량 3D 육면체(VPD seg 접지선) — 토글 기본 off → 끄면 기존 렌더와 픽셀 동일.
   updateGroundBadge(); // 어느 지면모델이 표시 중인지 항상 안다(소스 배지).
+  updateAnchorBadge(); // 2 DOF 앵커 지표(차량 접지선 vs 슬롯 격자).
   if (state.roiHidden || !state.mapping) return; // 초기화/수집 중엔 ROI(차량/번호판/바닥) 표시 안 함.
   const key = presetKey(state.cam, state.preset);
   const showVehicle = $('roi-vehicle').checked;
@@ -442,6 +446,110 @@ function drawCuboidOverlay(ctx) {
   if (skipped && !cuboidWarned.has(key)) {
     cuboidWarned.add(key);
     console.warn(`[Cuboid] ${key}: ${skipped}개 면이 퇴화(지평선 위/모델 부적합) — 육면체 미표시`);
+  }
+}
+
+// --- 차량 3D 육면체(VPD seg 접지선) + 2 DOF 앵커 --------------------------
+/**
+ * 차량 육면체 오버레이 — **가산 레이어**(#roi-vcuboid off 면 기존 렌더와 픽셀 동일).
+ * 바닥 quad·높이는 **서버**(GET /capture/vehicle-cuboids)가 산출한다. 뷰어는 기존 projectCuboid 로 **투영만** 한다
+ * (뷰어 수학 신규 0줄 — 주차면 육면체와 같은 함수).
+ * 데이터는 토글을 켤 때 1회 로드한다(라우트가 카메라를 1회 촬영하므로 자동 재호출하지 않는다).
+ */
+function drawVehicleCuboidOverlay(ctx) {
+  if (!$('roi-vcuboid').checked) return;
+  const key = currentFrameKey();
+  const ground = state.groundByKey[key];
+  const data = state.vcuboidByKey[key];
+  if (!ground || !data) return; // 모델/데이터 없음 → 미표시.
+  ctx.save();
+  for (const c of data.cuboids ?? []) {
+    const cub = projectCuboid(c.floorQuad, ground, c.heightM);
+    if (!cub) continue; // 퇴화 → 이 차량만 skip.
+    const pts = toPixelQuad(cub.corners, overlay.width, overlay.height);
+    // 폭(W) prior 강등분은 점선으로 구분 — "무엇이 관측이고 무엇이 prior 인지" 화면에서 보이게.
+    // ⚠️ H 는 **항상 prior** 이므로(차 ≠ 직육면체, 관측 불가) 구분 기준이 될 수 없다 — W 만 본다.
+    const degraded = c.source?.W === 'prior';
+    ctx.setLineDash(degraded ? [5, 4] : []);
+    ctx.strokeStyle = '#ff9f0a'; // 차량 육면체=주황(주차면 육면체 보라·바닥 초록과 구분).
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (const [a, b] of cub.edges) {
+      ctx.moveTo(pts[a].px, pts[a].py);
+      ctx.lineTo(pts[b].px, pts[b].py);
+    }
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+/** 2 DOF 앵커 배지. 토글 off 면 숨김. 지표 3종 + 알려진 한계(정수배 침묵)를 tooltip 에 남긴다. */
+function updateAnchorBadge() {
+  const badge = $('anchor-badge');
+  const on = $('roi-vcuboid').checked;
+  badge.hidden = !on;
+  if (!on) return;
+  const data = state.vcuboidByKey[currentFrameKey()];
+  const a = data?.anchor;
+  if (!a) {
+    badge.textContent = '앵커: —';
+    badge.classList.add('warn');
+    badge.title = ANCHOR_LIMIT;
+    return;
+  }
+  const fmt = (v) => (v == null ? '—' : `${v.toFixed(2)}m`);
+  badge.textContent = `앵커 n=${a.n} 깊이 ${fmt(a.depthDevM)} / 위상 ${fmt(a.phaseDevM)}`;
+  const warn =
+    a.depthDevM == null ||
+    Math.abs(a.depthDevM) > ANCHOR_DEPTH_DEV_M ||
+    Math.abs(a.phaseDevM ?? 0) > ANCHOR_PHASE_DEV_M;
+  badge.classList.toggle('warn', warn);
+  const lines = [
+    `표본 ${a.n}대 / 미배정 ${a.unmatchedRate == null ? '—' : `${Math.round(a.unmatchedRate * 100)}%`}`,
+    ...(a.issues ?? []),
+    ...(data.issues ?? []),
+    `강등 ${data.summary?.rejectedCount ?? 0}대 / seg500 ${data.summary?.segDegraded ? 'Y' : 'N'}`,
+  ];
+  badge.title = `${lines.join('\n')}\n\n${ANCHOR_LIMIT}`;
+}
+
+/** 앵커 임계(서버 contactTypes.ts 와 같은 값 — 표시 전용). */
+const ANCHOR_DEPTH_DEV_M = 0.5;
+const ANCHOR_PHASE_DEV_M = 0.4;
+
+/** ★ 앵커 지표의 알려진 한계 — 은닉 금지(설계 §6-3). */
+const ANCHOR_LIMIT =
+  '[2 DOF 앵커 — 1.5 DOF 만 닫힌다]\n' +
+  '깊이축(비주기): 모든 밀림에 반응 ✅\n' +
+  '폭축 위상(주기 2.5m): 비정수배 밀림에만 반응 ✅ / **정확히 k×2.5m 밀림은 원리적으로 침묵** ❌\n' +
+  '(밀린 슬롯 격자가 자기 자신과 겹쳐 차량이 옆 칸 정중앙에 딱 맞게 앉는다.\n' +
+  ' ⚠️ 이때 미배정 비율도 0 이 될 수 있다 — 실측 확인. 폭축 정수배는 **3지표 전부 침묵 가능**하다)';
+
+/**
+ * 차량 육면체 1회 로드(GET /capture/vehicle-cuboids). **토글을 켤 때만** 호출한다 —
+ * 라우트가 카메라를 1회 촬영(requestImage)하므로 렌더 루프에서 자동 재호출하면 안 된다.
+ * 실패(404=seg/ground 미배선, 502)는 조용히 미표시 + console.warn(기존 렌더 무영향).
+ */
+async function loadVehicleCuboids() {
+  const key = currentFrameKey();
+  if (state.vcuboidLoading.has(key)) return;
+  state.vcuboidLoading.add(key);
+  try {
+    const [cam, preset] = key.split(':');
+    const res = await fetch(`/capture/vehicle-cuboids?cam=${cam}&preset=${preset}`, { cache: 'no-store' });
+    if (!res.ok) {
+      console.warn(`[VehicleCuboid] ${key}: HTTP ${res.status} — 미표시`);
+      return;
+    }
+    const data = await res.json();
+    state.vcuboidByKey[key] = data;
+    if ((data.issues ?? []).length) console.warn(`[VehicleCuboid] ${key}:`, data.issues);
+    for (const r of data.rejected ?? []) console.warn(`[VehicleCuboid] ${key} 차량#${r.boxIdx} 강등:`, r.issues);
+    drawRoiOverlay();
+  } catch (err) {
+    console.warn('[VehicleCuboid] 로드 실패:', err);
+  } finally {
+    state.vcuboidLoading.delete(key);
   }
 }
 
@@ -2636,6 +2744,11 @@ function wire() {
   $('cap-floor-llm').addEventListener('change', drawRoiOverlay); // 바닥 ROI 소스(LLM/파일) 모드 전환 → 즉시 재렌더.
   $('roi-detect').addEventListener('change', drawRoiOverlay); // 라이브 검출 오버레이 토글(§04).
   $('roi-cuboid').addEventListener('change', drawRoiOverlay); // 3D 육면체 레이어 토글(기본 off → 회귀 0).
+  // 차량 육면체 토글(기본 off → 회귀 0). 켤 때만 서버 왕복(라우트가 카메라를 1회 촬영) — 캐시 있으면 재사용.
+  $('roi-vcuboid').addEventListener('change', (e) => {
+    drawRoiOverlay();
+    if (e.target.checked && !state.vcuboidByKey[currentFrameKey()]) loadVehicleCuboids();
+  });
   // 높이 슬라이더: 드래그 틱마다 즉시 재그리기(wirePanelResize 의 연속 재렌더 선례) + localStorage 영속.
   const cuboidH = $('cuboid-h');
   const savedH = Number(localStorage.getItem(CUBOID_H_KEY));

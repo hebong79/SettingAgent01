@@ -10,6 +10,7 @@
 	"vpd": {
 		"endpoint": "http://192.168.0.125:9081",
 		"detPath": "/vpd/api/v2/det/imgupload",
+		"segPath": "/vpd/api/v2/seg/imgupload",
 		"apiKeyEnv": "VPD_API_KEY",
 		"timeoutMs": 8000,
 		"maxRetries": 3
