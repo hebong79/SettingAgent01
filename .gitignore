@@ -17,6 +17,10 @@ __pycache__/
 
 # ── 런타임 산출물/캡처 ────────────────────────────────
 **/data/captures/
+# 정밀수집 결과 저장 스냅샷(런타임 누적, 커밋 제외)
+SettingAgent/save/
+# 정밀수집 결과 보조 미러(reports/*, 런타임 누적, 커밋 제외)
+SettingAgent/reports/
 *.log
 # 정밀 수집 관측 DB(런타임 누적, 커밋 제외)
 *.sqlite
@@ -36,3 +40,7 @@ __pycache__/
 Thumbs.db
 desktop.ini
 *.swp
+
+# 런타임 로그(회전 파일)
+logs/
+SettingAgent/logs/

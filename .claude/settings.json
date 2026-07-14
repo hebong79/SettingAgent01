@@ -1,0 +1,37 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node -e 'const c=require\\(\"./config/tools.config.json\"\\);console.log\\(\"camera.baseUrl:\",c.camera?.baseUrl\\);console.log\\(\"unityRpc:\",JSON.stringify\\(c.unityRpc\\)\\);console.log\\(\"viewer.controlToken:\",JSON.stringify\\(c.viewer?.controlToken\\)\\)')",
+      "Bash(curl -s -m6 \"http://localhost:13020/viewer/api/cameras\")",
+      "Bash(curl -s -m5 \"http://localhost:13020/viewer/api/rpc\" -X POST -H \"content-type: application/json\" -d '{\"method\":\"cam.list\",\"params\":{}}')",
+      "Bash(curl -s -m5 \"http://localhost:13020/viewer/api/rpc\" -X POST -H \"content-type: application/json\" -d '{\"method\":\"preset.list\",\"params\":{}}')",
+      "Bash(curl -s -m5 \"http://localhost:13020/viewer/api/health\")",
+      "Bash(curl -s -m5 \"http://localhost:13020/viewer/api/rpc\" -X POST -H \"content-type: application/json\" -d '{\"method\":\"system.ping\",\"params\":{}}')",
+      "Bash(node ./_conn_probe.mjs)",
+      "Bash(rm -f ./_conn_probe.mjs)",
+      "Bash(node -e 'const c=require\\(\"./config/tools.config.json\"\\);console.log\\(\"camera:\",JSON.stringify\\(c.camera\\)\\);console.log\\(\"cameraSources:\",JSON.stringify\\(c.cameraSources\\)\\);console.log\\(\"unityRpc:\",JSON.stringify\\(c.unityRpc\\)\\);console.log\\(\"presetProvider:\",JSON.stringify\\(c.presetProvider\\)\\);console.log\\(\"map:\",JSON.stringify\\(c.map\\)\\)')",
+      "Bash(node -e 'try{const c=require\\(\"./config/camerapos.json\"\\);console.log\\(\"keys:\",Object.keys\\(c\\)\\);console.log\\(JSON.stringify\\(c\\).slice\\(0,500\\)\\)}catch\\(e\\){console.log\\(\"없음/파싱실패:\",e.message\\)}')",
+      "Bash(curl -s -m6 -X POST \"http://localhost:13020/viewer/api/move\" -H \"content-type: application/json\" -d '{\"cam\":1,\"pan\":22,\"tilt\":6.8,\"zoom\":1.6}' -w \" [%{http_code}]\\\\n\")",
+      "Bash(curl -s -m5 \"http://localhost:13020/viewer/api/rpc\" -X POST -H \"content-type: application/json\" -d '{\"method\":\"cam.getPTZ\",\"params\":{\"camId\":1}}')",
+      "Bash(echo \"=== TSC EXIT: $? ===\")",
+      "Bash(curl -s -m20 -X POST \"http://localhost:13020/capture/detect\" -H \"content-type: application/json\" -d '{\"cam\":1,\"preset\":1}' -w \"\\\\n[%{http_code}]\\\\n\")",
+      "Bash(curl -s -m10 -X POST \"http://localhost:13020/capture/start\" -H \"content-type: application/json\" -d '{\"count\":1,\"intervalMs\":60000,\"targets\":[{\"camIdx\":1,\"presetIdx\":1,\"ptz\":{\"pan\":22,\"tilt\":6.8,\"zoom\":1.6}}]}' -w \"\\\\n[%{http_code}]\\\\n\")",
+      "Bash(curl -s -m5 \"http://localhost:13020/capture/status\")",
+      "Bash(node -e 'let d=\"\";process.stdin.on\\(\"data\",c=>d+=c\\).on\\(\"end\",\\(\\)=>{const j=JSON.parse\\(d\\);console.log\\(\"state:\",j.state,\"round:\",j.round,\"done:\",j.done,\"planned:\",j.planned\\)}\\)')",
+      "Bash(curl -s -m5 -X POST \"http://localhost:13020/capture/stop\" -w \" [%{http_code}]\\\\n\")",
+      "Bash(echo \"=== TSC EXIT $? ===\")",
+      "Bash(node -e 'const c=require\\(\"./config/tools.config.json\"\\);console.log\\(\"store.placeRoiFile:\",c.store?.placeRoiFile,\"| dataDir:\",c.store?.dataDir\\)')",
+      "Bash(node -e 'try{const f=require\\(\"./data/Place01/PtzCamRoi.json\"\\);const cam=f.cameras?.[0];console.log\\(\"cam_id:\",cam?.camera?.cam_id,\"| presets:\",cam?.presets?.map\\(p=>\\({preset:p.preset_idx,spaces:p.parking_spaces?.length}\\)\\)\\)}catch\\(e\\){console.log\\(\"data/Place01/PtzCamRoi.json 읽기실패:\",e.message\\)}')",
+      "Bash(node -e 'const {loadToolsConfig}=await import\\(\"./SettingAgent/dist/config/toolsConfig.js\"\\).catch\\(\\(\\)=>\\({}\\)\\);')",
+      "Bash(node -e 'const c=require\\(\"./SettingAgent/config/tools.config.json\"\\);console.log\\(\"config cameraMode:\",c.cameraMode\\)')",
+      "Bash(git -C \"d:/Work/Parking3D/AgentVLA/ParkAgent\" rev-parse --show-toplevel)",
+      "Bash(node -e 'try{require\\(\"sharp\"\\);console.log\\(\"sharp OK\"\\)}catch\\(e\\){console.log\\(\"sharp 없음\"\\)}')",
+      "Bash(node -e 'try{require\\(\"ml-matrix\"\\);console.log\\(\"ml-matrix OK\"\\)}catch\\(e\\){console.log\\(\"ml-matrix 없음\"\\)}')",
+      "Bash(node -e ' *)",
+      "Bash(curl -s -m12 -X POST \"http://localhost:13020/capture/autocorrect\" -H \"content-type: application/json\" -d '{\"cam\":1,\"preset\":2}' -w \" [%{http_code}]\\\\n\")",
+      "Bash(curl -s -m6 -X POST \"http://localhost:13020/viewer/api/move\" -H \"content-type: application/json\" -d '{\"cam\":1,\"pan\":57.6,\"tilt\":7.4,\"zoom\":1.9}')",
+      "Bash(curl -s -m6 -X POST \"http://localhost:13020/viewer/api/move\" -H \"content-type: application/json\" -d '{\"cam\":1,\"pan\":54.6,\"tilt\":7.4,\"zoom\":1.9}')",
+      "Bash(node -e \"const p=require\\('./package.json'\\);console.log\\(JSON.stringify\\(p.scripts,null,1\\)\\)\")"
+    ]
+  }
+}

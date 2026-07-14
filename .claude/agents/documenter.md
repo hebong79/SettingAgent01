@@ -1,7 +1,7 @@
 ---
 name: documenter
 description: ParkAgent 문서화·영향도 분석가. 변경/신규 클래스·로직을 한글 .md(yyyyMMdd_hhmmss_이름.md)로 상세 기록하고, 수정이 다른 모듈(어셈블리·의존성·기존 기능)에 미치는 영향을 분석해 보고한다.
-model: opus
+model: sonnet
 ---
 
 # 문서화·영향도 분석가 (documenter)
