@@ -29,9 +29,9 @@ class YoloV8ImageObjectDetection:
     async def __call__(self):
         frame_bgr, frame_rgb = self._get_image_from_chunked()
         results = self.score_frame(frame_rgb)
-        frame, bboxes, confidences, classes = self.plot_boxes(results, frame_bgr)
+        frame, polygons, confidences, classes = self.plot_boxes(results, frame_bgr)
 
-        return (frame, bboxes, confidences, classes)
+        return (frame, polygons, confidences, classes)
 
     def _get_image_from_chunked(self):
         arr = np.asarray(bytearray(self._bytes), dtype=np.uint8)
@@ -51,21 +51,22 @@ class YoloV8ImageObjectDetection:
         return results[0]
 
     def plot_boxes(self, results, frame):
+        # OBB 4점 폴리곤 추출(ultralytics results.obb.xyxyxyxy → (N,4,2) 픽셀).
+        # 검출 0건/비-OBB 모델 방어: 빈 결과 반환(annotate 생략, 원본 프레임 유지).
+        obb = getattr(results, "obb", None)
+        if obb is None or obb.xyxyxyxy is None or len(obb.xyxyxyxy) == 0:
+            return frame, [], [], []
+
+        polygons = obb.xyxyxyxy.cpu().numpy().tolist()  # (N,4,2) → 중첩 리스트
+        confidences = obb.conf.cpu().numpy().tolist()
+        classes = [self.classes[int(c)] for c in obb.cls.cpu().numpy()]
+
+        # 주석 이미지(부차 — OBB 지원 supervision from_ultralytics 로 시각화).
         detections = sv.Detections.from_ultralytics(results)
-
-        bounding_box_annotator = sv.BoxAnnotator(thickness=4)
         label_annotator = sv.LabelAnnotator(text_scale=1.4, text_thickness=4)
-
-        labels = [
-            f"{class_name} {confidence:.2f}"
-            for class_name, confidence in zip(detections["class_name"], detections.confidence)
-        ]
-
-        bboxes = detections.xyxy.tolist()
-        confidences = detections.confidence.tolist()
-        classes = detections["class_name"]
-
-        annotated_image = bounding_box_annotator.annotate(scene=frame, detections=detections)
+        labels = [f"{cls} {conf:.2f}" for cls, conf in zip(classes, confidences)]
+        oriented_box_annotator = sv.OrientedBoxAnnotator(thickness=4)
+        annotated_image = oriented_box_annotator.annotate(scene=frame, detections=detections)
         annotated_image = label_annotator.annotate(scene=annotated_image, detections=detections, labels=labels)
 
-        return annotated_image, bboxes, confidences, classes
+        return annotated_image, polygons, confidences, classes

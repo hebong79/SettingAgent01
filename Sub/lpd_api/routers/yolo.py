@@ -27,7 +27,7 @@ images = []
 # Load the model once, when the server starts
 # logger.info("Loading model")
 
-lpd_obb_model = YOLO(settings.YOLO_WEIGHTS_PATH, task="detect")
+lpd_obb_model = YOLO(settings.YOLO_WEIGHTS_PATH, task="obb")
 
 
 @router.post(
@@ -45,8 +45,8 @@ async def lpd_image_upload(file: UploadFile) -> ImageAnalysisResponse:
         file (UploadFile): The multi-part upload file
     
     Returns:
-        response (ImageAnalysisResponse): The image ID and bboxes and others in the pydantic object
-    
+        response (ImageAnalysisResponse): The image ID and OBB polygons and others in the pydantic object
+
     Examlple cURL:
         curl -X 'POST' \
             'http://localhost/lpd/api/v1/imgupload' \
@@ -58,21 +58,23 @@ async def lpd_image_upload(file: UploadFile) -> ImageAnalysisResponse:
         {
             "success": true,
             "id": 1,
-            "bboxes": [
+            "polygons": [
                 [
-                    551.580322265625,
-                    358.8811340332031,
-                    1084.7222900390625,
-                    452.9200744628906
+                    [551.58, 358.88],
+                    [1084.72, 360.10],
+                    [1082.00, 452.92],
+                    [549.10, 450.50]
                 ]
             ],
-            "confidence": [
+            "confidences": [
                 0.9543854594230652
             ],
             "classes": [
                 "car_license_plate"
             ]
         }
+
+        점 순서 규약: ultralytics OBB (top-left 시작, 시계방향 TL->TR->BR->BL), 픽셀 좌표.
     """
     # Read the uploaded file
     contents = await file.read()
@@ -80,9 +82,9 @@ async def lpd_image_upload(file: UploadFile) -> ImageAnalysisResponse:
     is_success = False
     # Run object detection inference
     dt = yolov8.YoloV8ImageObjectDetection(chunked=contents, model=lpd_obb_model)
-    frame, bboxes, confidences, classes = await dt()
+    frame, polygons, confidences, classes = await dt()
 
-    if bboxes:
+    if polygons:
         is_success = True
 
     # Encode the processed image (optional, if you need to store or return it)
@@ -93,7 +95,7 @@ async def lpd_image_upload(file: UploadFile) -> ImageAnalysisResponse:
     img_analysis_resp = ImageAnalysisResponse(
         success=is_success,
         id=len(images),
-        bboxes=bboxes,
+        polygons=polygons,
         confidences=confidences,
         classes=classes,
     )
