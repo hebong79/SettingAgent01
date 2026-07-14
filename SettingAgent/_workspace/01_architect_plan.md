@@ -1,281 +1,293 @@
-# 01 설계서 — 주차면별 번호판 중심 정렬·줌 PTZ 캘리브레이션 → `slot_ptz.json`
+# 01. 설계 — VPD 검출 모드 2종(주차면 위 차량만 / 모든 차량)
 
-작성: 설계자(architect) · 대상: SettingAgent (초기 데이터 셋팅용 캘리브레이션 기능)
-근거 코드: `src/clients/{CameraClient,LpdClient}.ts`, `src/brain/AgentRuntime.ts`, `src/capture/{CaptureJob,floorRoi}.ts`, `src/api/{server,captureRoutes}.ts`, `src/store/Repository.ts`, `src/config/toolsConfig.ts`, `src/domain/{geometry,types}.ts`, `data/setup_artifact.json`, `web/app.js`
-원칙: ParkSimMgr 컨벤션(ESM·1-based·정규화 0~1·외과적·단순함 우선). 과설계 금지. 라이브 기동은 구현 단계에서 하지 않음(검증=모킹).
+## 0. 요구 요약
 
----
-
-## 0. 목표·확정 사실(설계 전제)
-
-### 목표(마스터)
-번호판 보유 슬롯마다(=`setup_artifact.slots[].plateRoiByPreset` 보유), 해당 `camIdx/presetIdx`에서 카메라 PTZ를 움직여:
-1. **① pan/tilt 로 번호판 중심을 화면 중앙 `(0.5, 0.5)` 에 정렬** →
-2. **② zoom 으로 번호판 가로폭이 화면의 `~0.2` 가 되도록 맞춤** →
-3. 최종 PTZ·plateWidth·수렴여부 기록 → `data/slot_ptz.json` 저장.
-- **순서 엄수: 먼저 pan/tilt(중심), 그다음 zoom(폭).**
-
-### 확정 사실(코드/데이터 실측)
-- **`setup_artifact.json` 은 읽기 전용 입력.** 현재 27 슬롯 중 **26 슬롯이 `plateRoiByPreset` 보유**. 슬롯당 키=`${camIdx}:${presetIdx}`(1-based, 예 `"1:1"`). 값=정규화 `NormalizedRect {x,y,w,h}`. → 캘리브레이션은 이 파일을 **수정하지 않는다**(계약 불변). 별도 산출물 `slot_ptz.json` 만 쓴다.
-- **카메라 단위(시뮬)**: `CameraClient.move(camIdx, pan, tilt, zoom)` = `POST /req_move {cam_idx,pan,tilt,zoom}`. pan/tilt 는 **도(°) 절대값**, zoom 은 1~36 배율(`clampZoom` 내장, `zoomMin=1.0`·`zoomMax=36.0`). `requestImage(camIdx, presetIdx, {pan,tilt,zoom})` = `POST /req_img` → 프리셋 적용 후 캡처(`{pan,tilt,zoom,jpg,...}` 반환). **응답의 실제 PTZ 가 진실**(명령값이 아닌 `cap.pan/tilt/zoom` 을 상태로 사용).
-- **LPD**: `LpdClient.detect(jpg) → PlateBox[]`(정규화 rect + confidence + cls). 0개·다수 가능. 재시도/타임아웃 내장.
-- **LLM 두뇌**: `AgentRuntime`(OpenAI 호환). `llm.enabled=false` 면 모든 메서드 `null` → **결정형 폴백**. 좌표를 만들지 않고 "판정/제안"만(좌표 불변식). `chatJson`(zod parse·1회 재시도·실패 시 null) 패턴 재사용.
-- **잡 패턴**: `CaptureJob` = 단일 인메모리 상태머신(`idle→running→stopping→done|stopped|error`), 중복 시작 거부, 타이머/`sleep`/`now` 주입(fake timers 테스트), `getStatus()` 진행 반환, 라우트는 얇은 진입점(`captureRoutes.ts`). 이 패턴을 그대로 차용.
-- **영속화**: `Repository` 는 `setup_artifact.json` 전용. `slot_ptz.json` 은 **신규 writer**(별도 파일, Repository 미오염).
-- **결정형 폴백 사례**: `capture/floorRoi.ts` = 외부 의존 0 순수 모듈(클램프/폴백). 동일 스타일로 `controlMath.ts` 작성.
-- **회귀 기준선**: 현재 vitest **331개**(49 파일). 목표 회귀 0.
-
----
-
-## 1. 제어 설계(핵심 — 반드시 구체화)
-
-### 1.1 좌표·단위 규약(혼동 방지 — developer 필독)
-- 번호판 중심 오프셋: 정규화 화면좌표. `errX = cx - 0.5`, `errY = cy - 0.5` (cx,cy = 번호판 rect 중심). **errX>0 = 번호판이 화면 오른쪽** / **errY>0 = 번호판이 화면 아래쪽**.
-- pan/tilt 는 **도(°)**. "정규화 변위 1.0 당 몇 도 움직여야 하는가"를 **probe 로 추정한 게인** `gainPan`·`gainTilt`(°/정규화)로 환산.
-- **pan↔X, tilt↔Y 의 부호는 시뮬 규약에 의존** → 하드코딩하지 않고 **probe 단계가 부호까지 포함해 게인을 측정**(아래 1.3). 이것이 FOV 불요·부호 무관 적응형 제어의 핵심.
-- zoom 은 배율(1~36). 번호판 가로폭 `plateWidth`(정규화 w)와 선형 근사: 폭 ∝ zoom.
-
-### 1.2 순수함수 분리(전부 `src/calibrate/controlMath.ts`, vitest 대상, 외부 의존 0)
-| 함수 | 시그니처(개념) | 책임 |
+| 모드 | 체크박스 | 동작 |
 |---|---|---|
-| `plateCenterError(plate)` | `(rect) → {errX, errY}` | 중심 - 0.5 |
-| `pickNearestPlate(plates, target)` | `(PlateBox[], NormalizedRect) → PlateBox \| null` | 다수 번호판 중 **대상 슬롯 `plateRoiByPreset` 중심에 가장 가까운** 1개 선택(중심 유클리드 거리 최소). 빈 배열 → null |
-| `estimateGain(beforeErr, afterErr, probeDeltaDeg)` | `({errX,errY}, {errX,errY}, {dPan,dTilt}) → {gainPan, gainTilt}` | probe 이동 전후 변위로 °/정규화 게인 추정(부호 포함). 변위 미미(분모≈0)면 **fallback 게인**(설정값) 반환 |
-| `panTiltCorrection(err, gain, curPan, curTilt, maxStepDeg)` | `→ {pan, tilt}` | P 제어: `newPan = curPan - errX*gainPan`(부호는 gain 에 흡수), 스텝 `maxStepDeg` 로 클램프 |
-| `zoomCorrection(curZoom, plateWidth, targetWidth, clampZoom)` | `→ number` | `newZoom = clampZoom(curZoom * sqrt(targetWidth / plateWidth))`. plateWidth≈0 방어 |
-| `isCentered(err, centerTol)` | `→ boolean` | `|errX|≤tol && |errY|≤tol` |
-| `isWidthConverged(plateWidth, targetWidth, widthTol)` | `→ boolean` | `|plateWidth - targetWidth| ≤ widthTol` |
-| `buildSlotPtzJson(items, now)` | `→ {createdAt, items}` | 최종 JSON 조립(아래 2장 스키마) |
+| **A (기본)** | `#cap-vpd-onplace` **ON** | `PtzCamRoi.json` 의 `parking_spaces` 폴리곤 위 차량만 검출·집계 |
+| **B** | OFF | 이미지 위 **모든** 차량(통로 통행차 포함) — **현행 동작** |
 
-> **게인 적응**: 1차는 "probe 1회로 게인 추정 후 그 게인으로 P 제어"(단순함 우선). 추가 적응(매 스텝 게인 재추정)은 **불안정·과복잡** → 범위 제외. 단, **수렴이 정체(개선 < ε)되면 게인을 절반으로 감쇠**해 진동 방지(controlMath 에 `dampGain(gain, factor)` 소함수 1개로 충분).
-
-### 1.3 슬롯당 제어 루프(`PtzCalibrator.calibrateSlot`)
-의사코드(상태=시뮬 응답의 실제 PTZ):
-
-```
-입력: {camIdx, presetIdx, slotId, globalIdx, plateRoi(목표 prior)}
-1. cap0 = requestImage(cam, preset)                  // 프리셋 PTZ 로 시작(절대 기준)
-   (pan,tilt,zoom) = cap0 의 실제 PTZ
-2. plates = LPD.detect(cap0.jpg)
-   plate = pickNearestPlate(plates, plateRoi)
-   if !plate: 결과 기록 {centered:false, converged:false, reason:'no_plate'} 후 종료(스킵)
-
-── A) pan/tilt 중심 정렬 ───────────────────────────
-3. err = plateCenterError(plate)
-4. [probe] 작은 dPan/dTilt(probeStepDeg) 1회 이동 → move → settle → 재캡처 → LPD → 재선택
-      gain = estimateGain(err_before, err_after, {dPan,dTilt})
-5. for iter in 1..maxIterations:
-      if isCentered(err, centerTol): break
-      (선택) LLM 자문: adviseCentering(image, err, target) → 제안 보정(검증·클램프)·없으면 게인 P제어
-      {pan,tilt} = panTiltCorrection(err, gain, pan, tilt, maxStepDeg)
-      move(cam, pan, tilt, zoom) → settle(settleMs)
-      cap = requestImage(cam, preset, {pan,tilt,zoom})   // 실제 PTZ 재동기화
-      (pan,tilt,zoom) = cap 의 실제 PTZ
-      plates = LPD.detect(cap.jpg); plate = pickNearestPlate(plates, plateRoi)
-      if !plate: break(가림/소실 — 마지막 상태 기록)
-      newErr = plateCenterError(plate)
-      if |newErr| 개선 < ε: gain = dampGain(gain)    // 진동 감쇠
-      err = newErr
-   centered = isCentered(err, centerTol)
-
-── B) zoom 폭 정렬(중심 수렴 후에만) ────────────────
-6. for iter in 1..maxIterations:
-      plateWidth = plate.rect.w
-      if isWidthConverged(plateWidth, targetWidth, widthTol): break
-      newZoom = zoomCorrection(zoom, plateWidth, targetWidth, clampZoom)
-      move(cam, pan, tilt, newZoom) → settle
-      cap = requestImage(cam, preset, {pan,tilt,zoom:newZoom})
-      (pan,tilt,zoom) = cap 의 실제 PTZ
-      plates = LPD.detect(cap.jpg); plate = pickNearestPlate(plates, plateRoi)
-      if !plate: break
-      // zoom 으로 중심이 드리프트하면 1스텝 재중심(panTiltCorrection 1회)
-      if !isCentered(plateCenterError(plate), centerTol):
-          {pan,tilt} = panTiltCorrection(...); move; re-capture; re-detect
-   converged = isWidthConverged(plate.rect.w, targetWidth, widthTol)
-
-7. 결과 기록: {camIdx,presetIdx,slotId,globalIdx, ptz:{pan,tilt,zoom}, plateWidth, centered, converged}
-```
-
-- **하이브리드 결정**(마스터 확정 1): **결정형 적응형 비례제어가 엔진**(probe 게인 + P 제어 + zoom 공식). LLM 은 **자문**(초기 추정/수렴·가림 판단/제안 보정)만. **`llm.enabled=false` 또는 LLM 실패/검증실패 시 순수 결정형 폴백**(항상 동작). gemma 좌표 한계는 비례제어가 흡수.
-- **대상**(마스터 확정 2): `plateRoiByPreset` 보유 슬롯 **전부**(현재 26). 미보유·미검출 슬롯은 결과에 `reason`과 함께 스킵 기록.
-- **settle**: `move` 후 `settleMs`(설정, 예 300ms) 대기 → PTZ 정착 후 캡처. `sleep` 주입(테스트 fake).
-- **상한**: 슬롯당 pan/tilt·zoom 각 `maxIterations`(예 15). 무한루프 방지.
+플래그명 **`vpdOnParkingOnly`**, 기본 `?? true`. 적용 지점 **2곳**: `CaptureJob`(정밀수집 → DB) / `runDetect`(라이브 검출 → 뷰어 오버레이).
 
 ---
 
-## 2. 출력 스키마 — `data/slot_ptz.json`
+## 1. 판정 규칙 결정 (핵심)
 
-```jsonc
-{
-  "createdAt": "ISO8601",
-  "items": [
-    {
-      "camIdx": 1, "presetIdx": 1, "slotId": "c1p1s1", "globalIdx": 1,
-      "ptz": { "pan": 12.3, "tilt": -4.5, "zoom": 8.2 },
-      "plateWidth": 0.198,        // 최종 번호판 정규화 가로폭
-      "centered": true,           // pan/tilt 중심 수렴 여부
-      "converged": true,          // zoom 폭 수렴 여부
-      "reason": "no_plate"        // (옵셔널) 스킵·미수렴 사유. 정상이면 생략
-    }
-  ]
-}
+### 결론
+> **차량 bbox 의 "접지 근사 밴드"(하단 25% 스트립)와 주차면 폴리곤의 겹침 면적비가 임계값 이상이면 그 차량은 주차면 위에 있다.**
+> 여러 주차면에 대해 **OR**(어느 한 면이라도 만족하면 통과).
+
 ```
-- `globalIdx` 는 `setup_artifact.globalIndex` 에서 `slotId` 로 역참조(없으면 `null`).
-- 슬롯이 여러 프리셋에 ROI 를 가지면 **(slotId, camIdx, presetIdx) 조합마다 1 항목**(plateRoiByPreset 키 단위로 펼침).
-- 타입: `src/calibrate/types.ts` 에 `SlotPtzItem`·`SlotPtzArtifact` 정의(SettingAgent 로컬 — **`@parkagent/types` 가산 불필요**, 아래 영향도 참조).
+band(rect)      = { x, y: y + h·(1−0.25), w, h: h·0.25 }        // GROUND_BAND_RATIO = 0.25
+onPlace(rect,P) = convexIntersectionArea(rectCorners(band), P) / area(band) ≥ 0.15   // ON_PLACE_MIN_OVERLAP
+keep(rect)      = polys.some(P => onPlace(rect, P))
+```
+기하 유틸은 **전부 기존 것 재사용**: `polygon.ts` 의 `rectCorners`, `convexIntersectionArea` + `geometry.ts` 의 `area`. 신규 기하 0줄.
+
+### 근거 — 대안 비교
+
+전제(마스터 지적 + HANDOFF §6): **VPD rect 는 지붕까지 포함한 axis-aligned 전체 bbox**, 주차면 ROI 는 **바닥 quad**. 지면 위 높이 z 의 점은 이미지에서 카메라 nadir 로부터 `H/(H−z)` 배 **바깥(먼 쪽)** 으로 밀려 보인다. 카메라 높이 H≈8m, 차량 중심 높이 z≈0.75m → 약 **+10%** → nadir 로부터 25m 지점이면 **약 2.5m = 주차면 정확히 한 칸** 만큼 어긋난다.
+
+| 대안 | 주차차 누락(FN) | 통행차 통과(FP) | 판정 |
+|---|---|---|---|
+| **(a) bbox 중심 ∈ 폴리곤** (Finalizer 선례) | **높음** — 중심이 먼 쪽으로 ~한 칸 밀려 자기 주차면 밖으로 이탈 | **치명적** — 통로 차량의 중심이 **뒷줄 주차면 폴리곤 위로 투영**된다 | **탈락** |
+| (b) 전체 rect ∩ 폴리곤 면적비 | 낮음 | **치명적** — 통로 차량의 차체가 이미지상 뒷줄 주차면을 **가리므로** 큰 겹침 발생 | **탈락** |
+| (c) 하단 중앙 1점 ∈ 폴리곤 | 중간 — 경계선에 걸친 차·타이트한 ROI 에서 1점이 살짝 밖 → 즉시 드롭(임계 없는 하드 경계) | 낮음 | 차선 |
+| **(d) 하단 밴드 겹침 면적비 (채택)** | **낮음** — 밴드가 폭을 가져 경계 민감도 완화 | **낮음** — 밴드는 차량 **접지 영역**이라 통로 아스팔트 위에 놓임 | **채택** |
+
+**(a) 를 버리는 결정적 이유**: 모드 A 의 **1차 목적이 "통로 통행차 배제"** 인데, 중심 규칙은 바로 그 통행차를 **뒷줄 주차면에 올려놓는다**(FP). 목적 자체를 달성하지 못한다.
+
+**(d) 가 임계값에 둔감한 이유**: 판정이 **전 폴리곤 OR** 이다. 주차면 *배정*(어느 칸인가)이 아니라 *필터*(주차면 위인가)이므로, 원근 오차로 밴드가 **옆 칸**에 걸쳐도 결과는 여전히 `keep` = 정답. 드롭되는 것은 **어느 주차면과도 겹치지 않는 차** = 통로/진출입로 차량뿐이다.
+
+### Finalizer 선례와의 관계 (⚠️ 마스터 질문 "같은 규칙 두 벌 금지")
+`Finalizer.ts:237-241` 은 **다른 질문**에 답한다 — *필터*가 아니라 ***배정***(이 클러스터가 **어느** 주차면인가). 그리고 그것은 **번호판 중심 우선**(번호판은 지상 ~0.5m → 원근 오차 작음)이고 차량 중심은 **폴백**이다.
+
+**이번 변경에서 Finalizer 는 건드리지 않는다.** 근거:
+1. 모드 A 에서는 필터가 **상류**(검출 직후)에 있다 → Finalizer 에 도달하는 검출은 이미 전부 주차면 위 → 차량중심 폴백의 FP 위험(통행차가 뒷줄 칸에 배정)이 **필터에 의해 이미 제거**된다.
+2. Finalizer 규칙 교체는 요청 범위 밖의 **점유 배정 동작 변경**이며 기존 테스트(`finalizerParkingSlots.test.ts`)가 그 동작을 단언 중이다.
+
+**→ 미해결 질문 (마스터 확인 요청, §7-Q1)**: 모드 B 에서는 Finalizer 의 차량중심 폴백이 여전히 통행차를 뒷줄 칸에 배정할 수 있다. 이 규칙을 `isVehicleOnPlace` 로 통일할지는 **별도 과제(라이브 검증 필요)** 로 등록할 것을 권고한다.
+
+### 임계값
+모듈 named const(`Aggregator.ts` 선례 — tools.config 미승격). **설정 노출 안 함**(요청 범위 밖).
+```ts
+export const GROUND_BAND_RATIO = 0.25;    // 접지 근사 밴드 = bbox 하단 25%
+export const ON_PLACE_MIN_OVERLAP = 0.15; // 밴드 면적 대비 폴리곤 겹침 하한
+```
 
 ---
 
-## 3. API·UI
+## 2. 필터 적용 지점
 
-### 3.1 라우트(`src/api/calibrateRoutes.ts` 신규, `captureRoutes.ts` 패턴)
-| 메서드·경로 | 동작 |
+**`vpd.detect()` 직후 필터**(저장 시점 아님). 두 경로 모두 **동일 순수 함수 1개** 사용.
+
+| 트레이드오프 | 검출 직후(채택) | 저장 시점/집계 시점 |
+|---|---|---|
+| 코드량 | 최소 | detections 스키마 플래그 + aggregate 시그니처 변경 |
+| 사후 모드 전환 | **불가**(원 검출이 DB 에 없음 → 재수집 필요) | 가능 |
+| 사용자 멘탈모델 | "검출하지 않는다" = 체크박스 문구 그대로 | 어긋남 |
+| `runDetect` zoom 재시도 | **통행차에 대해 0회**(카메라 호출 절감) | 낭비 |
+
+→ 검출 직후. **사후 전환 불가는 §7 한계로 명시.**
+
+### 번호판(LPD)은 필터하지 않는다
+- 체크박스 문구가 "주차면 위 **차량**만". 번호판은 대상 아님.
+- `Aggregator.ts:256-311`: **plate 클러스터는 vehicle 클러스터를 통해서만 결과에 노출**된다(미매칭 plate 클러스터는 버려짐). → 통행차 번호판은 **자동으로 소멸**. 별도 필터 불요.
+- `web/core.js:454 computeOccupancy(floorPolygons, plates)` 는 **번호판 중심 ∈ 폴리곤**으로 점유를 계산 → 통로 차량 번호판은 애초에 폴리곤 밖 → 점유 오염 없음. **plates 를 필터하면 오히려** VPD 가 놓친 주차차의 번호판까지 사라져 점유가 뒤집힐 위험.
+- 유일한 부작용: 모드 A 에서 통행차 위에 **차량 박스 없이 번호판 quad 만** 그려질 수 있음. **의도된 동작으로 문서화**(§7 한계).
+
+---
+
+## 3. 강등 정책 (주차면 폴리곤 부재)
+
+`placeRoiFile` 미설정 / 파일 없음 / 파싱 실패 / **해당 프리셋 주차면 0개** → 필터 기준이 없다.
+
+> **전량 통과(모드 B 로 강등) + `reason` 포함 warn 로그 + 상태/응답에 advisory 노출.**
+
+**전량 드롭 금지 근거**: 기준이 없다는 이유로 드롭하면 **데이터가 조용히 사라진다**(최악). HANDOFF §2-3 "조용한 폴백 제거" 원칙 — 폴백은 반드시 드러낸다(`fovBaseV` 버그가 숨었던 경로).
+
+**입도(중요)**: 강등은 **프리셋 단위**다. `placeRoi.ts:79` 는 주차면이 1개 이상인 프리셋만 `byPreset` 에 키를 넣는다 → 키 부재 = "이 프리셋엔 ROI 없음". 파일 전체가 없으면 전 프리셋 강등, 특정 프리셋만 ROI 가 없으면 **그 프리셋만** 강등(다른 프리셋의 필터는 정상 동작).
+
+| 상황 | reason 문자열 |
 |---|---|
-| `POST /calibrate/ptz` | 백그라운드 잡 시작. 본문 옵셔널 `{slotIds?: string[]}`(미지정=전체). running 중이면 **409**(중복 거부). 응답 `{ok:true, jobId/started:true, total}` |
-| `GET /calibrate/status` | 진행 상태 `{state, done, total, current?:{slotId}, startedAt?, endedAt?}` |
-| `GET /calibrate/result` | `slot_ptz.json` 내용 반환(없으면 404) |
+| `placeRoiFile` 미설정/로드 실패 | `주차면 파일 없음/로드 실패` |
+| 해당 프리셋 주차면 0개 | `프리셋 cam{c}:{p} 주차면 0개` |
 
-- 헤드리스(`buildServer` 본체)에 등록 + 뷰어 컨텍스트(`/viewer/api/...` 불필요 — 뷰어는 동일 `/calibrate/*` 를 직접 폴링, app.js 가 절대경로 호출). **의존성 주입 시에만 등록**(가산, 기존 라우트 불변).
-- 잡 의존성: `PtzCalibrator`(아래) + `repo`(setup_artifact 읽기) + writer. `index.ts` 에서 조립·주입.
+---
 
-### 3.2 잡 — `src/calibrate/PtzCalibrator.ts`
-- `CaptureJob` 패턴 차용: 단일 인메모리 상태머신, 중복 거부, `start()/getStatus()`, 슬롯 순회를 비동기 루프로(타이머 대신 순차 await — 캘리브레이션은 주기 잡이 아님). 타이머 불필요, `sleep`(settle)·`now` 주입.
-- 의존성: `{ camera: CameraClient, lpd: LpdClient, brain?: AgentRuntime, repo: Repository, writer, cfg: ToolsConfig['calibrate'], sleep?, now? }`.
-- 흐름: setup_artifact 로드 → plateRoiByPreset 펼침 → (필터 slotIds) → 각 항목 `calibrateSlot` → 결과 수집 → `buildSlotPtzJson` → writer 저장. 개별 슬롯 실패는 **흡수**(경고 + reason 기록, 잡 중단 아님 — CaptureJob `captureTarget` 흡수 패턴).
+## 4. 변경 파일별 상세 계획
 
-### 3.3 LLM 자문 — `AgentRuntime` 가산(옵셔널)
-- 신규 메서드 `adviseCentering(input): Promise<CenteringAdvice | null>`:
-  - 입력: `{imageBase64, err:{errX,errY}, plateWidth, target:{centerTol, targetWidth}, phase:'center'|'zoom'}`.
-  - 출력(zod): `{ suggestPan?, suggestTilt?, suggestZoomFactor?, converged?:boolean, occluded?:boolean }`(전부 옵셔널·작은 제안값). **좌표 생성 아님 — 보정 제안·판정만**.
-  - `chatJson`(json 모드·1회 재시도·실패 null) 재사용. 인라인 한글 프롬프트(reviewCheckpoint 스타일, 단순함 우선).
-  - 호출측(`PtzCalibrator`)이 **결정형 클램프**(제안 ±maxStepDeg, zoomFactor 0.5~2.0) 후 적용. `null`·검증실패 → 비례제어 폴백. `occluded=true` → 해당 슬롯 스킵·기록.
+### 4.1 신규 — `src/capture/onPlaceFilter.ts` (~45줄, 순수)
+```ts
+import type { NormalizedPoint, NormalizedRect } from '../domain/types.js';
+import { rectCorners, convexIntersectionArea } from '../domain/polygon.js';
+import { area } from '../domain/geometry.js';
 
-### 3.4 설정 — `tools.config.json` 신규 섹션 `calibrate`
-`toolsConfig.ts` 에 `CalibrateSchema` 가산(기존 섹션 불변):
+export const GROUND_BAND_RATIO = 0.25;
+export const ON_PLACE_MIN_OVERLAP = 0.15;
+
+/** 차량 bbox 접지 근사 밴드(하단 25%). VPD rect 는 지붕 포함 bbox → 중심은 원근으로 바닥면 밖(먼 쪽)으로 이탈한다. */
+export function groundBand(rect: NormalizedRect): NormalizedRect;
+
+/** 접지 밴드가 주차면 폴리곤들 중 **하나라도** 임계 이상 겹치는가(OR). polys 빈 배열 → false. 밴드 면적 0 → false. */
+export function isVehicleOnPlace(
+  rect: NormalizedRect,
+  polys: readonly (readonly NormalizedPoint[])[],
+): boolean;
+
+/**
+ * 모드A 필터. polys 가 null/빈 배열이면 **강등**: 전량 통과 + degraded=true (드롭 금지).
+ * VehicleBox·DetectVehicle 양쪽에 쓰이도록 구조적 제네릭.
+ */
+export function filterVehiclesOnPlace<T extends { rect: NormalizedRect }>(
+  vehicles: readonly T[],
+  polys: readonly (readonly NormalizedPoint[])[] | null | undefined,
+): { kept: T[]; filteredOut: number; degraded: boolean };
 ```
-calibrate: {
-  targetPlateWidth: 0.2,   // 목표 번호판 가로폭(정규화)
-  centerTol: 0.03,         // 중심 수렴 허용오차
-  widthTol: 0.02,          // 폭 수렴 허용오차
-  maxIterations: 15,       // pan/tilt·zoom 각 단계 상한
-  probeStepDeg: 1.0,       // 게인 추정용 probe 이동(도)
-  maxStepDeg: 5.0,         // 1스텝 최대 보정(도, 진동 방지)
-  fallbackGainPanDeg: 20,  // probe 실패 시 기본 게인(°/정규화)
-  fallbackGainTiltDeg: 15,
-  settleMs: 300,           // move 후 정착 대기
-  outFile: "data/slot_ptz.json"
+- `convexIntersectionArea` 는 **볼록** 폴리곤 전제. 주차면 4점 바닥 quad 는 통상 볼록(`floorRoi` 도 동일 전제). 사용자가 정점을 끌어 오목하게 만들면 겹침 과대추정 → §7 한계.
+
+### 4.2 `src/capture/CaptureJob.ts`
+| 위치 | 변경 |
+|---|---|
+| `CaptureJobDeps` (:20) | `placeRoiFile?: string;` 추가(Finalizer 와 **동일 경로** 주입) |
+| `CaptureStartParams` (:45) | `vpdOnParkingOnly?: boolean;` 추가 |
+| 필드 (:86 인근) | `private vpdOnParkingOnly = true;` / `private placePromise?: Promise<NormalizedPlaceRoi \| null>;` / `private vpdFilteredOut = 0;` / `private onPlaceDegraded?: string;` / `private degradeWarned = new Set<string>();` |
+| `start()` (:153 인근) | `this.vpdOnParkingOnly = p.vpdOnParkingOnly ?? true;` + 카운터/가드 초기화 + `this.placePromise = loadNormalizedPlaceRoi(this.deps.placeRoiFile);` (**run 시작 시 1회 로드** → 사용자가 뷰어에서 편집·저장한 최신 ROI 반영. `loadNormalizedPlaceRoi(undefined)` = `null` 이므로 분기 불요) |
+| `captureTarget()` (:284) | `const raw = await this.deps.vpd.detect(cap.jpg);` → 모드 A 면 `const polys = (await this.placePromise)?.byPreset.get(\`${t.camIdx}:${t.presetIdx}\`)?.map(s => s.points) ?? null;` → `filterVehiclesOnPlace(raw, polys)` → `degraded` 면 `markDegraded(t, reason)`(프리셋키당 warn 1회) 후 **raw 사용**, 아니면 `kept` 사용 + `this.vpdFilteredOut += filteredOut`. 이후 `dets` 조립은 **필터된 vehicles** 로. **LPD 경로(:295-306) 무변경.** |
+| `getStatus()` (:132) | 조건부 스프레드 추가(`llmFloorUnavailable` 패턴): `...(this.runId !== undefined ? { vpdOnParkingOnly: this.vpdOnParkingOnly } : {})`, `...(this.vpdFilteredOut > 0 ? { vpdFilteredOut: this.vpdFilteredOut } : {})`, `...(this.onPlaceDegraded ? { vpdOnPlaceDegraded: this.onPlaceDegraded } : {})` |
+
+`normalizeGlobalIdx` **불필요**(전역번호가 아니라 좌표만 쓴다).
+
+### 4.3 `src/capture/types.ts` — `CaptureStatus` (:127)
+```ts
+  /** 이번 run 에 적용된 VPD 필터 모드(true=주차면 위 차량만). */
+  vpdOnParkingOnly?: boolean;
+  /** 필터로 제외된 차량 누적 대수(run 누적). */
+  vpdFilteredOut?: number;
+  /** 주차면 폴리곤 부재로 모드B 강등 중(사유). C1 — UI 가 항상 소스를 안다. */
+  vpdOnPlaceDegraded?: string;
+```
+
+### 4.4 `src/capture/detectPipeline.ts`
+```ts
+/** 모드A 옵션. 미지정 → 필터 없음(runDetect 계약 불변 — 기존 3인자 호출 회귀 0). */
+export interface OnPlaceOpts {
+  onlyOnPlace: boolean;
+  /** 대상 프리셋 주차면 폴리곤(정규화). null/빈 → 강등(전량 통과). */
+  polys: NormalizedPoint[][] | null;
+}
+export async function runDetect(
+  deps: DetectDeps, args: { cam; preset }, cfg: DetectCfg, onPlace?: OnPlaceOpts,
+): Promise<DetectResult>
+```
+- `:197` 직후 필터 → **zoom 재시도 루프(:210-236) 진입 전** 차량 배열 축소(통행차에 대한 카메라 호출 0회).
+- `matchPlatesToSlots` (:201) 는 **필터된 vehicles** 로 호출(인덱스 정합 유지).
+- 강등 시 `logger.warn({cam, preset, reason}, ...)`.
+- `DetectResult.summary` 확장(:61):
+```ts
+summary: {
+  vpdCount: number;        // 필터 **전** 원 검출 수(의미 불변)
+  lpdCount: number;        // 불변(plates 미필터)
+  recovered: number;       // 불변
+  onPlaceOnly: boolean;    // 실제 적용된 모드(강등 시 false)
+  filteredOut: number;     // 제외 대수(모드B/강등 시 0)
+  onPlaceDegraded?: string;// 요청 true 였으나 폴리곤 없음 → 사유
 }
 ```
-`DEFAULT_TOOLS_CONFIG.calibrate` 기본값 추가 + `loadToolsConfig` 섹션 병합 루프가 자동 처리(키가 `DEFAULT` 에 있으면 병합됨 — 추가 코드 불요).
+`vehicles.length = vpdCount − filteredOut` → **"몇 대 중 몇 대 빠졌나"** 를 UI 가 그대로 표시(C1).
+- `plates` 배열(:244) **무변경**(§2 근거).
 
-### 3.5 뷰어 UI(최소)
-- `web/index.html`: 분석 탭(또는 제어 패널)에 "PTZ 캘리브레이션" 영역 — **시작 버튼** + 진행 표시(`done/total`, current slot) + 결과 요약(수렴 N/전체, 미수렴 목록).
-- `web/app.js`: `calStart()`(`POST /calibrate/ptz`) + `calPoll()`(`GET /calibrate/status` 폴링, 기존 `capPoll`/`pollPlan` 패턴 차용) + 완료 시 `GET /calibrate/result` 요약 렌더. 순수 폴링 판정이 필요하면 `web/core.js` 에 소함수 1개(`pollPlan` 유사) — 단, 1차는 capture 폴링 패턴 그대로 재사용해 신규 순수함수 최소화.
+### 4.5 `src/api/captureRoutes.ts`
+- `:42` `StartBodySchema` 에 `vpdOnParkingOnly: z.boolean().optional()` 추가 → `:163` 인근에서 `job.start({..., vpdOnParkingOnly: parsed.data.vpdOnParkingOnly})` (기본값은 CaptureJob 이 `?? true`).
+- `:60` `DetectBodySchema` 에 `vpdOnParkingOnly: z.boolean().optional()` 추가.
+- `:494-498` detect 핸들러: `loadNormalizedPlaceRoi(deps.placeRoiFile)` → `polys = place?.byPreset.get(\`${cam}:${preset}\`)?.map(s => s.points) ?? null` → `runDetect({camera,vpd,lpd}, { cam, preset }, cfg, { onlyOnPlace: parsed.data.vpdOnParkingOnly ?? true, polys })`.
+  ⚠️ 현재 `runDetect(..., parsed.data, cfg)` 로 body 를 그대로 넘긴다 → **`{ cam, preset }` 명시 전달로 교체**(새 키 누출 방지).
+  `import { loadNormalizedPlaceRoi }` 는 `placeRoi.js` 에서(이미 `applyPlaceRoiUpdate` 를 같은 모듈에서 import 중 — :7).
 
----
+### 4.6 `src/index.ts` (:56)
+`new CaptureJob({ ..., placeRoiFile: join(tools.store.dataDir, tools.store.placeRoiFile) })` — Finalizer(:63)/server(:77)와 **동일 표현**.
 
-## 4. 작업 순서 + 단계별 검증
+### 4.7 `web/index.html` (:166 인근, `.capture-grid` 내부, `#cap-floor-llm` 바로 뒤)
+```html
+<label class="field check"><input id="cap-vpd-onplace" type="checkbox" checked /> 주차면 위 차량만 검출</label>
+```
+`checked` = 기본 모드 A.
 
-> 순수 로직(controlMath·types·buildSlotPtzJson) → 잡(PtzCalibrator, 클라이언트 모킹) → 라우트 → LLM 자문 → 설정 → 뷰어. 각 단계 vitest 통과를 게이트로.
+### 4.8 `web/app.js`
+| 위치 | 변경 |
+|---|---|
+| `:1616` 인근(capStart body) | `vpdOnParkingOnly: $('cap-vpd-onplace').checked,` 추가 |
+| `:565-569` (`runLiveDetect`) | detect payload 에 `vpdOnParkingOnly: $('cap-vpd-onplace').checked` 추가 |
+| `runLiveDetect` 응답 처리(:571 이후) | `const s = res.summary;` → `$('cap-msg').textContent = \`검출 ${s.vpdCount - s.filteredOut}/${s.vpdCount}대 · 주차면필터 ${s.onPlaceOnly ? 'ON' : 'OFF'}${s.onPlaceDegraded ? ` — 강등: ${s.onPlaceDegraded}` : ''}\`` (C1) |
+| `renderCaptureStatus`(status 렌더 지점) | `status.vpdOnParkingOnly` → "주차면필터 ON(제외 N대)" 배지, `status.vpdOnPlaceDegraded` → 경고 문구(`llmFloorUnavailable` 표시 패턴 재사용) |
 
-**단계 1 — 순수 제어수학 + 타입** → 검증: `controlMath.test.ts`
-- `src/calibrate/{controlMath,types}.ts` 작성(외부 의존 0).
-- vitest: `plateCenterError`(중심→0,0; 우하단→양수), `pickNearestPlate`(다수 중 최근접·빈배열 null), `estimateGain`(probe 전후→부호 포함 게인; 분모≈0→fallback), `panTiltCorrection`(maxStep 클램프·부호), `zoomCorrection`(폭 0.4→축소·0.1→확대·clamp 1~36·0 방어), `isCentered`/`isWidthConverged` 경계, `dampGain`, `buildSlotPtzJson`(스키마·globalIdx 역참조 null).
-
-**단계 2 — slot_ptz writer + setup_artifact 펼침** → 검증: `slotPtzWriter.test.ts`
-- `src/calibrate/slotPtzWriter.ts`(파일 쓰기 — Repository 비오염) + `expandPlateTargets(artifact) → {camIdx,presetIdx,slotId,globalIdx,plateRoi}[]` 순수함수.
-- vitest: 26 슬롯 fixture → 26 항목 펼침, plateRoiByPreset 다중 키 슬롯 펼침, globalIdx 매핑, 미보유 슬롯 제외. writer 는 임시 경로에 쓰고 재로드 일치.
-
-**단계 3 — PtzCalibrator(클라이언트·LPD·brain 모킹)** → 검증: `ptzCalibrator.test.ts`
-- `calibrateSlot` + 잡 상태머신 + 슬롯 순회.
-- vitest(모킹 camera/lpd/brain, sleep/now 주입):
-  - **수렴 happy path**: 모킹 LPD 가 move 에 따라 점점 중심·목표폭으로 수렴 → `centered:true, converged:true, plateWidth≈0.2`.
-  - **순서 검증**: zoom 단계가 **중심 수렴 이후에만** 호출됨(move 호출 인자 시퀀스로 확인 — pan/tilt 변화가 zoom 변화보다 선행).
-  - **번호판 미검출**: LPD 빈 배열 → 스킵·`reason:'no_plate'`, 잡 계속.
-  - **maxIter 미수렴**: 절대 안 맞는 모킹 → `converged:false`, 루프 상한에서 종료.
-  - **다수 번호판**: 대상 prior 최근접 선택.
-  - **LLM off/실패**: brain=undefined·메서드 null → 결정형만으로 동작(폴백).
-  - **중복 시작 거부**: running 중 start → throw/409.
-
-**단계 4 — calibrateRoutes(app.inject)** → 검증: `calibrateRoutes.test.ts`
-- `POST /calibrate/ptz`(시작·중복 409), `GET /calibrate/status`(진행 shape), `GET /calibrate/result`(있음 200·없음 404). 잡은 모킹(즉시완료 stub)으로 라우트 계약만.
-
-**단계 5 — AgentRuntime.adviseCentering** → 검증: `agentRuntime.test.ts` 가산(기존 패턴)
-- LLM off→null, 모킹 응답→zod parse·클램프 통과, 잘못된 JSON→재시도 후 null. (기존 `agentRuntime*.test.ts` 모킹 패턴 재사용.)
-
-**단계 6 — 설정 스키마** → 검증: `config.test.ts` 가산
-- `calibrate` 섹션 파싱·기본값·부분 병합. 기존 config 테스트 회귀 0.
-
-**단계 7 — index.ts 조립 + 뷰어 UI** → 검증: 타입체크 + 기존 viewer 테스트 회귀 0 + 수동 확인은 구현 단계 외(모킹). 
-- `index.ts` 에 `PtzCalibrator`·writer 조립·`buildServer` 주입. `web/{index.html,app.js}` 버튼·폴링.
-
-**최종 게이트**: `npm test` 전체 → 신규 통과 + 기존 **331개 회귀 0**, `tsc` 무오류.
+### 4.9 `web/core.js` — **변경 없음**
+서버가 **이미 필터된 결과**를 준다. 뷰어는 그리기만. → HANDSOFF §2-5(이중구현 금지) 준수, **파리티 테스트 불요**.
+`core.js:454 computeOccupancy` 는 번호판 기반 별개 규칙이며 이번 변경의 대상이 아니다(§2 참조).
 
 ---
 
-## 5. 파일별 신규/수정
+## 5. 영향받는 기존 테스트 + 예상 조치
 
-### 신규(`src/calibrate/`)
-- `controlMath.ts` — 순수 제어수학(1.2 표). 외부 의존 0.
-- `types.ts` — `SlotPtzItem`, `SlotPtzArtifact`, `PlateTarget`, `CenteringAdvice`, `CalibrateStatus`.
-- `PtzCalibrator.ts` — 잡(상태머신·슬롯순회·calibrateSlot). CaptureJob 패턴.
-- `slotPtzWriter.ts` — `slot_ptz.json` 쓰기 + `expandPlateTargets`.
+**핵심 성질**: 강등 정책 덕분에 **`placeRoiFile` 을 주입하지 않는 기존 테스트는 전부 "전량 통과"(현행 동작)로 수렴** → 동작 회귀 0. 깨지는 것은 **응답 shape 을 `toEqual` 로 완전일치 단언한 2건**뿐이다.
 
-### 신규(`src/api/`)
-- `calibrateRoutes.ts` — `/calibrate/*` 3개 라우트(captureRoutes 패턴).
-
-### 수정(가산만)
-- `src/brain/AgentRuntime.ts` — `adviseCentering` 메서드 + `SetupBrain.ts` 에 `CenteringAdviceSchema`·타입·인터페이스 가산.
-- `src/config/toolsConfig.ts` — `CalibrateSchema` + `DEFAULT_TOOLS_CONFIG.calibrate` + `ToolsConfigSchema` 에 `calibrate` 추가.
-- `config/tools.config.json` — `calibrate` 섹션(선택, 기본값으로 동작 가능).
-- `src/api/server.ts` — `ApiDeps` 에 `calibrator?`·`calibrate?` 추가, 주입 시 `registerCalibrateRoutes` 호출(기존 라우트 불변).
-- `src/index.ts` — `PtzCalibrator`·writer 조립·주입.
-- `web/index.html`, `web/app.js`(, `web/app.css`) — 캘리브레이션 버튼·진행·결과(최소).
-
-### 신규 테스트(`test/`)
-- `controlMath.test.ts`, `slotPtzWriter.test.ts`, `ptzCalibrator.test.ts`, `calibrateRoutes.test.ts`. `agentRuntime`/`config` 테스트는 가산.
-
----
-
-## 6. MCP 도구 vs LLM 두뇌 경계 판단
-
-| 구분 | 결정형(엔진·도구) | LLM 두뇌(자문) |
+| 파일:줄 | 현상 | 조치 |
 |---|---|---|
-| 역할 | probe 게인 추정, P 제어 pan/tilt, zoom 공식, 수렴판정, 최근접 번호판, JSON 조립 | 초기 추정/수렴·가림 판단/소폭 보정 제안 |
-| 빈도 | 고빈도·수치반복 루프(슬롯×iter) → **반드시 결정형** | 슬롯당 소수회 자문(옵셔널) |
-| 폴백 | 항상 동작(LLM 무관) | off/실패/검증실패 시 **결정형으로 강등** |
+| `test/detectPipeline.test.ts:118` | `expect(out.summary).toEqual({vpdCount:1, lpdCount:1, recovered:0})` — summary 에 `onPlaceOnly:false, filteredOut:0` 가산 → **실패** | 기대값에 `onPlaceOnly: false, filteredOut: 0` 추가(3인자 호출 = 필터 미적용) |
+| `test/captureRoutes.test.ts:500` | `expect(body.summary).toEqual({vpdCount:0, lpdCount:0, recovered:0})` — 라우트가 `?? true` + `placeRoiFile` 미주입 → **강등** → `onPlaceOnly:false, filteredOut:0, onPlaceDegraded:'주차면 파일 없음/로드 실패'` 가산 → **실패** | 기대값 갱신(강등 경로가 정상임을 단언) |
+| `test/captureJob*.test.ts` (4건) | `placeRoiFile` 미주입 → `placePromise=null` → 강등 → 전량 통과 | **무변경 통과 예상**(warn 로그만 증가) |
+| `test/finalizer*.test.ts` | Finalizer 무변경 | 영향 없음 |
+| `test/groundSimilarityDetect.test.ts`, `rpcCameraClient.test.ts` | `summary` 전체를 `toEqual` 하지 않음(grep 확인) | 영향 없음 |
+| `getStatus()` 를 `toEqual` 로 단언하는 테스트 | **없음**(grep 확인) → CaptureStatus 필드 가산 안전 | 없음 |
 
-→ 마스터 "LLM 통해 처리" 요구를 **자문 계층**으로 충족하되, gemma 좌표 한계는 비례제어가 흡수. **새 MCP 도구 신설 불필요**(기존 REST 계약 `/req_move`·`/req_img`·LPD 재사용 + 신규 REST 라우트 가산).
-
----
-
-## 7. 영향도 분석
-
-- **`setup_artifact.json` 계약 불변**: 읽기 전용 입력. Action/DM 무영향. 새 산출물 `slot_ptz.json` 은 **별도 파일**(Repository·Finalizer 비오염).
-- **`@parkagent/types` 가산 판단 → 불필요(1차)**: `slot_ptz.json` 은 SettingAgent 초기 셋팅 산출물. 현재 Action/DM 이 이 파일을 읽는 계약이 없음 → **로컬 타입(`src/calibrate/types.ts`)으로 충분**. 추후 ActionAgent 가 소비하면 그때 공유 타입 승격(과설계 회피). → **미해결 A**로 리더 확인.
-- **기존 라우트·잡 불변**: `/setup/*`·`/capture/*`·`/mapping`·뷰어 라우트 가산만. `CaptureJob`·`Finalizer`·`Repository` 코드 불변(패턴만 차용).
-- **회귀 0 목표**: 기존 **331 테스트** 통과 유지. 신규 라우트·설정 섹션은 주입/병합 가산이라 기존 경로 미변경.
-- **CameraClient/LpdClient 불변**: 기존 시그니처 그대로 사용(수정 없음).
+### 하위호환 영향도 (프로덕션)
+- `index.ts` 가 `placeRoiFile` 을 주입하므로 **실서비스 기본 동작이 바뀐다**: 정밀수집·라이브검출 모두 기본 **모드 A**(주차면 위 차량만). 이전에는 "모든 차량"이었다.
+- 결과적으로 `detections` → `aggregate()` → `parking_slots` 에 **통로 통행차가 더 이상 들어오지 않는다**. 이전 run 대비 검출 수 감소는 **정상**이며, 감소분은 `status.vpdFilteredOut` 으로 관측된다.
+- 사용자가 모드 B 를 원하면 체크 해제(=이전 동작 100% 복원 — 필터 함수 자체를 건너뜀).
 
 ---
 
-## 8. 리스크 · 완화
+## 6. 유닛테스트 항목 제안 (qa-tester)
 
-1. **gemma 자문 신뢰도 낮음**: 좌표/제안 부정확 → **결정형 비례제어가 주 엔진**, LLM 은 클램프된 소폭 제안만. 검증실패·null 즉시 폴백. (마스터 확정 1 그대로.)
-2. **게인 적응 불안정(진동)**: probe 1회 추정 + `maxStepDeg` 클램프 + 개선 정체 시 `dampGain` 감쇠. 매 스텝 재추정은 범위 제외(단순함).
-3. **번호판 가림·미검출 슬롯**: `pickNearestPlate` null → 스킵·`reason` 기록(잡 계속). zoom 단계 중 소실도 마지막 상태 기록.
-4. **zoom→중심 드리프트**: zoom 루프 내 1스텝 재중심(B-6). 과보정 방지 위해 1회만.
-5. **LLM/LPD 비용·시간**: 슬롯 26 × iter → LPD 다회 호출. `maxIterations` 상한·`settleMs` 합리값. LLM 자문은 옵셔널(off 시 비용 0).
-6. **실제 PTZ 단위(실 PTZ)**: 본 기능은 **시뮬 `/req_move` 도 단위** 한정. 실 PTZ 게인/범위는 후속 과제(명시). → **미해결 B**.
-7. **probe 의 파괴적 이동**: probe 가 화면 밖으로 밀어낼 수 있음 → `probeStepDeg` 작게(1°), probe 후 즉시 재검출로 게인만 취하고 본 제어로 복귀.
-8. **응답 PTZ 신뢰**: 시뮬이 명령 PTZ 를 그대로 echo 하지 않을 수 있어 **항상 응답값으로 상태 재동기화**(명령값 사용 금지).
+**`test/onPlaceFilter.test.ts` (신규, 순수 — 핵심)**
+1. 주차차: bbox 하단이 폴리곤 내부 → `keep`.
+2. **통행차(규칙 선택의 근거 — 회귀 봉인)**: bbox **중심은 뒷줄 폴리곤 안**, **하단 밴드는 통로**(폴리곤 밖) → **`drop`**. ← 중심규칙이었다면 통과했을 케이스.
+3. 폴리곤을 살짝 스치는 차(밴드 겹침 < 0.15) → `drop`.
+4. **다중 폴리곤 OR**: 자기 칸이 아니라 **옆 칸** 밴드와만 겹쳐도 `keep`(배정이 아니라 필터임을 봉인).
+5. 강등: `polys = null` / `[]` → `degraded=true`, `kept.length === vehicles.length`, `filteredOut === 0`.
+6. 방어: `h=0`/`w=0` rect → throw 없이 `false`.
+7. `groundBand`: 밴드가 rect 하단 25% 임을 좌표로 단언.
+
+**`test/captureJobOnPlace.test.ts` (신규)**
+8. `placeRoiFile` = **동결 픽스처 `test/fixtures/PtzCamRoi.unity.json`**(⚠️ HANDOFF §2-2 — 런타임 `data/Place01/PtzCamRoi.json` 절대 사용 금지) + VPD 스텁(주차차 1 + 통행차 1) → `insertDetections` 에 vehicle **1건**.
+9. `vpdOnParkingOnly:false` → vehicle **2건**(모드 B 회귀 0).
+10. 강등: `placeRoiFile` 미주입 → **2건 전량** + `getStatus().vpdOnPlaceDegraded` 존재 + `vpdFilteredOut` 미노출.
+11. LPD 는 필터 무관 — plate 검출 건수 불변(모드 A/B 동일).
+
+**`test/detectPipeline.test.ts` (증분)**
+12. 4번째 인자 `{onlyOnPlace:true, polys}` → 통행차 제외 + `summary.onPlaceOnly=true`, `filteredOut=1`, `vpdCount`=원 검출 수.
+13. **카메라 호출 절감**: 통행차는 zoom 재시도 진입 전에 제외 → `camera.requestImage` 호출 수로 단언.
+14. `{onlyOnPlace:true, polys:null}` → `onPlaceOnly=false` + `onPlaceDegraded` 존재 + 전량 통과.
+15. 3인자 호출(기존) → `onPlaceOnly=false`, `filteredOut=0` (계약 불변).
+
+**`test/captureRoutes.test.ts` (증분)**
+16. `POST /capture/start` body `{vpdOnParkingOnly:false}` → zod 통과 → job 에 전달됨.
+17. `POST /capture/detect` body 미지정 + `placeRoiFile` 주입 → 필터 적용(기본 true 확인).
+18. `POST /capture/detect` body `{vpdOnParkingOnly:false}` + `placeRoiFile` 주입 → 전량 통과.
 
 ---
 
-## 9. 미해결 / 가정(리더 확인 요청)
+## 7. 검증 불가 / 한계 (은닉 금지)
 
-- **A. 출력 타입 위치**: `slot_ptz.json` 타입을 SettingAgent 로컬(`src/calibrate/types.ts`)로 둔다(1차 제안). ActionAgent 소비 계획이 확정되면 `@parkagent/types` 승격. 동의 확인.
-- **B. 실 PTZ 단위**: 본 캘리브레이션은 **시뮬 도(°) 단위** 한정. 실 PTZ 매핑은 후속. 동의 확인.
-- **C. LLM 자문 활성 기본값**: `llm.enabled` 전역값을 그대로 따른다(별도 토글 없음). 자문 전용 플래그가 필요하면 알려주세요(1차는 미추가, 단순함).
-- **D. probe 부호 규약**: pan↔X·tilt↔Y 부호를 **probe 로 실측**(하드코딩 안 함). 만약 시뮬이 probe 응답 PTZ 를 echo 하지 않으면 게인 추정 불가 → fallback 게인 사용·경고. 라이브 확인은 구현 단계(모킹 검증 후).
-- **E. 다중 프리셋 슬롯**: 한 slotId 가 여러 `plateRoiByPreset` 키를 가지면 **키마다 1 항목** 산출(가정). slot 단위 1개만 원하면 알려주세요.
+1. **임계값(0.25 / 0.15)은 해석적으로 유도한 값이 아니다.** 유닛테스트는 규칙의 *논리*만 봉인하며 임계값의 *적절성*은 봉인하지 못한다. → **라이브 검증 필수**: 모드 A 로 정밀수집 1라운드 → 라이브 프레임 위에 유지/제외 차량을 육안 대조(`GET /viewer/api/snapshot?cam=1&preset=N&mode=preset` + 검출 오버레이). `filteredOut` 이 0 이 아니면서 **주차차가 빠지지 않았음**을 확인해야 성공이다.
+2. **가림(occlusion)**: 앞줄 차가 뒷줄 차의 하단을 가리면 bbox 하단이 실제 접지선보다 **위**로 잡혀 접지 근사가 틀어진다. 전 폴리곤 OR 로 상당 부분 흡수되지만 **완전 해결은 SAM 접지선**(HANDOFF §6 후속 과제)뿐이다.
+3. **사후 모드 전환 불가**: 검출 시점 필터라 원 검출이 DB 에 남지 않는다. 모드를 바꾸려면 **재수집**해야 한다(§2 트레이드오프).
+4. **#0 정합 사각지대 상속**: 주차면 ROI 자체가 한 칸 평행이동돼 있으면 필터도 **똑같이 틀린다**(경고 없음, HANDOFF §3). 필터는 ROI 를 검증하지 않는다.
+5. **오목 폴리곤**: `convexIntersectionArea` 는 볼록 전제 → 사용자가 정점을 끌어 오목 quad 를 만들면 겹침이 과대추정된다(FN 감소 방향이라 안전측이지만 부정확).
+6. **모드 A 에서 통행차 위에 번호판 quad 만 표시될 수 있음**(차량 박스 없이). 의도된 동작(§2).
+
+---
+
+## 8. MCP 도구 vs LLM 두뇌 경계
+
+**전부 결정형 도구.** 순수 기하(면적비·다각형 클리핑) — 반복·수치 루프이며 모호성이 없다. **LLM 은 이 경로에 개입하지 않는다**(좌표 불변식 유지). 기존 `floorReviewer`/`occupancyReviewer`(LLM)는 필터된 검출을 **입력으로 받을 뿐** 규칙을 알 필요가 없다.
+
+---
+
+## 9. 미해결 / 마스터 확인 요청
+
+- **Q1 (§1 말미)**: 모드 B 에서 `Finalizer.ts:240` 의 **차량중심 폴백**은 여전히 통행차를 뒷줄 주차면에 배정할 수 있다. 이 규칙을 `isVehicleOnPlace` 로 통일할지 — **이번 범위 밖(요청되지 않은 점유 배정 동작 변경 + 기존 테스트 단언 대상)** 이라 보류하고 후속 과제 등록을 권고한다. 지금 함께 처리할지 판단 요청.
+- **Q2**: 체크박스가 **정밀수집·라이브검출 공용**이다(하나의 `#cap-vpd-onplace` 가 두 payload 에 실림). 수집 중 체크박스를 토글하면 **라이브 검출만** 즉시 바뀌고 **진행 중인 run 은 시작 시 모드를 유지**한다(`status.vpdOnParkingOnly` 로 실제 모드를 표시해 혼동 방지). 이 동작으로 확정해도 되는지 확인 요청.
+
+---
+
+## 10. 실행 순서 (구현자)
+
+1. `src/capture/onPlaceFilter.ts` 신규 → **검증**: `test/onPlaceFilter.test.ts` 항목 1-7 통과(특히 #2 통행차 드롭).
+2. `src/capture/types.ts` CaptureStatus 3필드 → **검증**: `tsc --noEmit` exit 0.
+3. `src/capture/CaptureJob.ts` 배선 → **검증**: 항목 8-11 통과 + 기존 `captureJob*.test.ts` 4건 무변경 통과.
+4. `src/capture/detectPipeline.ts` `OnPlaceOpts` + summary 확장 → **검증**: 항목 12-15 + `detectPipeline.test.ts:118` 기대값 갱신 후 통과.
+5. `src/api/captureRoutes.ts` zod 2곳 + detect 핸들러 → **검증**: 항목 16-18 + `captureRoutes.test.ts:500` 갱신 후 통과.
+6. `src/index.ts` `placeRoiFile` 주입 → **검증**: `tsc --noEmit` + 전체 `vitest run` 전량 통과.
+7. `web/index.html` + `web/app.js` → **검증**: 뷰어에서 체크박스 ON/OFF 로 검출 실행 → `cap-msg` 에 `검출 N/M대 · 주차면필터 ON/OFF` 표시.
+8. **라이브 경험적 검증(§7-1)**: 모드 A 수집 → 유지/제외 차량 육안 대조 → 필요 시 임계값 재조정(이 단계가 성공 판정의 본체).
