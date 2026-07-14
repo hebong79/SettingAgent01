@@ -104,9 +104,21 @@ const fakeCamera = (opts: { throws?: boolean } = {}) => ({
   },
 } as unknown as CameraClient);
 
-const fakeVpd = (opts: { canSeg?: boolean; seg?: VpdSegResult; segThrows?: boolean } = {}) => ({
+/**
+ * ★ **det 스텁 가산**(리더 Q1 승인 — 라우트 내부가 `buildFrameCuboids` 로 교체됨).
+ *
+ * 이전 라우트는 **seg 를 권위**로 차량 목록을 만들었다(seg 검출 4대 → 육면체 4개) → `detect()` 를 아예 안 불렀다.
+ * 새 라우트는 **det 가 권위**다(점유 판정이 쓰는 그 배열) → `detect()` + `segment()` **둘 다** 부르고
+ * `associateDetSeg` 로 잇는다. 그래서 스텁도 det 를 줘야 한다 — **단언은 전부 유지**(계약 불변).
+ *
+ * det 는 seg 와 **같은 rect** 를 준다(같은 차를 두 모델이 본 것 → IoU≈1 → 정합 성공).
+ * ⚠️ 실제 det/seg 는 rect 가 다르다 — 그 현실은 **녹화 픽스처 테스트**(`assocRealFrames.test.ts`)가 본다.
+ *    이 파일이 보는 것은 **경계면**(정규화↔픽셀, 강등 노출, 1-based/0-based)이다.
+ */
+const fakeVpd = (opts: { canSeg?: boolean; seg?: VpdSegResult; segThrows?: boolean; det?: VehicleBox[] } = {}) => ({
   health: async () => true,
-  detect: async () => [],
+  detect: async (): Promise<VehicleBox[]> =>
+    opts.det ?? (opts.seg?.boxes ?? []).map((b) => ({ rect: b.rect, confidence: b.confidence, cls: b.cls })),
   canSegment: () => opts.canSeg !== false,
   segment: async (): Promise<VpdSegResult> => {
     if (opts.segThrows) throw new Error('VPD 연결 실패');

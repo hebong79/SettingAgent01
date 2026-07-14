@@ -16,6 +16,7 @@ import { CheckpointReviewer } from './capture/CheckpointReviewer.js';
 import { FloorRoiReviewer } from './capture/FloorRoiReviewer.js';
 import { OccupancyReviewer } from './capture/OccupancyReviewer.js';
 import { CaptureJob } from './capture/CaptureJob.js';
+import { makeCuboidContextResolver } from './ground/cuboidContext.js';
 import { Finalizer } from './capture/Finalizer.js';
 import { PtzCalibrator } from './calibrate/PtzCalibrator.js';
 import { CRpcClient } from './clients/CRpcClient.js';
@@ -53,10 +54,18 @@ async function main(): Promise<void> {
     store: sqlite, brain, maxPerCheckpoint: llm.floorRoi?.maxPerCheckpoint,
   });
   const occupancyReviewer = new OccupancyReviewer({ store: sqlite, brain });
+  // 차량 육면체 문맥 해결자 — 라우트(captureRoutes)와 **같은 팩토리**(단일 구현).
+  // `ground.enabled=false` → 항상 null → **육면체 전 기능 off**(기존 킬스위치 재사용 — 신규 설정 플래그 0).
+  const cuboidCtx = makeCuboidContextResolver({
+    placeRoiFile: join(tools.store.dataDir, tools.store.placeRoiFile),
+    cameraposFile: tools.map.cameraposFile,
+    ground: tools.ground,
+  });
   const captureJob = new CaptureJob({
     camera, vpd, lpd, store: sqlite, reviewer, floorReviewer, occupancyReviewer, brain, cfg: tools.capture,
     lpdEnabled: tools.setup.lpdEnabled, expectedByPreset,
     placeRoiFile: join(tools.store.dataDir, tools.store.placeRoiFile),
+    cuboidCtx,
   });
   const finalizer = new Finalizer({
     store: sqlite, repo, brain, cfg: tools.capture,

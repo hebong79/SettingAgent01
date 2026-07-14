@@ -16,10 +16,9 @@ import type { SetupTarget } from '../setup/SetupOrchestrator.js';
 import { loadSetupTargets, viewsToTargets, parseCameraViews, type MapFiles } from '../setup/mapTargets.js';
 import { buildGroundInputs } from '../ground/groundInputs.js';
 import { estimateGroundModels } from '../ground/groundModel.js';
-import { buildVehicleCuboids, type SegVehicle } from '../ground/contact.js';
-import { computeAnchorMetrics } from '../ground/anchor.js';
+import { buildFrameCuboids } from '../ground/frameCuboids.js';
+import { makeCuboidContextResolver } from '../ground/cuboidContext.js';
 import { filterVehiclesOnPlace } from '../capture/onPlaceFilter.js';
-import { DEFAULT_ANCHOR_OPTIONS, DEFAULT_CONTACT_OPTIONS } from '../ground/contactTypes.js';
 import type { GroundModel } from '../ground/types.js';
 import { writeCamerapos } from '../setup/cameraposWriter.js';
 import type { PresetProvider } from '../setup/presetProvider.js';
@@ -431,8 +430,18 @@ export function registerCaptureRoutes(app: FastifyInstance, deps: CaptureRouteDe
     }
   });
 
-  // ★ 차량 3D 육면체(VPD seg 마스크 접지선 기반) + 2 DOF 앵커 지표 — 신규·가산 라우트(로드맵 5단계).
-  //   기존 경로 무변경: CaptureJob 은 detect() 를 계속 쓴다 → **마스크가 DB 로 흐르지 않는다**(점유 회귀 0).
+  // 육면체 문맥 해결자 — **단일 구현**(`ground/cuboidContext.ts`). `CaptureJob`(index.ts 조립)도 **같은 팩토리**를 쓴다.
+  //   → ground-model · vehicle-cuboids · detect · CaptureJob 4중복 제거(이중구현 금지 규약).
+  const resolveCuboidContext = makeCuboidContextResolver({
+    placeRoiFile: deps.placeRoiFile,
+    cameraposFile: deps.mapFiles?.cameraposFile,
+    ground: deps.ground,
+  });
+
+  // ★ 차량 3D 육면체 — **라이브 촬영 1회**(임의 프리셋 진단용). 잡·검출 없이도 육면체를 볼 수 있는 유일한 수단.
+  //   ⚠️ 내부는 `buildFrameCuboids`(det 권위 + det↔seg 정합)로 **교체**되었다(리더 Q1=나 승인).
+  //     이전 구현은 **seg 를 권위**로 차량 목록을 만들었다 → 잡·검출 경로(det 권위)와 **다른 차량 집합**을 낼 수 있었다.
+  //     "두 개의 다른 진실"을 없앤다 — 세 표면이 같은 함수를 부른다. VPD 호출은 1→2회(det + seg)가 된다.
   //   404: vpd.segPath 미배선 / ground·place-roi 미설정. 그 외 실패는 전부 200 + issues·summary 로 드러난다.
   if (deps.camera && deps.vpd) {
     const { camera, vpd } = deps;
@@ -453,107 +462,68 @@ export function registerCaptureRoutes(app: FastifyInstance, deps: CaptureRouteDe
         reply.code(400);
         return { error: 'invalid cam/preset (1-based 정수)' };
       }
-      const ground = deps.ground;
       try {
-        // 지면모델: /capture/ground-model 과 **같은 경로**로 산출(이중구현 금지). Unity camera 블록 미사용(C3).
-        const raw = JSON.parse(await readFile(deps.placeRoiFile, 'utf8'));
-        let views: ReturnType<typeof parseCameraViews> = [];
-        if (deps.mapFiles?.cameraposFile) {
-          try {
-            views = parseCameraViews(JSON.parse(await readFile(deps.mapFiles.cameraposFile, 'utf8')));
-          } catch {
-            /* camerapos 없음 → zoom 미상 강등(모델 issues 에 기록됨) */
-          }
-        }
-        let model: GroundModel | undefined;
-        for (const camInput of buildGroundInputs(raw, views)) {
-          if (camInput.camIdx !== cam) continue;
-          model = estimateGroundModels(camInput, ground).models.find((m) => m.presetIdx === preset);
-        }
-        if (!model) {
-          // #12 지면모델 없음 → 육면체 미산출(기존 정책과 동일). 조용히 빈 배열이 아니라 사유를 남긴다.
+        const ctx = await resolveCuboidContext(cam, preset);
+        // 지면모델 없음 → **촬영하지 않고** 즉시 강등 응답(OBS-2). 어차피 육면체를 만들 수 없는데
+        // 카메라를 1회 헛촬영하면 잡과 PTZ 를 다툰다(이전 구현의 조기 return 거동을 유지한다).
+        if (!ctx) {
           return {
             cam,
             preset,
+            imgW: 0,
+            imgH: 0,
             cuboids: [],
             rejected: [],
+            unmatched: [],
+            assoc: [],
             anchor: { depthDevM: null, phaseDevM: null, unmatchedRate: null, n: 0, issues: [] },
-            summary: { detected: 0, cuboidCount: 0, rejectedCount: 0, segDegraded: false, maskMismatch: 0 },
+            summary: {
+              detCount: 0, segCount: 0, kept: 0, filteredOut: 0, matched: 0, unmatchedDet: 0, segOnly: 0,
+              cuboidCount: 0, rejectedCount: 0, segDegraded: false, maskMismatch: 0, segMs: 0, buildMs: 0,
+              detected: 0, onPlace, onPlaceDegraded: false,
+            },
             issues: [`cam${cam} preset${preset} 지면모델 없음 — 육면체 미산출`],
+            estimateUnverified: true,
           };
         }
-
-        // 슬롯 폴리곤(정규화) → 원본 픽셀. 지면모델은 원본 픽셀에서만 성립한다(groundModel §1-2).
-        const place = await loadNormalizedPlaceRoi(deps.placeRoiFile);
-        const polysNorm = place?.byPreset.get(`${cam}:${preset}`)?.map((s) => s.points) ?? null;
-        const slotPolysPx = (polysNorm ?? []).map((pts) =>
-          pts.map((p) => ({ x: p.x * model!.imgW, y: p.y * model!.imgH })),
-        );
-
         const img = await camera.requestImage(cam, preset);
-        const seg = await vpd.segment(img.jpg); // 500(검출 0대) → 빈 배열 강등(throw 없음).
-        const withMask = seg.boxes.filter((b) => b.mask);
-        const toPx = (b: (typeof withMask)[number]): SegVehicle => ({
-          vpdIdx: b.vpdIdx, // ★ 원본 VPD 검출 인덱스 — 마스크 drop(VpdClient)·주차면 필터(아래)를 통과해 보존된다.
-          mask: b.mask!.map((p) => ({ x: p.x * model!.imgW, y: p.y * model!.imgH })),
-          cls: b.cls,
-          confidence: b.confidence,
-          bboxPx: {
-            x1: b.rect.x * model!.imgW,
-            y1: b.rect.y * model!.imgH,
-            x2: (b.rect.x + b.rect.w) * model!.imgW,
-            y2: (b.rect.y + b.rect.h) * model!.imgH,
-          },
-        });
-        const allVehicles = withMask.map(toPx); // ★ 필터 **전** 전량 — 가림 배제([2])의 근거.
-
-        // [0.5] 주차면 필터(모드 A) — 원경·통행 차량이 앵커를 오염시키는 것을 막는다(§D).
-        //   기존 filterVehiclesOnPlace 재사용(신규 기하 0줄). rect 기반이므로 seg 응답에 그대로 걸린다.
+        // ★ det 가 권위 — 점유 판정이 쓰는 그 호출을 여기서도 그대로 쓴다(seg 권위 아님).
+        const det = await vpd.detect(img.jpg);
+        // [0.5] 주차면 필터(모드 A) — det rect 기준. 기존 filterVehiclesOnPlace 재사용(신규 기하 0줄).
         //   폴리곤 부재 → 전량 통과 + degraded(드롭 금지 — 기존 정책 동일).
+        const polysNorm = ctx.slotPolysPx.length
+          ? ctx.slotPolysPx.map((poly) => poly.map((p) => ({ x: p.x / ctx.model.imgW, y: p.y / ctx.model.imgH })))
+          : null;
         const filt = onPlace
-          ? filterVehiclesOnPlace(
-              withMask.map((b, i) => ({ rect: b.rect, i })),
-              polysNorm,
-            )
-          : { kept: withMask.map((b, i) => ({ rect: b.rect, i })), filteredOut: 0, degraded: false };
-        const vehicles: SegVehicle[] = filt.kept.map((k) => allVehicles[k.i]); // ★ 같은 배열 참조 유지(자기 제외 규약).
+          ? filterVehiclesOnPlace(det.map((b, i) => ({ rect: b.rect, i })), polysNorm)
+          : { kept: det.map((b, i) => ({ rect: b.rect, i })), filteredOut: 0, degraded: false };
 
-        const built = buildVehicleCuboids({
-          vehicles,
-          occluderMasks: allVehicles.map((v) => v.mask), // ⚠️ 필터 전 전량(필터로 뺀 차도 가리기는 한다).
-          slotPolysPx,
-          ground: model,
-          slotWidthM: ground.slotWidthM,
-          slotDepthM: ground.slotDepthM,
-          opts: DEFAULT_CONTACT_OPTIONS,
+        const fc = await buildFrameCuboids({
+          jpeg: img.jpg,
+          detBoxes: det, // ★ 권위 — 필터 전 전량(가림 배제의 근거).
+          keptDetIdx: filt.kept.map((k) => k.i),
+          vpd,
+          ctx,
         });
-        const anchor = computeAnchorMetrics(
-          built.cuboids,
-          slotPolysPx,
-          model,
-          built.axes,
-          { ...DEFAULT_ANCHOR_OPTIONS, periodM: ground.slotWidthM },
-        );
+        // ★ seg **호출 실패**(타임아웃·네트워크·5xx)는 이 라우트에서 **502** 다 — 사용자가 육면체를 달라고 물었는데
+        //   VPD 에 닿지도 못한 것을 `200 + 빈 배열` 로 숨기지 않는다. (잡은 같은 상황에서 강등하고 계속 돈다.)
+        //   ⚠️ 검출 0대로 인한 500(S-1)은 실패가 아니다 → `summary.segDegraded` 로 구분되며 200 을 유지한다.
+        if (fc.segError) {
+          reply.code(502);
+          return { error: 'vehicle-cuboids failed', detail: fc.segError };
+        }
         return {
           cam,
           preset,
-          imgW: model.imgW,
-          imgH: model.imgH,
-          cuboids: built.cuboids,
-          rejected: built.rejected,
-          anchor,
+          ...fc,
           summary: {
-            detected: allVehicles.length,
+            ...fc.summary,
+            /** @deprecated `summary.detCount` 를 써라(det 권위). 하위호환 별칭 — 뷰어·기존 테스트가 읽는다. */
+            detected: fc.summary.detCount,
             onPlace,
-            kept: vehicles.length,
-            filteredOut: filt.filteredOut,
             onPlaceDegraded: filt.degraded,
-            cuboidCount: built.cuboids.length,
-            rejectedCount: built.rejected.length,
-            segDegraded: seg.segDegraded,
-            maskMismatch: seg.maskMismatch,
           },
-          issues: [...built.issues, ...model.issues],
+          issues: fc.issues,
         };
       } catch (err) {
         reply.code(502);
@@ -561,6 +531,25 @@ export function registerCaptureRoutes(app: FastifyInstance, deps: CaptureRouteDe
       }
     });
   }
+
+  // ★ 정밀수집 잡이 **방금 찍은 프레임**의 육면체(인메모리 읽기 — **카메라 호출 0 · VPD 호출 0**).
+  //   라이브 촬영 라우트(/capture/vehicle-cuboids)를 잡 경로에 쓰면 (a) 화면에 뜬 프레임과 **다른 프레임**의
+  //   육면체를 그리게 되고, (b) 잡이 PTZ 를 돌리는 중에 **카메라를 뺏는다**. → 잡 경로는 반드시 이 라우트를 쓴다.
+  app.get('/capture/job-cuboids', async (req, reply) => {
+    const q = req.query as { cam?: string; preset?: string };
+    const cam = Number(q.cam);
+    const preset = Number(q.preset);
+    if (!Number.isInteger(cam) || cam <= 0 || !Number.isInteger(preset) || preset <= 0) {
+      reply.code(400);
+      return { error: 'invalid cam/preset (1-based 정수)' };
+    }
+    const c = deps.job.getCuboids(cam, preset);
+    if (!c) {
+      reply.code(404);
+      return { error: `cam${cam} preset${preset} 육면체 없음(잡 미실행 / 해당 프리셋 미촬영 / 육면체 기능 off)` };
+    }
+    return c;
+  });
 
   // 주차면 자동보정 기준 프레임 저장·상호상관(§04). camera+refFrameDir 주입 시에만 등록(가산).
   if (deps.camera && deps.refFrameDir) {
@@ -642,11 +631,19 @@ export function registerCaptureRoutes(app: FastifyInstance, deps: CaptureRouteDe
         // 모드A(기본): 해당 프리셋 주차면 폴리곤 위 차량만. 폴리곤 부재 시 runDetect 가 강등(전량 통과 + 사유).
         const place = await loadNormalizedPlaceRoi(deps.placeRoiFile);
         const polys = place?.byPreset.get(`${cam}:${preset}`)?.map((s) => s.points) ?? null;
-        return await runDetect({ camera, vpd, lpd }, { cam, preset }, cfg, {
-          onlyOnPlace: parsed.data.vpdOnParkingOnly ?? true,
-          polys,
-          degradeReason: place ? `프리셋 ${cam}:${preset} 주차면 0개` : '주차면 파일 없음/로드 실패',
-        });
+        // 육면체 문맥(가산). null → 응답에 `cuboids` 키 없음(기존 계약 불변).
+        const cuboidCtx = await resolveCuboidContext(cam, preset);
+        return await runDetect(
+          { camera, vpd, lpd },
+          { cam, preset },
+          cfg,
+          {
+            onlyOnPlace: parsed.data.vpdOnParkingOnly ?? true,
+            polys,
+            degradeReason: place ? `프리셋 ${cam}:${preset} 주차면 0개` : '주차면 파일 없음/로드 실패',
+          },
+          cuboidCtx,
+        );
       } catch (err) {
         reply.code(502);
         return { error: 'detect failed', detail: err instanceof Error ? err.message : String(err) };

@@ -15,13 +15,18 @@ import { vehicleCenterZoomPtz, inverseProjectQuad, clampQuadCenterToRect, type F
 import { parseCameraViews, type CameraView } from '../setup/mapTargets.js';
 import { buildGroundInputs } from '../ground/groundInputs.js';
 import { estimateGroundModels } from '../ground/groundModel.js';
+import { buildFrameCuboids, type CuboidContext, type FrameCuboids } from '../ground/frameCuboids.js';
 import type { GroundOptions } from '../ground/types.js';
 import { logger } from '../util/logger.js';
 
 /** runDetect 의존성(스텁 주입 가능한 구조적 최소 계약). */
 export interface DetectDeps {
   camera: Pick<CameraClient, 'requestImage' | 'clampZoom' | 'listCameras'>;
-  vpd: Pick<VpdClient, 'detect'>;
+  /**
+   * ★ `segment`/`canSegment` 는 **Partial** 이다 — 기존 테스트 스텁(`{ detect }` 만 구현)이
+   * **타입 에러 없이 그대로 컴파일**된다(회귀 0, CLAUDE.md §3). seg 부재 = 육면체 미산출(강등).
+   */
+  vpd: Pick<VpdClient, 'detect'> & Partial<Pick<VpdClient, 'segment' | 'canSegment'>>;
   lpd: Pick<LpdClient, 'detect'>;
 }
 
@@ -77,6 +82,11 @@ export interface DetectResult {
     /** 모드A 를 요청했으나 폴리곤이 없어 강등된 사유. */
     onPlaceDegraded?: string;
   };
+  /**
+   * ★ 차량 3D 육면체(가산·옵셔널). `cuboidCtx` 미주입 시 **키 자체가 없다** → 기존 응답 shape 과 완전히 동일(회귀 0).
+   * 산출은 base 프레임(det bbox 가 나온 **바로 그 프레임**) 기준이며 zoom 재시도 뷰는 쓰지 않는다.
+   */
+  cuboids?: FrameCuboids;
 }
 
 /** 모드A 옵션. 미지정 → 필터 없음(runDetect 3인자 계약 불변). */
@@ -218,6 +228,8 @@ export async function runDetect(
   args: { cam: number; preset: number },
   cfg: DetectCfg,
   onPlace?: OnPlaceOpts,
+  /** ★ 차량 육면체 문맥(옵셔널·가산). 미지정 시 응답에 `cuboids` 키 자체가 없다 — 기존 계약 완전 불변. */
+  cuboidCtx?: CuboidContext | null,
 ): Promise<DetectResult> {
   const { cam, preset } = args;
   // 프리셋 실제 PTZ 를 신뢰 원천으로 base 프레임을 렌더(시뮬 echo 0/0/1 불신 — 리더 실측 확정).
@@ -245,6 +257,22 @@ export async function runDetect(
       onPlaceOnly = true;
       filteredOut = r.filteredOut;
     }
+  }
+
+  // ★ 차량 3D 육면체(가산). 위치는 **주차면 필터 직후 · zoom 재시도 루프 前**(루프와 무관·독립).
+  //   base 프레임(det bbox 가 나온 바로 그 프레임)에서 산출한다. seg 미배선/실패 → 강등(throw 0) → `cuboids` 미포함.
+  //   `deps.vpd.segment` 가 없으면(기존 스텁) 아예 시도하지 않는다.
+  let cuboids: FrameCuboids | undefined;
+  if (cuboidCtx && deps.vpd.segment && deps.vpd.canSegment) {
+    const vpdSeg = deps.vpd as Required<Pick<VpdClient, 'segment' | 'canSegment'>>;
+    cuboids = await buildFrameCuboids({
+      jpeg: base.jpg,
+      detBoxes: rawVehicles, // ★ 권위 — 필터 전 전량(가림 배제의 근거).
+      // 참조 동일성(필터 경로 무접촉). ⚠️ **-1 을 버리지 않는다**(DEFECT-2) — 전제가 깨지면 issues 로 드러난다.
+      keptDetIdx: vehicles.map((v) => rawVehicles.indexOf(v)),
+      vpd: vpdSeg,
+      ctx: cuboidCtx,
+    });
   }
 
   // VPD 박스를 BuiltSlot(positionIdx/roi/confidence)로 어댑트해 기존 매칭 재사용(신규 매칭 코드 0).
@@ -313,5 +341,6 @@ export async function runDetect(
       lpdFilteredOut,
       ...(onPlaceDegraded ? { onPlaceDegraded } : {}),
     },
+    ...(cuboids ? { cuboids } : {}), // 미산출 시 **키 자체가 없다**(기존 응답 shape 불변).
   };
 }

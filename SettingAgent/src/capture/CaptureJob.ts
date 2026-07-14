@@ -16,6 +16,7 @@ import type { PlateBox } from '../clients/LpdClient.js';
 import { quadBoundingRect } from '../domain/geometry.js';
 import { loadNormalizedPlaceRoi, type NormalizedPlaceRoi } from './placeRoi.js';
 import { filterVehiclesOnPlace, filterPlatesOnPlace } from './onPlaceFilter.js';
+import { buildFrameCuboids, type CuboidContext, type FrameCuboids } from '../ground/frameCuboids.js';
 import { logger } from '../util/logger.js';
 
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -45,7 +46,16 @@ export interface CaptureJobDeps {
   expectedByPreset?: Record<string, number>;
   /** 미리 정의된 주차면 폴리곤 파일(PtzCamRoi.json). 모드A(주차면 위 차량만) 필터 소스. 미주입 시 강등(전량 통과). */
   placeRoiFile?: string;
+  /**
+   * ★ 차량 육면체 문맥 해결자(옵셔널·가산). 주입 시 **매 라운드** 프리셋마다 seg 를 1회 더 불러 육면체를 산출한다.
+   * 미주입(또는 `ground.enabled=false` → 라우트가 미주입) → **육면체 전 기능 off**(신규 설정 플래그 0 — 기존 킬스위치 재사용).
+   * 산출물은 **인메모리**에만 둔다(DB 무접촉). 실패는 전부 흡수 — **잡은 절대 죽지 않는다**.
+   */
+  cuboidCtx?: (camIdx: number, presetIdx: number) => Promise<CuboidContext | null>;
 }
+
+/** 잡이 들고 있는 프리셋별 최신 육면체(인메모리 — DB 저장 금지). `GET /capture/job-cuboids` 가 읽는다. */
+export type JobCuboids = FrameCuboids & { camIdx: number; presetIdx: number; roundIdx: number; capturedAt: string };
 
 export interface CaptureStartParams {
   count: number;
@@ -104,6 +114,8 @@ export class CaptureJob {
   private onPlaceDegraded?: string;
   /** 강등 warn 중복 억제(프리셋 키당 1회). */
   private degradeWarned = new Set<string>();
+  /** ★ 프리셋별 최신 차량 육면체(인메모리 — **DB 무접촉**). key=`${camIdx}:${presetIdx}`. start() 에서 clear. */
+  private cuboidsByPreset = new Map<string, JobCuboids>();
 
   private readonly setTimer: (fn: () => void, ms: number) => NodeJS.Timeout;
   private readonly clearTimer: (h: NodeJS.Timeout) => void;
@@ -164,7 +176,25 @@ export class CaptureJob {
       ...(this.vpdFilteredOut > 0 ? { vpdFilteredOut: this.vpdFilteredOut } : {}),
       ...(this.lpdFilteredOut > 0 ? { lpdFilteredOut: this.lpdFilteredOut } : {}),
       ...(this.onPlaceDegraded ? { vpdOnPlaceDegraded: this.onPlaceDegraded } : {}),
+      ...(this.cuboidsByPreset.size > 0 ? { cuboid: this.cuboidIndex() } : {}),
     };
+  }
+
+  /**
+   * ★ status 에는 **경량 인덱스만** 싣는다(프리셋당 숫자 4개). status 는 초당 폴링되므로 전문(수십 KB)을
+   * 매번 실어 보내지 않는다 — 뷰어는 `round` 가 **바뀔 때만** `GET /capture/job-cuboids` 로 전문을 가져간다.
+   */
+  private cuboidIndex(): Record<string, { round: number; cuboidCount: number; unmatched: number; segDegraded: boolean }> {
+    const out: Record<string, { round: number; cuboidCount: number; unmatched: number; segDegraded: boolean }> = {};
+    for (const [key, c] of this.cuboidsByPreset) {
+      out[key] = {
+        round: c.roundIdx,
+        cuboidCount: c.summary.cuboidCount,
+        unmatched: c.summary.unmatchedDet,
+        segDegraded: c.summary.segDegraded,
+      };
+    }
+    return out;
   }
 
   /** 잡 시작. running/stopping/finalizing 중이면 거부(throw). */
@@ -188,6 +218,7 @@ export class CaptureJob {
     this.llmFloorUnavailable = false;
     this.llmOccupancyUnavailable = false;
     this.lastFrameByPreset.clear();
+    this.cuboidsByPreset.clear(); // 이전 run 의 육면체 잔여 제거(인메모리 — DB 무접촉).
     // time 모드 첫 체크포인트는 시작 후 intervalMs 경과 시(즉시 발화 방지). rounds 모드는 미사용.
     this.lastCheckpointMs = this.monotonic();
     this.startedAt = this.now();
@@ -339,6 +370,52 @@ export class CaptureJob {
     }
 
     if (dets.length > 0) this.deps.store.insertDetections(obsId, t.camIdx, t.presetIdx, dets);
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ↑ 여기까지가 **점유 판정 경로**다 — 위 블록은 한 줄도 바뀌지 않았다.
+    // ↓ 아래는 **가산**(읽기 전용). `raw`/`vehicles` 를 읽기만 하고 DB 에 아무것도 쓰지 않는다.
+    //   ∴ 육면체 on/off 는 `insertDetections` 인자를 바꿀 수 없다(구조적 회귀 0 — T6 가 봉인).
+    // ─────────────────────────────────────────────────────────────────────────
+    if (this.deps.cuboidCtx) {
+      // ★ `keptDetIdx` 는 필터를 **재계산하지 않고** 참조 동일성(indexOf)으로 얻는다 → 필터 경로 무접촉.
+      //   (`filterVehiclesOnPlace` 는 Array.filter — 입력 객체 참조를 보존한다.)
+      //   ⚠️ **-1 을 여기서 버리지 않는다**(DEFECT-2): 전제가 깨지면 `buildFrameCuboids` 가 issues 로 **드러낸다**.
+      //      예전엔 `.filter((i) => i >= 0)` 가 위반을 삼켜 `cuboids:[] · issues:[]`(빈 오버레이 + 무사유)가 됐다.
+      const keptDetIdx = vehicles.map((v) => raw.indexOf(v));
+      await this.updateCuboids(t, cap.jpg, raw, keptDetIdx, roundIdx);
+    }
+  }
+
+  /**
+   * 프리셋 1개분 육면체 갱신(가산·인메모리). **throw 0** — 잡 사망 절대 금지(마스터 §5).
+   * `buildFrameCuboids` 자체가 throw 0 이지만, 문맥 해결(파일 IO)·예기치 못한 오류까지 **한 겹 더** 흡수한다(방어 이중화).
+   */
+  private async updateCuboids(
+    t: SetupTarget,
+    jpeg: Buffer,
+    raw: readonly VehicleBox[],
+    keptDetIdx: readonly number[],
+    roundIdx: number,
+  ): Promise<void> {
+    try {
+      const ctx = await this.deps.cuboidCtx!(t.camIdx, t.presetIdx);
+      const fc = await buildFrameCuboids({ jpeg, detBoxes: raw, keptDetIdx, vpd: this.deps.vpd, ctx });
+      this.cuboidsByPreset.set(`${t.camIdx}:${t.presetIdx}`, {
+        ...fc,
+        camIdx: t.camIdx,
+        presetIdx: t.presetIdx,
+        roundIdx,
+        capturedAt: this.now(),
+      });
+    } catch (e) {
+      // 육면체는 **관찰용 가산 기능**이다 — 실패해도 수집은 계속된다(점유·DB 무영향).
+      logger.warn({ err: e, cam: t.camIdx, preset: t.presetIdx }, '차량 육면체 산출 실패(흡수 — 수집 계속)');
+    }
+  }
+
+  /** 프리셋별 육면체 전문(GET /capture/job-cuboids). 카메라·VPD 호출 0 — 인메모리 읽기만. */
+  getCuboids(camIdx: number, presetIdx: number): JobCuboids | undefined {
+    return this.cuboidsByPreset.get(`${camIdx}:${presetIdx}`);
   }
 
   /** 대상 프리셋의 주차면 폴리곤(차량·번호판 필터 공유 소스). placePromise 는 캐시된 Promise — 파일 I/O 재발생 없음. */

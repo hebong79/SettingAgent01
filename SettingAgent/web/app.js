@@ -99,8 +99,9 @@ const state = {
   dbTotal: 0, // 최근 조회 total(prev/next 활성화 판정).
   groundByKey: {}, // cam:preset → 지면모델(GET /capture/ground-model). 육면체 투영의 유일한 근거(추정은 서버 소유).
   groundLoaded: false, // 지면모델 1회 로드 가드(실패해도 세션 1회).
-  vcuboidByKey: {}, // cam:preset → 차량 육면체 응답(GET /capture/vehicle-cuboids). 토글 켤 때만 로드(카메라 1회 촬영).
+  vcuboidByKey: {}, // cam:preset → 차량 육면체(정밀수집 job-cuboids / 검출 응답 인라인 / 수동 라이브 촬영).
   vcuboidLoading: new Set(), // 중복 요청 가드(프리셋 키 단위).
+  vcuboidRound: {}, // cam:preset → 마지막으로 받아온 잡 라운드. status 인덱스가 바뀔 때만 전문을 재요청(폴링 비용 0).
 };
 
 const DB_LIMIT = 200; // DB 뷰어 페이지 크기(서버 clamp 상한 1000 내).
@@ -267,9 +268,10 @@ function drawRoiOverlay() {
   drawFileFloorRoi(ctx); // 파일 기반 바닥 ROI(PtzCamRoi.json) — 파일 모드 바닥 레이어 → mapping 가드 이전.
   drawDetectOverlay(ctx); // 라이브 VPD/LPD 검출 오버레이(§04) — 수집 중/미최종화에도 표시 → mapping 가드 이전.
   drawCuboidOverlay(ctx); // 3D 육면체(가산 레이어) — 산출물 없이도(수집 중/파일 모드) 그린다 → mapping 가드 이전.
-  drawVehicleCuboidOverlay(ctx); // 차량 3D 육면체(VPD seg 접지선) — 토글 기본 off → 끄면 기존 렌더와 픽셀 동일.
+  drawVehicleCuboidOverlay(ctx); // 차량 3D 육면체(det 권위 + seg 마스크 접지선) — 토글 off 면 기존 렌더와 픽셀 동일.
   updateGroundBadge(); // 어느 지면모델이 표시 중인지 항상 안다(소스 배지).
   updateAnchorBadge(); // 2 DOF 앵커 지표(차량 접지선 vs 슬롯 격자).
+  updateVehicleCuboidBadge(); // ⚠️ 화면이 거짓말하지 않게 — "미검증 추정" + 정합 요약을 **항상** 드러낸다.
   if (state.roiHidden || !state.mapping) return; // 초기화/수집 중엔 ROI(차량/번호판/바닥) 표시 안 함.
   const key = presetKey(state.cam, state.preset);
   const showVehicle = $('roi-vehicle').checked;
@@ -452,9 +454,15 @@ function drawCuboidOverlay(ctx) {
 // --- 차량 3D 육면체(VPD seg 접지선) + 2 DOF 앵커 --------------------------
 /**
  * 차량 육면체 오버레이 — **가산 레이어**(#roi-vcuboid off 면 기존 렌더와 픽셀 동일).
- * 바닥 quad·높이는 **서버**(GET /capture/vehicle-cuboids)가 산출한다. 뷰어는 기존 projectCuboid 로 **투영만** 한다
- * (뷰어 수학 신규 0줄 — 주차면 육면체와 같은 함수).
- * 데이터는 토글을 켤 때 1회 로드한다(라우트가 카메라를 1회 촬영하므로 자동 재호출하지 않는다).
+ * 바닥 quad·높이는 **서버**가 산출한다(`buildFrameCuboids` — det 권위 + seg 마스크 정합).
+ * 뷰어는 기존 projectCuboid 로 **투영만** 한다(뷰어 수학 신규 0줄 — 주차면 육면체와 같은 함수).
+ *
+ * 데이터 출처 3종(전부 **같은 서버 함수**의 산출물 — "두 개의 진실" 없음):
+ *   · 정밀수집 중 → `GET /capture/job-cuboids`(status 인덱스의 round 가 바뀔 때만. 카메라 호출 0)
+ *   · 검출 실행   → `POST /capture/detect` 응답 **인라인**(추가 왕복 0)
+ *   · 수동 토글   → `GET /capture/vehicle-cuboids`(라이브 촬영 1회 — 잡이 안 돌 때만 쓴다)
+ *
+ * ⚠️ 그려지는 상자는 **미검증 추정**이다 — `#vcuboid-badge` tooltip 참조. 미정합 차량은 **안 그린다**(빈 자리).
  */
 function drawVehicleCuboidOverlay(ctx) {
   if (!$('roi-vcuboid').checked) return;
@@ -511,6 +519,76 @@ function updateAnchorBadge() {
     `강등 ${data.summary?.rejectedCount ?? 0}대 / seg500 ${data.summary?.segDegraded ? 'Y' : 'N'}`,
   ];
   badge.title = `${lines.join('\n')}\n\n${ANCHOR_LIMIT}`;
+}
+
+/**
+ * ⚠️ **미검증 추정 배지 — 화면이 거짓말하면 안 된다**(마스터 §7 · 정본 §9-1).
+ * 육면체를 "측정값"으로 오인하면 안 된다: 배치(X,Y)의 정확도를 재는 **정량 지표가 없고**(자기참조 잔차뿐),
+ * L·H 는 **항상 차종 prior** 다. 이 tooltip 이 운영자가 그 사실을 읽는 **유일한 표면**이다(D-2 의 교훈 —
+ * 소스 주석만 고치면 화면은 계속 거짓말한다).
+ */
+const VCUBOID_UNVERIFIED =
+  '[⚠️ 미검증 추정 — 측정값이 아니다]\n' +
+  '· 위치(X,Y): 앞범퍼 접지선 역투영에서 나온 값이나, **그 정확도를 재는 지표가 없다**(자기참조 잔차만 존재).\n' +
+  '            유일한 근거는 육안이며 육안은 오판한 전례가 있다.\n' +
+  '· 길이(L)·높이(H): **항상 차종 prior**(세단 4.7m / 1.45m) — 원리적으로 관측 불가.\n' +
+  '            SUV·트럭이면 육면체가 틀린다.\n' +
+  '· 방향(yaw): 슬롯 폴리곤 prior.\n' +
+  '· 폭(W): 관측(점선 = prior 강등분).\n' +
+  '· 미정합 차량은 **아무것도 그리지 않는다**(빈 자리로 남는다) — 아래 카운트로 드러난다.';
+
+/** 차량 육면체 배지 — 토글이 켜지면 **항상** "추정(미검증)" + 정합 요약을 보인다. */
+function updateVehicleCuboidBadge() {
+  const badge = $('vcuboid-badge');
+  if (!badge) return;
+  const on = $('roi-vcuboid').checked;
+  badge.hidden = !on;
+  if (!on) return;
+  const data = state.vcuboidByKey[currentFrameKey()];
+  const s = data?.summary;
+  if (!s) {
+    badge.textContent = '추정(미검증) · 육면체 —';
+    badge.title = VCUBOID_UNVERIFIED;
+    badge.classList.add('warn');
+    return;
+  }
+  // 정합 요약을 **항상** 드러낸다 — 미정합 차량이 조용히 사라지지 않게(설계 §6-7).
+  badge.textContent =
+    `추정(미검증) · 육면체 ${s.cuboidCount} · 정합 ${s.matched}/${s.kept}` +
+    (s.unmatchedDet ? ` · 미정합 ${s.unmatchedDet}` : '');
+  const detail = [
+    `det ${s.detCount}대(권위) → 주차면필터 통과 ${s.kept} · 제외 ${s.filteredOut}`,
+    `seg ${s.segCount}대 → 정합 ${s.matched} · 미정합 det ${s.unmatchedDet} · seg-only ${s.segOnly}(가림자로만 사용)`,
+    `육면체 ${s.cuboidCount} · 강등 ${s.rejectedCount}${s.segDegraded ? ' · seg 500(검출 0대)' : ''}`,
+    ...(data.segError ? [`⚠️ seg 호출 실패: ${data.segError}`] : []),
+    ...(data.unmatched ?? []).map((u) => `· 미정합 det#${u.detIdx}: ${u.reason}`),
+    ...(data.issues ?? []),
+  ];
+  badge.title = `${VCUBOID_UNVERIFIED}\n\n[이 프레임]\n${detail.join('\n')}`;
+  badge.classList.toggle('warn', s.unmatchedDet > 0 || s.rejectedCount > 0 || !!data.segError);
+}
+
+/**
+ * 정밀수집 잡의 육면체를 가져온다(GET /capture/job-cuboids — **카메라 촬영 0 · VPD 호출 0**).
+ * status 의 경량 인덱스(`cuboid[key].round`)가 **바뀔 때만** 부른다 → 폴링마다 수십 KB 를 끌지 않는다.
+ * ⚠️ 라이브 촬영 라우트(/capture/vehicle-cuboids)를 수집 중에 부르면 **잡에게서 카메라를 뺏는다** — 쓰지 않는다.
+ */
+async function syncJobCuboids(status) {
+  const idx = status?.cuboid;
+  if (!idx) return;
+  for (const [key, meta] of Object.entries(idx)) {
+    if (state.vcuboidRound[key] === meta.round) continue; // 같은 라운드 → 재요청 안 함.
+    state.vcuboidRound[key] = meta.round;
+    try {
+      const [cam, preset] = key.split(':');
+      const res = await fetch(`/capture/job-cuboids?cam=${cam}&preset=${preset}`, { cache: 'no-store' });
+      if (!res.ok) continue;
+      state.vcuboidByKey[key] = await res.json();
+      drawRoiOverlay();
+    } catch {
+      /* 네트워크 실패 → 이전 육면체 유지(수집은 계속된다) */
+    }
+  }
 }
 
 /** 앵커 임계(서버 contactTypes.ts 와 같은 값 — 표시 전용). */
@@ -679,6 +757,9 @@ async function runLiveDetect() {
   if (!res.ok) return; // 실패는 조용히 미표시(기존 검출 결과 유지).
   const detect = await res.json();
   state.detectByKey[presetKey(cam, preset)] = detect; // 프리셋 키별 보존(덮어쓰기 아님).
+  // 차량 육면체는 **검출 응답에 인라인**으로 온다(서버가 base 프레임에서 산출 — 추가 왕복 0).
+  // 육면체 기능 off/강등이면 키가 없다 → 이전 값을 지우지 않는다(조용한 소실 방지).
+  if (detect.cuboids) state.vcuboidByKey[presetKey(cam, preset)] = detect.cuboids;
   const s = detect.summary;
   if (s) {
     $('cap-msg').textContent =
@@ -1683,6 +1764,7 @@ function showCaptureResult(status) {
 async function capPoll() {
   const status = await capFetchStatus();
   renderCaptureStatus(status);
+  void syncJobCuboids(status); // 잡 육면체: round 가 바뀐 프리셋만 전문을 가져온다(카메라·VPD 호출 0).
   const st = status?.state ?? 'idle';
   state.lastRunId = status?.runId ?? state.lastRunId; // 점유율 조회 근거(런 유지).
   // floor ROI LLM 동작불가 → 경고 메시지박스 1회 표시(런당 가드).
@@ -2744,7 +2826,9 @@ function wire() {
   $('cap-floor-llm').addEventListener('change', drawRoiOverlay); // 바닥 ROI 소스(LLM/파일) 모드 전환 → 즉시 재렌더.
   $('roi-detect').addEventListener('change', drawRoiOverlay); // 라이브 검출 오버레이 토글(§04).
   $('roi-cuboid').addEventListener('change', drawRoiOverlay); // 3D 육면체 레이어 토글(기본 off → 회귀 0).
-  // 차량 육면체 토글(기본 off → 회귀 0). 켤 때만 서버 왕복(라우트가 카메라를 1회 촬영) — 캐시 있으면 재사용.
+  // 차량 육면체 토글(**기본 on** — Goal 1·2 가 "화면에 그려진다"인데 기본 off 면 아무것도 안 보인다).
+  // 렌더 토글일 뿐 점유 판정과 무관하다(회귀 0). 정밀수집·검출이 돌면 데이터는 자동으로 온다;
+  // 아무것도 안 돌고 있을 때 켜면 그때만 라이브 촬영 1회(캐시 있으면 재사용).
   $('roi-vcuboid').addEventListener('change', (e) => {
     drawRoiOverlay();
     if (e.target.checked && !state.vcuboidByKey[currentFrameKey()]) loadVehicleCuboids();

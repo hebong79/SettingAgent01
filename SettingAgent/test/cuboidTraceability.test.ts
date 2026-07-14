@@ -7,6 +7,31 @@
 //   `bboxes[i]`/`confidences[i]`/`masks[i]` 를 되짚으면 **엉뚱한 차량**을 가리킨다(응답에 그 배열이 없으니 대조도 불가).
 //
 // → `vpdIdx`(원본 검출 인덱스)를 산출물까지 관통시킨다. 이 파일은 **두 재색인이 동시에 일어나는** 경로를 봉인한다.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// ⚠️⚠️ **2026-07-14 — `vpdIdx` 의 의미가 바뀌었다. 이 파일은 그대로 두되 무엇이 바뀌었는지 여기 남긴다.**
+//     (직전 커밋 23b24d4 에서 봉인한 내용이므로 조용히 바꾸지 않는다 — 리더 지시.)
+//
+//   **바뀐 것**: 프로덕션 육면체 경로가 **det 권위**로 이동했다(마스터 결정). 이제 `buildFrameCuboids` 가
+//     det 검출 목록(점유 판정이 쓰는 그 배열)을 권위로 삼고, seg 마스크를 `associateDetSeg` 로 **붙인다.**
+//     → 프로덕션에서 `VehicleCuboid.vpdIdx` 는 **det 검출 인덱스**다. seg 응답의 `masks[]` 로 되짚는 키는
+//       이제 별도로 `FrameCuboids.assoc[].segIdx` 다. **두 키가 분리됐다.**
+//
+//   ⚠️ **이 문장은 한때 거짓이었다(QA DEFECT-1, 2026-07-15 수정).** `assoc[].segIdx` 가 실제로는
+//     **마스크 drop 후 압축된 배열의 위치**였다 — `maskMismatch > 0` 이면 `masks[segIdx]` 가 **엉뚱한 차량**을
+//     가리켰다. **바로 이 파일이 봉인하는 D-3 함정의 재발**이었고(해결책인 `SegBox.vpdIdx` 를 손에 쥔 채 안 썼다),
+//     실측 3프레임이 `maskDrop=0` 이라 우연히 드러나지 않았다.
+//     → 이제 `buildFrameCuboids` 가 **출력 경계에서 `SegBox.vpdIdx`(원문 키)로 되돌려서** 싣는다.
+//       봉인: `frameCuboids.test.ts` "DEFECT-1 — assoc[].segIdx 는 seg 응답 원문 인덱스다".
+//
+//   **안 바뀐 것(그래서 이 파일이 여전히 유효한 것)**:
+//     · `VpdClient.segment()` 의 `SegBox.vpdIdx` 는 여전히 **seg 응답 내부의 원본 인덱스**다(마스크 drop 을 뚫는 키).
+//     · `buildVehicleCuboids` 는 `SegVehicle.vpdIdx` 를 **그대로 통과**시킨다 — 무엇을 넣든 재색인하지 않는다.
+//       이 **통과 보장**(두 번 재색인돼도 키가 안 흔들린다)이 이 파일이 봉인하는 성질이며, **지금도 참이다.**
+//
+//   ⚠️ 단 이 파일이 조립하는 배선(seg 를 권위로 vpdIdx 를 채우는 것)은 **더 이상 프로덕션 경로가 아니다.**
+//      프로덕션의 det-권위 의미는 `frameCuboids.test.ts`("출처 분리") 와 `captureJobCuboid.test.ts` 가 봉인한다.
+// ─────────────────────────────────────────────────────────────────────────────
 
 import { describe, expect, it } from 'vitest';
 import { VpdClient } from '../src/clients/VpdClient.js';

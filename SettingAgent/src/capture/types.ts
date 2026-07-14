@@ -148,4 +148,10 @@ export interface CaptureStatus {
   lpdFilteredOut?: number;
   /** 주차면 폴리곤 부재로 모드B 강등 중(사유). 조용한 폴백 금지 — UI 가 항상 소스를 안다. */
   vpdOnPlaceDegraded?: string;
+  /**
+   * ★ 차량 육면체 **경량 인덱스**(프리셋키 → 숫자 4개). 전문은 `GET /capture/job-cuboids` 로 따로 가져간다.
+   * status 는 초당 폴링되므로 육면체 전문(프리셋 7개 × 차량 10대 ≈ 수십 KB)을 매번 싣지 않는다.
+   * 뷰어는 `round` 가 **바뀔 때만** 전문을 재요청한다.
+   */
+  cuboid?: Record<string, { round: number; cuboidCount: number; unmatched: number; segDegraded: boolean }>;
 }

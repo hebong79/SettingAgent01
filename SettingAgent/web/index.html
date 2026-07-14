@@ -45,9 +45,10 @@
             <label title="주차면을 3D 육면체로 표시(지면모델 기반). 기존 바닥 ROI 는 그대로 유지">
               <input id="roi-cuboid" type="checkbox" /> 육면체
             </label>
-            <label title="차량을 3D 육면체로 표시(VPD seg 마스크 접지선 기반). 켤 때 현재 프리셋을 1회 촬영·검출한다">
-              <input id="roi-vcuboid" type="checkbox" /> 차량육면체
+            <label title="차량을 3D 육면체로 표시(det 검출 + seg 마스크 접지선). 정밀수집·검출 실행 시 자동 갱신. ⚠️ 배치는 미검증 추정이다(배지 참조)">
+              <input id="roi-vcuboid" type="checkbox" checked /> 차량육면체
             </label>
+            <span id="vcuboid-badge" class="badge ground-badge" hidden title="차량 육면체 — 미검증 추정">추정(미검증)</span>
             <label class="field compact" title="육면체 높이(m). 승용차 ≈ 1.5m">
               높이
               <input id="cuboid-h" type="range" min="0.5" max="3.0" step="0.05" value="1.5" />
@@ -159,13 +160,13 @@
             </div>
           </div>
           <div class="capture-grid">
-            <label class="field">반복 횟수 <input id="cap-count" type="number" min="1" value="50" /></label>
+            <label class="field">반복 횟수 <input id="cap-count" type="number" min="1" value="1" /></label>
             <label class="field">주기(초) <input id="cap-interval" type="number" min="1" value="30" /></label>
             <div class="field cap-trigger">
               <label><input type="radio" name="cap-trigmode" value="rounds" checked /> 라운드 주기</label>
               <label><input type="radio" name="cap-trigmode" value="time" /> 시간 주기</label>
             </div>
-            <label class="field" id="cap-checkpoint-field">체크포인트(라운드) <input id="cap-checkpoint" type="number" min="1" value="10" /></label>
+            <label class="field" id="cap-checkpoint-field">체크포인트(라운드) <input id="cap-checkpoint" type="number" min="1" value="1" /></label>
             <label class="field" id="cap-ckint-field" hidden>체크포인트 간격(초) <input id="cap-ckint" type="number" min="1" value="60" /></label>
             <label class="field check"><input id="cap-floor-llm" type="checkbox" /> 바닥 LLM 사용</label>
             <label class="field check"><input id="cap-vpd-onplace" type="checkbox" checked /> 주차면 위 차량만 검출(번호판 포함)</label>
