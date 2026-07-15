@@ -43,7 +43,6 @@ import {
   occupancyAverage, // 전체 평균 점유율(순수)
   normalizePtzCamRoi, // PtzCamRoi.json raw → 프리셋별 정규화 폴리곤 + 검수(순수)
   selectFloorRoi, // 바닥 ROI 소스 선택(LLM/파일 토글, 순수)
-  computeOccupancy, // 로직 점유 판정(파일 바닥ROI × LPD 번호판 중심, 순수, R4/R5)
   buildFlatSlotRows, // 전체 주차면 평면 목록(전역 인덱스 오름차순, 순수, R2)
   normalizeGlobalIdx, // 전역 인덱스 정규화·재부여(순수, R3)
   reindexPlaceSpace, // 전역 인덱스 재지정(밀어내기, 순수, R4)
@@ -62,6 +61,9 @@ import {
   formatGroundBadge, // 지면모델 소스 배지 문자열(순수)
   groundModelsByKey, // ground-model 응답 models[] → cam:preset 맵(순수)
 } from './core.js';
+import { OccupancyJudge } from './occupancy.js'; // 번호판 우선·bbox 폴백 점유 판정(순수 컴포넌트).
+
+const occupancyJudge = new OccupancyJudge(); // 임계값 기본(groundBandRatio=0.25, minBandOverlap=0.15). 매 프레임 재사용.
 
 const $ = (id) => document.getElementById(id);
 const api = (path) => `/viewer/api${path}`;
@@ -342,9 +344,11 @@ function updateLogicOccupancy() {
   }));
   if (!floorPolys.length) return;
   const detect = state.detectByKey[key]; // 프리셋 키로 조회 → 항상 그 프리셋 검출(일치 판정 불요).
-  const plates = [...(detect?.plates ?? []), ...(detect?.vehicles ?? []).map((v) => v.plate).filter(Boolean)];
+  // OccupancyJudge: 1단계 번호판(computeOccupancy 위임) → 2단계 비점유 슬롯 bbox 폴백. union 은 judge 내부에서 조립.
   state.occComputeByKey[key] = {
-    spaces: computeOccupancy(floorPolys, plates).map((o) => ({ id: o.idx, occupied: o.occupied, center: o.center })),
+    spaces: occupancyJudge
+      .judge(floorPolys, detect)
+      .map((o) => ({ id: o.idx, occupied: o.occupied, source: o.source, center: o.center, vehicleRect: o.vehicleRect })),
   };
 }
 
@@ -358,7 +362,20 @@ function drawOccupancyOverlay(ctx) {
   if (!$('roi-occupancy').checked) return;
   const occ = state.occComputeByKey[currentFrameKey()];
   for (const sp of occ?.spaces ?? []) {
-    if (!sp.occupied || !sp.center) continue; // 점유+중심 보유분만 원 표시(R5).
+    if (!sp.occupied) continue;
+    if (sp.source === 'bbox' && sp.vehicleRect) {
+      // 점유·번호 미인식(bbox 폴백): 차량 bbox 하단 중심(접지 근사)에 주황 원 + '번호미인식' 배지.
+      const r = sp.vehicleRect;
+      const bx = (r.x + r.w / 2) * overlay.width;
+      const by = (r.y + r.h) * overlay.height;
+      ctx.beginPath();
+      ctx.arc(bx, by, 5, 0, Math.PI * 2);
+      ctx.fillStyle = '#ff9f1a'; // 점유·번호미인식=주황 소원(bbox 근거).
+      ctx.fill();
+      ctx.fillText(`${sp.id} 번호미인식`, bx + 7, by + 4);
+      continue;
+    }
+    if (!sp.center) continue; // 번호판 점유+중심 보유분만 원 표시(R5, 기존과 동일).
     const px = sp.center.x * overlay.width;
     const py = sp.center.y * overlay.height;
     ctx.beginPath();
