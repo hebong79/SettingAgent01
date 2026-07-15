@@ -492,9 +492,16 @@ function drawVehicleCuboidOverlay(ctx) {
   ctx.restore();
 }
 
+// 마스크 인스턴스별 구분색(팔레트 순환). 인접 차량 마스크가 겹쳐도 색으로 분리되게(같은 보라 뭉침 방지).
+const MASK_PALETTE = [
+  [175, 82, 222], [255, 159, 10], [48, 209, 88], [10, 132, 255],
+  [255, 55, 95], [90, 200, 250], [255, 214, 10], [191, 90, 242],
+];
+
 /**
  * VPD seg 마스크 반투명 오버레이(#roi-mask, 기본 off). 육면체와 동일 소스(state.vcuboidByKey)에서 masks 를 읽는다.
  * "seg 가 무엇을 봤나" 육안 검증용 — 정합/필터 무관, seg 마스크 유효분 전량 표시. 지면모델 미배선/강등 → masks 부재 → 조용히 skip.
+ * 마스크마다 팔레트 색을 순환 적용 — 인접 인스턴스가 겹쳐도 색으로 구분된다.
  */
 function drawMaskOverlay(ctx) {
   if (!$('roi-mask').checked) return;
@@ -502,18 +509,19 @@ function drawMaskOverlay(ctx) {
   const masks = data?.masks;
   if (!masks || !masks.length) return; // 지면모델 미배선/강등 → 미표시(사유는 issues 에).
   ctx.save();
-  for (const poly of masks) {
-    if (!poly || poly.length < 3) continue;
+  masks.forEach((poly, i) => {
+    if (!poly || poly.length < 3) return;
     const pts = toPixelQuad(poly, overlay.width, overlay.height); // N 점 정규화 폴리곤 → 픽셀.
+    const [r, g, b] = MASK_PALETTE[i % MASK_PALETTE.length]; // 인스턴스별 순환색.
     ctx.beginPath();
-    pts.forEach((p, i) => (i ? ctx.lineTo(p.px, p.py) : ctx.moveTo(p.px, p.py)));
+    pts.forEach((p, j) => (j ? ctx.lineTo(p.px, p.py) : ctx.moveTo(p.px, p.py)));
     ctx.closePath();
-    ctx.fillStyle = 'rgba(175, 82, 222, 0.28)'; // 보라 반투명 — 초록(바닥)·청록(bbox)·주황(육면체)과 구분.
+    ctx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.30)`; // 반투명 채움.
     ctx.fill();
-    ctx.strokeStyle = '#af52de';
+    ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, 0.95)`; // 같은 색 진한 외곽선 — 인스턴스 경계 또렷.
     ctx.lineWidth = 1.5;
     ctx.stroke();
-  }
+  });
   ctx.restore();
 }
 
