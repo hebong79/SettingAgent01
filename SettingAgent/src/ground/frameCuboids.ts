@@ -14,10 +14,11 @@ import { buildVehicleCuboids, type SegVehicle } from './contact.js';
 import { computeAnchorMetrics } from './anchor.js';
 import { associateDetSeg, DEFAULT_ASSOC_OPTIONS, type AssocPair } from './segAssoc.js';
 import { DEFAULT_ANCHOR_OPTIONS, DEFAULT_CONTACT_OPTIONS } from './contactTypes.js';
+import { isVehicleOnPlace } from '../capture/onPlaceFilter.js';
 import type { AnchorMetrics, Px, RejectedVehicle, VehicleCuboid } from './contactTypes.js';
 import type { GroundModel } from './types.js';
 import type { VpdClient } from '../clients/VpdClient.js';
-import type { VehicleBox } from '../domain/types.js';
+import type { NormalizedPolygon, VehicleBox } from '../domain/types.js';
 import { logger } from '../util/logger.js';
 
 /** 프리셋별 육면체 산출 문맥(지면모델 + 슬롯). 라우트/잡이 해결해서 넘긴다 — 이 함수는 파일 IO 를 하지 않는다. */
@@ -89,6 +90,13 @@ export interface FrameCuboids {
    * L·H 는 **항상 차종 prior**(원리적 관측 불가). 화면이 이것을 배지로 드러내야 한다(정본 §9-1).
    */
   estimateUnverified: true;
+  /**
+   * ★ 시각화 전용(가산·옵셔널). **on-place seg 마스크 전부**(정규화 폴리곤) — VPD on-place 방식, 육면체 정합과 무관.
+   *   seg 박스에 VPD det 과 동일한 on-place 필터(`isVehicleOnPlace`)를 직접 적용한다(마스터 요구, 설계 반전).
+   *   육면체 정합(IoU≥0.4·1:1)에 묶으면 병합/밀착 차 마스크가 탈락해 요구 미충족 → on-place seg 직접 필터로 전환.
+   *   강등(seg 호출 前) → 필드 없음. 점유·육면체 산출 로직은 이 필드를 읽지 않는다(순수 표시).
+   */
+  masks?: NormalizedPolygon[];
 }
 
 export interface BuildFrameCuboidsArgs {
@@ -286,6 +294,13 @@ export async function buildFrameCuboids(args: BuildFrameCuboidsArgs): Promise<Fr
   });
   issues.push(...built.issues);
 
+  // ★ 마스크 surface — **on-place seg 마스크 전부**(VPD on-place 방식, 육면체 정합과 무관).
+  //   ⚠️ 반전 근거: 이전엔 육면체 정합(a.pairs, IoU≥0.4·1:1)에 묶었으나, 병합/밀착 차의 마스크가
+  //      경합·저IoU 로 탈락해 "VPD 박스 있는 곳에 마스크 모두"라는 마스터 요구를 못 채웠다(실측 seg6→masks4).
+  //      → det 정합·keptIdx 를 버리고 seg 박스에 **VPD 와 동일한 on-place 필터**(isVehicleOnPlace)를 직접 적용한다.
+  //   `normSlotPolys` = ctx.slotPolysPx(픽셀)를 정규화 — captureRoutes 의 det on-place 필터와 **동일 폴리곤·동일 정규화**.
+  const normSlotPolys = ctx.slotPolysPx.map((poly) => poly.map((p) => ({ x: p.x / model.imgW, y: p.y / model.imgH })));
+
   return {
     imgW: model.imgW,
     imgH: model.imgH,
@@ -317,5 +332,11 @@ export async function buildFrameCuboids(args: BuildFrameCuboidsArgs): Promise<Fr
     },
     issues,
     estimateUnverified: true,
+    // ★ 시각화용 — on-place seg 마스크 전부(VPD on-place 방식). 육면체 정합·keptIdx 무관 = 병합/밀착 차도 표시.
+    //   옵셔널 타입 방어로 filter. 강등 경로(degraded)엔 넣지 않는다(필드 부재).
+    masks: segBoxes
+      .filter((b) => isVehicleOnPlace(b.rect, normSlotPolys))
+      .map((b) => b.mask)
+      .filter((m): m is NormalizedPolygon => !!m),
   };
 }

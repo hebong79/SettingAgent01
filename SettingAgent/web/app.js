@@ -269,6 +269,7 @@ function drawRoiOverlay() {
   drawDetectOverlay(ctx); // 라이브 VPD/LPD 검출 오버레이(§04) — 수집 중/미최종화에도 표시 → mapping 가드 이전.
   drawCuboidOverlay(ctx); // 3D 육면체(가산 레이어) — 산출물 없이도(수집 중/파일 모드) 그린다 → mapping 가드 이전.
   drawVehicleCuboidOverlay(ctx); // 차량 3D 육면체(det 권위 + seg 마스크 접지선) — 토글 off 면 기존 렌더와 픽셀 동일.
+  drawMaskOverlay(ctx); // VPD seg 마스크 반투명 오버레이(#roi-mask, 기본 off) — 지면 가드 이전(수집 중에도 표시).
   updateGroundBadge(); // 어느 지면모델이 표시 중인지 항상 안다(소스 배지).
   updateAnchorBadge(); // 2 DOF 앵커 지표(차량 접지선 vs 슬롯 격자).
   updateVehicleCuboidBadge(); // ⚠️ 화면이 거짓말하지 않게 — "미검증 추정" + 정합 요약을 **항상** 드러낸다.
@@ -486,6 +487,31 @@ function drawVehicleCuboidOverlay(ctx) {
       ctx.moveTo(pts[a].px, pts[a].py);
       ctx.lineTo(pts[b].px, pts[b].py);
     }
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+/**
+ * VPD seg 마스크 반투명 오버레이(#roi-mask, 기본 off). 육면체와 동일 소스(state.vcuboidByKey)에서 masks 를 읽는다.
+ * "seg 가 무엇을 봤나" 육안 검증용 — 정합/필터 무관, seg 마스크 유효분 전량 표시. 지면모델 미배선/강등 → masks 부재 → 조용히 skip.
+ */
+function drawMaskOverlay(ctx) {
+  if (!$('roi-mask').checked) return;
+  const data = state.vcuboidByKey[currentFrameKey()]; // 육면체와 동일 소스(masks 동승).
+  const masks = data?.masks;
+  if (!masks || !masks.length) return; // 지면모델 미배선/강등 → 미표시(사유는 issues 에).
+  ctx.save();
+  for (const poly of masks) {
+    if (!poly || poly.length < 3) continue;
+    const pts = toPixelQuad(poly, overlay.width, overlay.height); // N 점 정규화 폴리곤 → 픽셀.
+    ctx.beginPath();
+    pts.forEach((p, i) => (i ? ctx.lineTo(p.px, p.py) : ctx.moveTo(p.px, p.py)));
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(175, 82, 222, 0.28)'; // 보라 반투명 — 초록(바닥)·청록(bbox)·주황(육면체)과 구분.
+    ctx.fill();
+    ctx.strokeStyle = '#af52de';
+    ctx.lineWidth = 1.5;
     ctx.stroke();
   }
   ctx.restore();
@@ -2826,6 +2852,7 @@ function wire() {
   $('cap-floor-llm').addEventListener('change', drawRoiOverlay); // 바닥 ROI 소스(LLM/파일) 모드 전환 → 즉시 재렌더.
   $('roi-detect').addEventListener('change', drawRoiOverlay); // 라이브 검출 오버레이 토글(§04).
   $('roi-cuboid').addEventListener('change', drawRoiOverlay); // 3D 육면체 레이어 토글(기본 off → 회귀 0).
+  $('roi-mask').addEventListener('change', drawRoiOverlay); // VPD seg 마스크 오버레이 토글(순수 렌더 — masks 는 detect 응답에 동승, 별도 로드 불필요).
   // 차량 육면체 토글(**기본 on** — Goal 1·2 가 "화면에 그려진다"인데 기본 off 면 아무것도 안 보인다).
   // 렌더 토글일 뿐 점유 판정과 무관하다(회귀 0). 정밀수집·검출이 돌면 데이터는 자동으로 온다;
   // 아무것도 안 돌고 있을 때 켜면 그때만 라이브 촬영 1회(캐시 있으면 재사용).

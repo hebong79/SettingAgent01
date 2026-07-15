@@ -48,6 +48,9 @@
             <label title="차량을 3D 육면체로 표시(det 검출 + seg 마스크 접지선). 정밀수집·검출 실행 시 자동 갱신. ⚠️ 배치는 미검증 추정이다(배지 참조)">
               <input id="roi-vcuboid" type="checkbox" checked /> 차량육면체
             </label>
+            <label title="VPD seg 마스크(차량 실루엣)를 반투명으로 표시. 실루엣 정합·접지 하단 뜸 육안 검증용. 지면모델 배선 시에만 산출됨">
+              <input id="roi-mask" type="checkbox" /> 마스크
+            </label>
             <span id="vcuboid-badge" class="badge ground-badge" hidden title="차량 육면체 — 미검증 추정">추정(미검증)</span>
             <label class="field compact" title="육면체 높이(m). 승용차 ≈ 1.5m">
               높이

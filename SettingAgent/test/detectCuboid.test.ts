@@ -116,6 +116,22 @@ describe('runDetect × 육면체 — 가산 + 회귀 0', () => {
     expect(r.cuboids!.estimateUnverified).toBe(true);
   });
 
+  it('③b 🟣 마스크 show — seg 마스크가 `detect.cuboids.masks` 로 **경계면을 넘어 도착**한다(좌표 보존)', async () => {
+    // 경계면 교차: VpdClient.segment() 응답 → buildFrameCuboids.masks → DetectResult.cuboids.masks →
+    //   뷰어 state.vcuboidByKey[key].masks(app.js drawMaskOverlay 소비). 여기서 배선을 봉인한다.
+    const deps: DetectDeps = { camera: camera(), vpd: segVpd(), lpd };
+    const r = await runDetect(deps, { cam: 1, preset: 1 }, cfg, undefined, CTX);
+    expect(r.cuboids!.masks).toBeDefined();
+    expect(r.cuboids!.masks).toHaveLength(1); // SEG.boxes 1개.
+    expect(r.cuboids!.masks![0]).toEqual(C0.mask); // seg 정규화 마스크가 손상 없이 도착.
+  });
+
+  it('③c 🟣 cuboidCtx 미주입 → cuboids 키 부재 → masks 도 당연히 없다(응답 shape 회귀 0)', async () => {
+    const deps: DetectDeps = { camera: camera(), vpd: segVpd(), lpd };
+    const r = await runDetect(deps, { cam: 1, preset: 1 }, cfg); // ctx 없음.
+    expect('cuboids' in r).toBe(false); // masks 는 cuboids 안에만 산다 → 경로 자체가 없다.
+  });
+
   it('④ ★ seg 가 죽어도 **검출은 살아서 반환된다**(검출이 육면체 때문에 죽지 않는다)', async () => {
     const deps: DetectDeps = { camera: camera(), vpd: segVpd({ throws: true }), lpd };
     const r = await runDetect(deps, { cam: 1, preset: 1 }, cfg, undefined, CTX);
