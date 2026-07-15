@@ -45,6 +45,7 @@ class YoloV8ImageObjectDetection:
         results = self.model(
             frame,
             conf=settings.YOLO_CONF_THRESHOLD,
+            iou=settings.YOLO_IOU_THRESHOLD,
             save_conf=True,
             device=self.device,
             verbose=False,
