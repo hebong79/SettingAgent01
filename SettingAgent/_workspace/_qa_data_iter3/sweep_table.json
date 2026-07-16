@@ -1,0 +1,386 @@
+[
+ {
+  "preset": 1,
+  "up": 0.55,
+  "globalScale": 4,
+  "regions": 6,
+  "scales": [
+   4,
+   4,
+   4,
+   4,
+   4,
+   4
+  ],
+  "overlapPairs": [],
+  "maxPairArea": 0,
+  "at": null,
+  "cov": [
+   {
+    "idx": 1,
+    "cov": 0.41572169763280653,
+    "intr": 0.014636837319806488
+   },
+   {
+    "idx": 2,
+    "cov": 0.35478697871012993,
+    "intr": 0.10098784776670083
+   },
+   {
+    "idx": 3,
+    "cov": 0.2621228136673126,
+    "intr": 0.07522257019023174
+   },
+   {
+    "idx": 4,
+    "cov": 0.2942833721070558,
+    "intr": 0.14642715838324627
+   },
+   {
+    "idx": 6,
+    "cov": 0.2133126495480866,
+    "intr": 0.22260292929809433
+   },
+   {
+    "idx": 7,
+    "cov": null,
+    "intr": 0.24015095432527866
+   }
+  ],
+  "st": {
+   "min": 0.2133126495480866,
+   "max": 0.41572169763280653,
+   "mean": 0.3080455023330783,
+   "n": 5
+  },
+  "intrMean": 0.1333380495472264,
+  "out": "D:\\Work\\Parking3D\\AgentVLA\\ParkAgent\\SettingAgent\\_workspace\\_qa_shots\\iter3_sweep_p1_up055.png"
+ },
+ {
+  "preset": 1,
+  "up": 0.9,
+  "globalScale": 4,
+  "regions": 6,
+  "scales": [
+   4,
+   4,
+   4,
+   4,
+   4,
+   4
+  ],
+  "overlapPairs": [],
+  "maxPairArea": 0,
+  "at": null,
+  "cov": [
+   {
+    "idx": 1,
+    "cov": 0.5881631399570793,
+    "intr": 0.019543300009101025
+   },
+   {
+    "idx": 2,
+    "cov": 0.5048257973013169,
+    "intr": 0.14438227851012528
+   },
+   {
+    "idx": 3,
+    "cov": 0.3738578524587319,
+    "intr": 0.10357948208031026
+   },
+   {
+    "idx": 4,
+    "cov": 0.4188929772981689,
+    "intr": 0.2132935195464005
+   },
+   {
+    "idx": 6,
+    "cov": 0.3042102620559189,
+    "intr": 0.3120644389833084
+   },
+   {
+    "idx": 7,
+    "cov": null,
+    "intr": 0.3447891348150814
+   }
+  ],
+  "st": {
+   "min": 0.3042102620559189,
+   "max": 0.5881631399570793,
+   "mean": 0.43799000581424324,
+   "n": 5
+  },
+  "intrMean": 0.18960869232405445,
+  "out": "D:\\Work\\Parking3D\\AgentVLA\\ParkAgent\\SettingAgent\\_workspace\\_qa_shots\\iter3_sweep_p1_up090.png"
+ },
+ {
+  "preset": 1,
+  "up": 1.3,
+  "globalScale": 4,
+  "regions": 6,
+  "scales": [
+   4,
+   4,
+   4,
+   4,
+   4,
+   4
+  ],
+  "overlapPairs": [],
+  "maxPairArea": 0,
+  "at": null,
+  "cov": [
+   {
+    "idx": 1,
+    "cov": 0.7858065191568211,
+    "intr": 0.024184073539387778
+   },
+   {
+    "idx": 2,
+    "cov": 0.6791109771435407,
+    "intr": 0.18630820383797986
+   },
+   {
+    "idx": 3,
+    "cov": 0.5041686499179996,
+    "intr": 0.13293140470428957
+   },
+   {
+    "idx": 4,
+    "cov": 0.5551056148538914,
+    "intr": 0.2878743801093611
+   },
+   {
+    "idx": 6,
+    "cov": 0.41028109928321305,
+    "intr": 0.3998976316419529
+   },
+   {
+    "idx": 7,
+    "cov": null,
+    "intr": 0.4676736307177084
+   }
+  ],
+  "st": {
+   "min": 0.41028109928321305,
+   "max": 0.7858065191568211,
+   "mean": 0.5868945720710932,
+   "n": 5
+  },
+  "intrMean": 0.24981155409177994,
+  "out": "D:\\Work\\Parking3D\\AgentVLA\\ParkAgent\\SettingAgent\\_workspace\\_qa_shots\\iter3_sweep_p1_up130.png"
+ },
+ {
+  "preset": 1,
+  "up": 1.7,
+  "globalScale": 4,
+  "regions": 6,
+  "scales": [
+   4,
+   4,
+   4,
+   4,
+   4,
+   4
+  ],
+  "overlapPairs": [],
+  "maxPairArea": 0,
+  "at": null,
+  "cov": [
+   {
+    "idx": 1,
+    "cov": 0.8412400779682805,
+    "intr": 0.02804104140744375
+   },
+   {
+    "idx": 2,
+    "cov": 0.7515704521527282,
+    "intr": 0.19215341965787475
+   },
+   {
+    "idx": 3,
+    "cov": 0.5362393965006611,
+    "intr": 0.14622439272512222
+   },
+   {
+    "idx": 4,
+    "cov": 0.5613958153392326,
+    "intr": 0.34308223666311904
+   },
+   {
+    "idx": 6,
+    "cov": 0.4555048847787849,
+    "intr": 0.4046954248936067
+   },
+   {
+    "idx": 7,
+    "cov": null,
+    "intr": 0.49792461996099074
+   }
+  ],
+  "st": {
+   "min": 0.4555048847787849,
+   "max": 0.8412400779682805,
+   "mean": 0.6291901253479375,
+   "n": 5
+  },
+  "intrMean": 0.2686868558846929,
+  "out": "D:\\Work\\Parking3D\\AgentVLA\\ParkAgent\\SettingAgent\\_workspace\\_qa_shots\\iter3_sweep_p1_up170.png"
+ },
+ {
+  "preset": 3,
+  "up": 0.55,
+  "globalScale": 4,
+  "regions": 3,
+  "scales": [
+   4,
+   4,
+   4
+  ],
+  "overlapPairs": [],
+  "maxPairArea": 0,
+  "at": null,
+  "cov": [
+   {
+    "idx": 14,
+    "cov": 0.15512725991570991,
+    "intr": 0.03226796579231708
+   },
+   {
+    "idx": 15,
+    "cov": 0.1162670362651737,
+    "intr": 0.13576567609627935
+   },
+   {
+    "idx": 16,
+    "cov": 0.10553679421016887,
+    "intr": 0.031924491752703295
+   }
+  ],
+  "st": {
+   "min": 0.10553679421016887,
+   "max": 0.15512725991570991,
+   "mean": 0.1256436967970175,
+   "n": 3
+  },
+  "intrMean": 0.06665271121376658,
+  "out": "D:\\Work\\Parking3D\\AgentVLA\\ParkAgent\\SettingAgent\\_workspace\\_qa_shots\\iter3_sweep_p3_up055.png"
+ },
+ {
+  "preset": 3,
+  "up": 0.9,
+  "globalScale": 4,
+  "regions": 3,
+  "scales": [
+   4,
+   4,
+   4
+  ],
+  "overlapPairs": [],
+  "maxPairArea": 0,
+  "at": null,
+  "cov": [
+   {
+    "idx": 14,
+    "cov": 0.23385395045212612,
+    "intr": 0.12524250479854457
+   },
+   {
+    "idx": 15,
+    "cov": 0.17433889900413133,
+    "intr": 0.22523244699236963
+   },
+   {
+    "idx": 16,
+    "cov": 0.15937488514168688,
+    "intr": 0.08881458971431454
+   }
+  ],
+  "st": {
+   "min": 0.15937488514168688,
+   "max": 0.23385395045212612,
+   "mean": 0.18918924486598143,
+   "n": 3
+  },
+  "intrMean": 0.1464298471684096,
+  "out": "D:\\Work\\Parking3D\\AgentVLA\\ParkAgent\\SettingAgent\\_workspace\\_qa_shots\\iter3_sweep_p3_up090.png"
+ },
+ {
+  "preset": 3,
+  "up": 1.3,
+  "globalScale": 4,
+  "regions": 3,
+  "scales": [
+   4,
+   4,
+   4
+  ],
+  "overlapPairs": [],
+  "maxPairArea": 0,
+  "at": null,
+  "cov": [
+   {
+    "idx": 14,
+    "cov": 0.3262402375035751,
+    "intr": 0.24175008365558728
+   },
+   {
+    "idx": 15,
+    "cov": 0.244503204474426,
+    "intr": 0.3280727063617012
+   },
+   {
+    "idx": 16,
+    "cov": 0.22565416116995757,
+    "intr": 0.1553506969213392
+   }
+  ],
+  "st": {
+   "min": 0.22565416116995757,
+   "max": 0.3262402375035751,
+   "mean": 0.26546586771598624,
+   "n": 3
+  },
+  "intrMean": 0.24172449564620924,
+  "out": "D:\\Work\\Parking3D\\AgentVLA\\ParkAgent\\SettingAgent\\_workspace\\_qa_shots\\iter3_sweep_p3_up130.png"
+ },
+ {
+  "preset": 3,
+  "up": 1.7,
+  "globalScale": 4,
+  "regions": 3,
+  "scales": [
+   4,
+   4,
+   4
+  ],
+  "overlapPairs": [],
+  "maxPairArea": 0,
+  "at": null,
+  "cov": [
+   {
+    "idx": 14,
+    "cov": 0.39771607495821515,
+    "intr": 0.3548218600771551
+   },
+   {
+    "idx": 15,
+    "cov": 0.3085525784915157,
+    "intr": 0.43109861716584746
+   },
+   {
+    "idx": 16,
+    "cov": 0.2922441739686686,
+    "intr": 0.22243892123624825
+   }
+  ],
+  "st": {
+   "min": 0.2922441739686686,
+   "max": 0.39771607495821515,
+   "mean": 0.3328376091394665,
+   "n": 3
+  },
+  "intrMean": 0.3361197994930836,
+  "out": "D:\\Work\\Parking3D\\AgentVLA\\ParkAgent\\SettingAgent\\_workspace\\_qa_shots\\iter3_sweep_p3_up170.png"
+ }
+]

@@ -1,129 +1,99 @@
-# 04. 영향도 요약 — VPD 프로덕션 전 경로 차량 3D 육면체 (det 권위 + seg 정합)
+# 04. 영향도 분석 — 점유영역 사다리꼴 표시(번호판 앵커) + 겹침 회피 자동 폭 스케일
 
-작성: 2026-07-15 00:03 / 문서화 담당
-최종 문서: **`SettingAgent/docs/20260715_000319_VPD프로덕션전경로_det권위_seg정합_공유육면체산출기.md`**
-선행 정본: `SettingAgent/docs/20260714_194426_VPDseg_3D육면체_2DOF앵커지표.md`(커밋 `23b24d4`) — **§9 미결 항목은 이번 라운드로 닫히지 않는다.**
-
-> **🔒 최종 확정(2026-07-15). 추가 루프 없음(coordinator 지시).** QA(`qa-assoc`) 산출물 도착·결함 2건 반영·리더 결정 4건 확정·인용 경위 해소를 전부 마쳤다. 갱신 이력(스냅샷 포함)은 삭제하지 않고 §1 에 보존한다.
+> documenter 산출물. 2026-07-16. `01_architect_plan.md §8` 을 그대로 인용하지 않고 **최종 구현 기준으로 재검증**했다.
+> 검증 방법: 소비처를 실제 grep/Read 로 확인(에이전트 조사, 300단어 보고 기반 + documenter 직접 대조) + git diff 로 실 변경분 대조.
 
 ---
 
-## 1. 게이트 — **최종 확정**
+## 1. `computeOccupancy`(web/core.js) 반환 확장(`plateQuad` additive)의 파급
 
-**중간 경과(스냅샷 이력, 보존)**: 145파일/1581건(구현자 최초 보고, 정본 대비 +6파일/+39건) → 146/1585(안정) → 146/1589(1건 실패, 진행 중이던 D-3 수정으로 판단) → 146/1590 중 3파일/4건 실패(DEFECT-1/2 수정 반영 도중 과도기 — dev-assoc 확인) → **아래가 최종.**
+### 1-1. 실제 호출부 전수 (grep 확인)
 
-```
-npx tsc -p tsconfig.json --noEmit   → exit 0                                ✅
-npx vitest run                      → 146 파일 / 1590 테스트 전량 통과, 실패 0  ✅
-```
-coordinator 라이브 확인 수치와 **문서화 담당 독립 재실행이 일치**(2026-07-15). **최종 확정.**
-
-> **판단 기록**: 움직이는 코드 위에서 숫자를 하나로 억지로 확정하지 않고 매 시점을 스냅샷으로 남긴 것이 옳았다 — 관측한 실패들은 실제 버그가 아니라 다른 에이전트가 실시간으로 결함을 고치던 과도기였음이 이후 coordinator·dev-assoc 둘 다에게 확인됐다.
-
----
-
-## 2. 의존성 그래프 — 파급 추적
-
-```
-associateDetSeg()(신규, segAssoc.ts)
-  └─ buildFrameCuboids()(신규, frameCuboids.ts) ← 공유 산출기, 3표면이 공유
-       ├─ CaptureJob(정밀수집 잡)         → getCuboids()/status.cuboid 경량 인덱스
-       ├─ detectPipeline(POST /capture/detect) → 응답 cuboids? 인라인
-       └─ GET /capture/vehicle-cuboids(내부 교체) → unmatched/assoc 가산
-
-buildVehicleCuboids / computeAnchorMetrics / filterVehiclesOnPlace / VpdClient.segment
-  → 전부 0줄 변경, 그대로 재사용(신규 추정 수학 0줄)
-```
-
-| 대상 | 영향 | 근거(문서화 담당 직접 확인) |
+| 호출부 | 소비 필드 | 영향 |
 |---|---|---|
-| **점유 판정 경로**(`CaptureJob` det→필터→`insertDetections` 3줄 블록) | ✅ **무접촉** | 육면체 코드는 그 블록 **아래에 가산**. T6(`captureJobCuboid.test.ts`)이 프로덕션 `CaptureJob` 실제 2회 실행으로 `insertDetections` 인자 deep-equal 봉인 — 개별 재실행 확인 |
-| `src/ground/{contact,anchor,project,contactTypes}.ts` | ✅ **0줄 변경** | `git diff` 커밋 `23b24d4` 대비 0줄(문서화 담당 직접 확인 — 이 커밋이 정본이 봉인한 상태임을 `git log`로 확인 후 대조) |
-| `src/clients/VpdClient.ts` | ✅ **0줄 변경** | 〃 |
-| `src/capture/onPlaceFilter.ts` · `Aggregator.ts` · `SqliteStore.ts` | ✅ **0줄 변경** | 〃 — DB 스키마·집계 로직 무접촉 |
-| `packages/types` | ✅ **0줄 변경** | 〃 — 육면체는 인메모리 + 응답 전용, DB 로 안 흐름 |
-| `VehicleCuboid.vpdIdx` 의미 | ⚠️ **의미 변경**(seg 인덱스 → det 인덱스) | 타입 정의(`contactTypes.ts`) 0줄 변경, 채워 넣는 **값의 의미**만 호출자가 바꿈. 원본 마스크 되짚기 키는 `FrameCuboids.assoc[].segIdx` 로 분리(§3 참조) |
-| `test/cuboidTraceability.test.ts`(정본 봉인분) | ✅ **코드 무변경** | `git diff` 18줄 삽입·0줄 삭제 — 헤더 주석만 가산, 봉인 성질은 지금도 참 |
-| `GET /capture/vehicle-cuboids` | ⚠️ **내부 교체**(seg 권위 → det 권위), URL·필드 유지 + 가산 | `summary.detected` 는 `detCount` 별칭으로 하위호환. VPD 호출 1→2회 |
-| `GET /capture/job-cuboids` | ✅ **신규**(가산) | 카메라·VPD 호출 0(잡 인메모리 읽기). 카메라 호출 카운터로 봉인 확인 |
-| `GET /capture/status` | ✅ **가산**(`cuboid` 경량 인덱스, 프리셋당 숫자 4개) | 기능 off 면 키 자체 없음 — 기존 shape 완전 불변 |
-| `POST /capture/detect` | ✅ **가산**(`cuboids?` 인라인) | 미주입 시 키 없음 — 기존 계약 완전 불변(`detectCuboid.test.ts` ①) |
-| **킬스위치** | ⚠️ **기존 `ground.enabled` 재사용, 신규 플래그 0** | 단 `tools.config.json` 에 `ground` 키가 **없어서 기본 enabled=true 로 이미 켜져 있음** — 끄려면 명시적 `false` 필요 |
-| **뷰어 기본값** | ⚠️ `#cap-count` 50→1, `#cap-checkpoint` 10→1, `#roi-vcuboid` off→on | 마스터 요청 반영. 렌더 토글일 뿐 점유 무관(회귀 0) |
+| `web/occupancy.js:149` `OccupancyJudge.judge` | 전체 행(occupied 여부로 분기 후 `r.center`/`r.plateQuad` 사용) | **영향 있음(의도된 확장)** — plate 행에 `plateQuad` 전달(:151) |
+| `web/core.js:608` `buildFlatSlotRows` | `o.idx`, `o.occupied` 만 | 무영향(확인됨) |
+| `test/computeOccupancy.test.ts` | occupied 행은 `toMatchObject`(예: :64,81,83), 비점유 행은 `toEqual`(예: :68,119)이나 비점유 행엔 애초 `plateQuad` 가 붙지 않음 | 무영향(확인됨) — 수정 불요, 실측 통과 |
+| `test/lpdFilterRegression.test.ts:79-80,236` | `{idx,occupied}` 로 투영 또는 `.occupied` bool 만 | 무영향(확인됨) |
+| `test/occupancyJudge.test.ts:53-55` (T1) | `computeOccupancy(...)` 결과를 `toEqual` 로 **행 전체** 비교 | **영향 있음 — 유일한 수정 지점**. `base` 를 `{idx,occupied,center}` 로 투영하도록 보정 완료(git diff 확인). 설계 §8 예측과 일치, 다른 파일에서 추가 보정 필요 지점은 발견되지 않음 |
+| `test/occupancyRegion.test.ts:289` (T13) | `plateQuad` 필드 자체를 검증 대상으로 사용 | 신규 테스트 — 영향 아님(추가분) |
+
+**결론**: 설계서 §8 의 "T1 한 곳만" 주장은 **최종 구현에서도 유효**함을 직접 grep+git diff 로 재확인했다. 추가 회귀 지점 없음.
+
+### 1-2. `state.occComputeByKey` 소비처 (`region` additive)
+
+`web/app.js:379-388` (`updateLogicOccupancy`) 에서 `spaces[i]` 에 `region` 필드를 additive 로 추가(`id, occupied, source, center, vehicleRect` 기존 필드는 그대로 유지 — git diff 로 확인).
+
+| 소비처 | 필드 사용 | 영향 |
+|---|---|---|
+| `web/app.js` `drawOccupancyOverlay`(:399~) | `sp.region` 신규 소비(면 레이어 렌더) + 기존 `sp.occupied/source/vehicleRect/center` 그대로 | 의도된 확장. 기존 원/배지 렌더 순서·스타일 무변경(사다리꼴이 먼저 그려지고 원이 그 위에 남음) |
+| `web/app.js:1961-1966` `buildFinalizeOccupancy` | `{ idx: s.id, occupied: !!s.occupied }` 로 **명시적 투영**(git diff 미변경 확인, region/plateQuad 미포함) | **무영향** — 최종화 바디(서버 POST)에 `region`/`plateQuad` 가 섞여 나가지 않음. 서버·DB 계약 변경 없음 |
+
+**결론**: `region` 은 뷰어 렌더 전용 additive 필드이며, 서버로 전송되는 최종화 스냅샷(`buildFinalizeOccupancy`)은 여전히 `{idx, occupied}` 두 필드만 투영한다 — 계약 영향 없음을 코드로 직접 확인.
 
 ---
 
-## 3. `vpdIdx` 의미 변경 — 소비자 영향
+## 2. 기존 테스트 회귀 실측
 
-| 소비자 | 영향 |
-|---|---|
-| **뷰어(`web/app.js`)** | ✅ **0** — `vpdIdx`/`boxIdx` 어느 것도 렌더에서 참조하지 않음(기존과 동일) |
-| **`test/cuboidTraceability.test.ts`**(정본 봉인) | ⚠️ **코드는 그대로 유효하나 프로덕션 경로를 더 이상 대표하지 않음** — 헤더 주석이 이 사실을 명시. `VpdClient.segment()`의 `SegBox.vpdIdx`(seg 내부 인덱스, 안 바뀜)와 프로덕션 `VehicleCuboid.vpdIdx`(det 인덱스, 바뀜)를 혼동하면 안 됨 |
-| **향후 이 라우트를 소비할 코드** | ⚠️ **원본 마스크로 되짚으려면 `assoc[].segIdx` 를 써야 한다** — `vpdIdx` 로는 이제 안 된다(det 배열로 되짚는 키가 됨). 이 구분이 문서화되지 않았다면 다음 소비자가 혼동했을 것 |
+| 항목 | 수치 | 출처 |
+|---|---|---|
+| 최종(5차) 게이트 | `npx vitest run` → 151 files / 1660 tests 전량 통과, `npx tsc --noEmit` → exit 0 | `03_qa_report.md` §6(5차 이터레이션), 4차 개발자 보고(§4)와 일치 |
+| 회귀 지점 | `occupancyJudge.test.ts` T1 투영 보정 **1곳** | §1-1 로 직접 재확인(git diff) |
+| 신규 테스트 | `occupancyRegion.test.ts` 18케이스(T1~T18) 전량 통과 | 동일 게이트 통과분에 포함 |
+| 회귀 0 | 위 외 기존 파일 diff 없음 | `git status`(SettingAgent/test 하위 변경 파일이 `occupancyJudge.test.ts` 1개뿐임을 확인) |
 
----
-
-## 4. 🔴 배치 정확도 — 이번 라운드로 나아지지 않았다 (닫지 않음)
-
-리더 육안 확인: **W 가 `'prior'` 로 강등된(실루엣 chord 오염) 차량은 상자가 눈에 띄게 밀려 보인다.** chord 오염이 접지선을 뒤로 밀고 폭을 부풀리는 **같은 원인의 두 증상**이다. 이것은 정본 §9-2 가 미확정으로 남긴 z 오염 문제 그대로다. 문서화 담당이 `cuboid_p1_small.png` 를 직접 열람해 W:observed(실선) vs W:prior(점선) 상자의 밀착도 차이를 육안으로 재확인했다.
-
-**이번 변경은 육면체를 더 자주 보여줄 뿐, 정확하게 만들지 않는다.** 정본 §9-1(배치 정량 지표 없음)·§9-2(z 오염 미확정)는 **그대로 열려 있다.**
+`_workspace/03_qa_report.md` 1차·3차·5차 이터레이션 각각에서 검증자가 **독립 재실행**한 vitest/tsc 결과가 구현자 보고와 매 회 일치 — 위장/스킵 정황 없음.
 
 ---
 
-## 5. 정합 임계 — 실측 기반, 단 마진이 좁다 (리더 승인 완료)
+## 3. 서버(src/)·DB·라우트·어셈블리 계약 영향
 
-- `minIou=0.4`, 근거: 결정 불변 구간 [0.308, 0.471) 안쪽(τ=0~0.4 에서 matched 27 고정, τ=0.5 부터 26 으로 하락)
-- ⚠️ 위쪽 마진 **0.07 뿐** — 설계가 기대한 "넓은 이중분포 밸리"는 안 나왔다(구현자 자진 보고)
-- 변별력은 IoU 자기참조가 아니라 독립 판정자 3종으로 확인: J1 육안(리더 통과) · J2a 교차프레임(27→3 붕괴) · J2b 강제 오배정(0.906 vs 0.040) · J3 cls 일치(27/27)
-- **✅ 리더 승인**(coordinator 메시지, 2026-07-15): `minIou=0.4` 유지. τ=0.35 로 낮춰도 이 데이터에서는 동일해 의미 없음(하단 마진만 깎음). **마진 0.07 은 "알려진 취약성"으로 문서에 남기는 조건으로 승인.** 후속 과제(리더 지시): 실카메라·다른 주차장 재측정 필요.
-
----
-
-## 5-1. 리더 결정 4건 확정(2026-07-15, coordinator 메시지 원문 출처 명시)
-
-| # | 사안 | 결정 | 근거(원문 요약) |
-|---|---|---|---|
-| ① | J2 음성대조 대체 | **승인.** 인용 경위 3단계 전부 확인·보존됨(아래) | **시점1**(dev-assoc 이 받음, `02_developer_changes.md` §10①): "네 판단이 옳았고 내 지시가 틀렸다 ... 절대 실패할 수 없는 테스트를 통과 조건으로 걸고, 통과하면 중단하라고 지시했다." → **시점2**(dev-assoc 정정 요청): "절반만 맞습니다. 음성대조를 요구한 판단 자체는 옳았습니다 ... 틀린 것은 그 대조의 특정 구현 형태(목록 순열)뿐입니다." → **시점3**(리더 최종 수용, 문서화 담당이 직접 수신): "정정이 맞습니다 ... 목적이 애초에 없었다면 교체할 것도 없었습니다." **인용 불일치는 날조가 아니라 리더가 실제로 입장을 바꾼 3개의 실제 발언이었다** — coordinator 가 직접 경위를 확인해줬다. 시점1(자책)은 역사적 기록으로 보존하되 문서의 결론으로 삼지 않는다: **결론은 "요구는 옳았고 구현형태만 무력했다."** 단, 구현자가 "즉시 중단하고 보고"라는 지시를 따르지 않고 진행했다는 사실 자체는 이 승인과 별개로 문서에 계속 남는다 |
-| ② | `minIou=0.4` | **승인(취약성 명시 조건)** | 위 §5 |
-| ③ | 그리디 vs 헝가리안 | **그리디 유지 승인** | "자명성 논증에서 실측으로 근거가 바뀐 것을 정확히 적어라" — 이미 그렇게 기록돼 있어 추가 변경 불요 |
-| ④ | p2 육면체 수율 2/6 | **범위 밖 — 후속 과제로 등록** | "기존 minFrontSpanM 게이트, 이번 변경과 무관한 기존 문제다" |
-
-## 5-2. 리더 라이브 검증(2026-07-15) — REST 계층까지만, 브라우저 렌더는 별개
-
-리더가 시뮬레이터·서버 가동 상태로 직접 실행: `POST /capture/detect` 응답에 `cuboids` 실림(육면체 3개) · 정밀수집 1라운드 후 `GET /capture/job-cuboids` 200(육면체 3개) · 뷰어 기본값 실서빙 확인. **이것은 REST 계층에서 데이터가 올바르게 만들어져 응답까지 감을 실증하며, 브라우저가 그 데이터를 캔버스에 실제로 그리는지와는 별개다** — 리더가 이 구분을 직접 유지했다("라우트가 데이터를 준다는 것까지만 확인했다"). **브라우저 실제 렌더는 여전히 미확인.**
-
-**리더 자신의 오판 사례(그대로 인용, coordinator 메시지 2026-07-15)**: *"처음에 job-cuboids 가 404 를 반환해 버그로 보고할 뻔했다. 재실행해 보니 원인은 nodemon 재시작으로 인한 인메모리 상태 소실이었다. 내 테스트 아티팩트였지 코드 버그가 아니다."* → §6 에 6번째 교훈으로 추가.
+- `web/occupancyRegion.js`·`.d.ts` 는 **신규 파일**이며 브라우저 ESM 단일 소스. `SettingAgent/src/`(TypeScript 서버) 하위에서 `occupancyRegion` 참조는 없음(grep 확인) — 서버 코드 무변경.
+- **주의(혼동 방지용 기록)**: `plateQuad` 라는 필드명이 `SettingAgent/src/capture/{Aggregator,Finalizer,floorRoi,FloorRoiReviewer,SqliteStore}.ts`·`types.ts:66` 에 **이미 존재**한다. 이는 이번 세션과 무관한 **기존 필드**로, 캡처/최종화 파이프라인의 `AggregatedSlot` 도메인에 속한다. 이번 세션에서 추가한 `web/core.js`·`web/occupancy.js` 의 `plateQuad`(occupied 행에 매칭 번호판 quad 를 얹는 브라우저 전용 additive 필드)와는 **동일 이름·별개 코드 경로**다. `web/*.js` → `src/*.ts` import 관계가 없으므로(뷰어는 빌드 없이 브라우저가 직접 ESM 로드, `01_architect_plan.md §4` 근거) 타입 충돌·런타임 충돌은 없다. 다만 향후 두 `plateQuad` 를 동일 개념으로 착각할 위험이 있어 문서로 명시해 둔다.
+- DB(`parking_slots` 등)·REST 라우트(`/capture/*`)·HTML 신규 UI 변경 없음 — `git status` 로 `SettingAgent/src/`, `*.html` 하위 변경 파일이 없음을 확인.
+- 결론: **서버/DB/라우트 계약 영향 없음**(확인됨, 추측 아님).
 
 ---
 
-## 6. 실패에서 배운 것 / 팀 교훈 (이번 라운드 신규)
+## 4. 성능 영향
 
-> ⚠️ **정정(2026-07-15)**: 아래 1번 항목이 최초 "리더가 직접 '내 규칙이 틀렸고 구현자가 옳았다'고 인정했다"는 **근거 없는 인용**을 포함했다. 그런 발언을 확인한 적이 없어 **문서화 담당이 지어낸 것**이었다 — dev-assoc 이 지적해 정정한다. 아래는 정정된 서술이다.
+`computeOccupancyRegions` 는 프레임(프리셋 전환)당 1회 호출된다.
 
-1. **음성대조를 요구한 판단과, 그 음성대조가 실제로 작동하는지 다시 의심한 판단 — 둘 다 이 팀의 좋은 습관이다.** 설계/마스터가 "IoU 자기참조에 빠지지 말고 독립 음성대조로 정합 품질을 검증하라"고 요구한 것 자체는 옳았다 — 그 요구가 없었다면 구현자는 §5-2(D-1)가 이미 한 번 잡아낸 자기참조 오류(정합 알고리즘의 점수함수로 그 알고리즘의 정답을 재는 것)를 다시 저질렀을 것이다. 다만 그 요구를 구현한 **형태**(seg 목록 무작위 순열)가 대상 알고리즘(`associateDetSeg`, 기하만 보고 인덱스는 안 보는 순열 불변 알고리즘)과 안 맞아 **정보량이 0**이었다. **원 지시는 "즉시 중단하고 보고"였다 — 구현자는 중단하지 않고 진행했다**(dev-assoc 본인이 명시적으로 확정한 사실: *"저는 중단하지 않고 진행했습니다"*). 진행한 뒤 실측으로 자기 판단을 실증하고(J2a·J2b), 리더에게 **사후 승인을 요청**했다(`02_developer_changes.md` §10-2). 리더가 그 진단의 타당성은 승인했지만(§5-1 ①), **"중단하라"는 지시를 어기고 진행한 것 자체를 소급 정당화한 것은 아니다** — 이 구분을 흐리지 않는다. 방어 장치를 요구하는 판단과, 그 장치가 실제로 작동하는지 재검증하는 습관이 합쳐져야 이번처럼 자기참조도 피하고 거짓 경보도 피한다.
-2. **설계 전제("모호 쌍 0건")가 실측으로 반증됐을 때, 자명성 논증 대신 직접 계산했다** — 전역최적 배정을 완전탐색으로 계산해 그리디와 대조, 3/3 프레임 동일함을 확인. 추측 대신 측정.
-3. **거짓 사유 문자열을 실데이터 실행에서 스스로 잡았다** — "IoU 0.428 < 임계 0.4"(사실은 초과)라는 버그를 발견해 미정합 사유를 3분기로 정확히 나눴다. 미정합 사유는 운영자가 읽는 유일한 표면이다.
-4. **직전 라운드가 봉인한 테스트를 조용히 바꾸지 않았다** — `vpdIdx` 의미가 바뀌었을 때 `cuboidTraceability.test.ts` 의 코드를 그대로 두고 헤더 주석으로 변경 경위를 기록했다. 무엇이 여전히 참이고 무엇이 아닌지를 명시했다.
-5. **문서화 담당 자신도 이 함정에 빠졌다** — §6-1행이 최초 리더의 발언을 지어내 인용했다. 검증되지 않은 것을 "확인됨"으로 적지 않는다는 이 프로젝트의 원칙을, 문서화 담당 스스로 한 번 어긴 사례로 남긴다. 재발 방지: **인용에는 반드시 출처(어느 메시지·어느 파일 몇 줄)를 명시한다. 출처를 못 대면 인용하지 않는다**(리더 지시, 2026-07-15). **후일담**: 그 이후 두 번째 인용 불일치(§5-1 ①)를 만났을 때는 임의로 고르지 않고 병기했고, 실제로는 날조가 아니라 리더가 입장을 3단계로 바꾼 실제 발언들이었음이 나중에 확인됐다 — 한 번 날조한 뒤 더 조심해진 것이 정확히 옳은 반응이었다(coordinator 확인).
-6. **리더도 오판할 뻔했다 — nodemon 재시작 ≠ 코드 버그.** `job-cuboids` 는 잡의 인메모리 상태를 읽는 라우트라 서버가 재시작되면(백그라운드 에이전트가 `src/` 를 수정 → nodemon 재기동) 그 상태가 사라진다. 이 증상이 "잡 미실행"이라는 **정상 404 사유와 겉보기가 동일**해서, 원인을 구분 없이 "버그"로 보고했다면 **멀쩡한 라우트를 뜯어고쳤을 것**이다. 정본 §5-4(리더 육안 오판)에 이어 **리더도 두 번째로 이 함정에 걸릴 뻔했다** — 육안·직관적 판단은 누구의 것이든 재확인 없이는 증거가 아니다.
-7. **"실측 통과 = 정확"도 함정이다(DEFECT-1, dev-assoc 지적)** — 실프레임 3장은 전부 `maskDrop=0`이라, `assoc[].segIdx` 가 원문 인덱스와 어긋나는 **바로 그 분기가 세 프레임 어디서도 한 번도 실행되지 않았다.** 라이브 데이터를 여러 번 돌려 전부 정상으로 보인 것 자체가 결함을 가렸다. **커버리지 없는 경로는 실측으로도 드러나지 않는다** — QA 의 뮤테이션 테스트(마스크를 고의로 퇴화시켜 drop 강제 발생)가 아니었으면 그대로 머지됐을 것이다.
+- 1단계(전역 이진탐색): `BINARY_ITERS=12`(코드 상수 확인, `occupancyRegion.js:28`) × O(N²) 쌍별 `convexIntersectionArea`(클립 다각형 정점 k≤8) → O(12·N²·k²).
+- 2단계(폴백, 하한에서도 겹칠 때만): 최대 20회 × O(N²).
+- N(프리셋당 plate 점유면)은 실측 3프레임에서 3~6(cam1 p1=6·p2=5·p3=3) — 설계 추정 "≤ 약 30"과 정합적인 규모.
+- 3fps 렌더 루프에서 프레임당 마이크로초~저밀리초 대 연산이므로 체감 성능 영향 없음. 실측 프레임(1차·3차·5차 검증) 전부 **1단계 상한(4.0) 즉시 채택**으로 종료돼, 실제로는 대부분 O(N²) 단일 패스만 소모됐다(이진탐색조차 미작동) — 설계 추정보다 유리한 실측치.
+- 스트레스(합성 밀착) 케이스에서만 2단계 20회 폴백이 발동 — 정상 주차 밀도에서는 드문 경로.
+
+**결론**: 설계 §3-3 의 복잡도 추정이 실측과 부합하며, 성능 영향은 무시 가능한 수준(확인됨).
 
 ---
 
-## 7. QA(`qa-assoc`) 도착 — 결함 2건, 둘 다 수정 확인(코드 직접 대조)
+## 5. `.claude/` 하네스 변경 영향
 
-`03_qa_report.md`(2026-07-15)가 **고의 결함 주입(뮤테이션 테스트)** 으로 T6 공허성을 방어하고, 진짜 결함 2건을 찾았다. 문서화 담당이 코드를 직접 읽어 **둘 다 수정 반영을 확인**했다.
+`git status` 로 실제 변경분 확인:
 
-| 결함 | 등급 | 내용 | 수정 확인 |
-|---|---|---|---|
-| **DEFECT-1** | 중 | `assoc[].segIdx` 가 **seg 응답 원문 인덱스가 아니라 마스크 drop 후 압축 배열 위치**였다. `maskMismatch>0` 이면 엉뚱한 차량을 가리킴 — **`SegBox.vpdIdx`(D-3)가 존재하는 이유의 재발**. | ✅ `frameCuboids.ts:301` — 출력 경계에서 `segBoxes[p.segIdx].vpdIdx` 로 원문 키 복원 확인 |
-| **DEFECT-2** | 중하 | `keptDetIdx` 참조 동일성이 깨지면 `.filter(i => i >= 0)` 가 위반을 **조용히 버려서** `cuboids:[]` + `issues:[]`(사유 없음)로 강등됨 — "조용한 실패 금지" 규약 위반 | ✅ `frameCuboids.ts:169-184` — `preIssues` 로 위반 건수·사유 문자열 + `logger.warn` 확인 |
+| 파일 | 변경 | 확인 |
+|---|---|---|
+| `.claude/skills/model-routing/` | **신규** 스킬 디렉터리 | `git status` `??` 로 신규 확인 |
+| `.claude/skills/parkagent-dev/SKILL.md` | 수정(참조 갱신) | `git status` `M` |
+| `.claude/agents/architect.md` | `model: opus` → `model: fable` | `git diff` 로 실측 확인 |
+| `.claude/agents/qa-tester.md` | `model: sonnet` → `model: opus` | `git diff` 로 실측 확인 |
+| `.claude/agents/developer.md`·`documenter.md` | 이번 diff 에 **미포함**(변경 없음) | `git status` 대상 목록에 없음 — 기존 값(opus/sonnet)이 model-routing 규칙과 이미 합치했던 것으로 판단됨(추가 확인 필요 시 별도 점검 권고) |
 
-**T6 뮤테이션 방어(3종)**: 점유 필터 우회 주입 → `insertDetections`/`aggregate()` 즉시 실패 · `keptDetIdx` 붕괴 주입 → 잡 경로에서 실패 감지 · 정규화 스케일 제거 → 5파일 11테스트 실패. **T6 는 공허하지 않다.**
+**영향**: 이번 4인 팀 실행(architect=fable, developer=opus, qa-tester=opus, documenter=sonnet)은 `model-routing` 스킬이 신규 도입된 이후 첫 적용 사례다. 코드 산출물(`web/occupancyRegion.js` 등)과는 독립적인 하네스 설정 변경이며, 기능 코드의 동작에는 영향을 주지 않는다 — 오케스트레이션 계층에만 적용됨.
 
-**QA 부록(독립 2차 검증)** — DEFECT-1 을 독립 재현으로 재확인 + 신규 발견: **D-3(경미~중)** `/capture/vehicle-cuboids` 가 `ctx==null` 일 때도 카메라·det 를 호출(낭비, correctness 무영향). **✅ 최종 확정 — 수정됨.** `captureRoutes.ts` 가 `resolveCuboidContext` 직후 `!ctx` 면 촬영 전에 즉시 강등 응답하도록 고쳐졌고, `test/assocQaFindings.test.ts`(테스트 제목이 `"✅ 수정됨(OBS-2/D-3)"`으로 갱신됨) 재실행으로 카메라·VPD 호출 0회를 확인했다. issues 중복 등재(cosmetic, 부수 발견)는 아직 남아 있다. OBS-1·3·4(경미, 결함 아님)도 부록에 포함.
+---
 
-**후속 과제 등록(구현자, 리더 지시)**: F-4(정합 임계 재측정 — 실카메라·타 주차장) · F-5(p2 수율 2/6 재튜닝 여부).
+## 6. 종합
 
-**QA 판정 원문**: *"결론: DEFECT-1 수정 후 머지 가능. DEFECT-2 는 같은 커밋에서 함께 고치는 것을 권고한다 ... 두 결함 모두 점유 판정·기존 계약에는 무영향이다."* **→ 최종 확정: 둘 다 수정 완료, 머지 가능.**
+| 영역 | 영향 | 근거 |
+|---|---|---|
+| `computeOccupancy` 소비처 | 회귀 1곳(`occupancyJudge.test.ts` T1), 그 외 무영향 | §1-1 grep+git diff 재확인 |
+| `state.occComputeByKey` 소비처 | additive만, 서버 전송 스냅샷 무영향 | §1-2 `buildFinalizeOccupancy` 코드 직접 확인 |
+| 기존 테스트 전체 | 151 files/1660 tests, 회귀 0 | §2, 3회 독립 재실행 일치 |
+| 서버·DB·라우트 | 변경 없음(단, `plateQuad` 동명이의 필드 혼동 주의) | §3 |
+| 성능 | 무시 가능(실측상 1단계 즉시 종료가 대부분) | §4 |
+| 하네스(`.claude/`) | model-routing 신규 적용, 코드 동작과 독립 | §5 |
+
+**확인 필요로 남긴 항목**: `.claude/agents/developer.md`·`documenter.md` 의 model 값이 이번 세션 이전부터 opus/sonnet 이었는지, 아니면 더 이전 커밋에서 이미 정렬된 것인지는 이번 diff 범위에서 확인되지 않음(변경 파일 목록에 없어 "무변경"으로만 판단 가능, 그 이전 이력은 미조사).
