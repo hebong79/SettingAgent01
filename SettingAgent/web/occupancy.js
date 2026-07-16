@@ -1,14 +1,20 @@
 // 차량 점유 판정 컴포넌트(순수, 환경 비의존 — DOM/fetch/state 미참조).
-// 슬롯별 2단계 판정: ① 번호판(web/core.js:computeOccupancy 위임) → ② 비점유 슬롯에 bbox 폴백.
-// 번호판만 있을 때 결과는 computeOccupancy 에 source 필드만 얹은 것과 항등(회귀 0).
+// 슬롯별 2단계 판정: ① 차량 접지밴드 겹침 argmax 귀속 → ② 비점유 슬롯에 번호판 중심 폴백
+// (web/core.js:computeOccupancy 위임). 번호판만 있을 때(차량 미검출) 결과는 computeOccupancy 에
+// source 필드만 얹은 것과 항등(회귀 0).
 //
-// bbox 폴백에 필요한 기하(groundBand·rectCorners·convexIntersectionArea·area 계열)는
+// 귀속 앵커가 차량 접지인 이유: 번호판은 지면에서 떠 있어(차체 전면 ~0.5m) 바닥 ROI(지면 발자국)와
+// 다른 평면이다. 그 시차가 원경의 얇은 폴리곤(y두께 30px 미만)을 넘겨 이웃 슬롯 오귀속·열 끝 차량
+// 소실을 만든다(진단 05 실측 10~33px). 접지밴드는 바닥 ROI 와 동일 평면이라 시차가 원리적으로 0.
+// → source 는 귀속 근거가 아니라 **번호 인식 여부**를 뜻한다('bbox' = 차량은 귀속, 번호 미인식).
+//
+// 접지 판정에 필요한 기하(groundBand·rectCorners·convexIntersectionArea·area 계열)는
 // src(TypeScript: onPlaceFilter.ts/domain/polygon.ts/domain/geometry.ts)에만 있어 브라우저에서
 // import 할 수 없다. 코드베이스 관례(quadCentroid·normalizeGlobalIdx 파리티 포트)를 따라
 // **src 원본을 자구 그대로 포팅**하고 파리티 테스트(test/occupancyGeometryParity.test.ts)로 고정한다.
 // 새 기하 알고리즘은 발명하지 않는다.
 
-import { computeOccupancy, quadCentroid, pointInQuad } from './core.js';
+import { computeOccupancy, quadCentroid } from './core.js';
 
 // ===== 상수(출처: src/capture/onPlaceFilter.ts — 모드A 필터에서 실측 검증된 값) =====
 
@@ -116,6 +122,14 @@ export function groundBand(rect, ratio = GROUND_BAND_RATIO) {
   return { x: rect.x, y: rect.y + rect.h - h, w: rect.w, h };
 }
 
+/**
+ * quad 좌표 동등성 키(4점 수치 직렬화). 서버가 같은 번호판을 detect.plates[] 와 vehicles[].plate
+ * 양쪽에 직렬화하므로 수치는 정확히 같다 — JSON 왕복 후엔 참조 동등성이 성립하지 않아 좌표로 맞춘다.
+ */
+function quadKey(quad) {
+  return quad.map((p) => `${p.x},${p.y}`).join(';');
+}
+
 // ===== OccupancyJudge =====
 
 /**
@@ -130,40 +144,23 @@ export class OccupancyJudge {
   }
 
   /**
-   * 슬롯별 plate > bbox 우선순위 점유 판정.
+   * 슬롯별 차량 접지 귀속 > 번호판 폴백 점유 판정.
    * @param {Array<{ idx: number, quad: Array<{x:number,y:number}> }>|null|undefined} floorPolygons
    * @param {{ plates?: Array<{quad:Array<{x:number,y:number}>}>|null, vehicles?: Array<{rect:{x:number,y:number,w:number,h:number}, plate?:{quad:Array<{x:number,y:number}>}|null}>|null }|null|undefined} detect
-   * @returns {Array<{ idx:number, occupied:boolean, source:'plate'|'bbox'|null, center?:{x:number,y:number}, vehicleRect?:{x:number,y:number,w:number,h:number} }>}
+   * @returns {Array<{ idx:number, occupied:boolean, source:'plate'|'bbox'|null, center?:{x:number,y:number}, plateQuad?:Array<{x:number,y:number}>, vehicleRect?:{x:number,y:number,w:number,h:number} }>}
    */
   judge(floorPolygons, detect) {
     if (!Array.isArray(floorPolygons)) return [];
 
     const vehicles = Array.isArray(detect?.vehicles) ? detect.vehicles : [];
-    // 기존 소비처(app.js) union 과 동일 식: standalone plates ∪ 차량 귀속 plate.
-    const plateCandidates = [
-      ...(Array.isArray(detect?.plates) ? detect.plates : []),
-      ...vehicles.map((v) => v?.plate).filter(Boolean),
-    ];
+    const rows = floorPolygons.map((f) => ({ idx: f.idx, occupied: false, source: null }));
 
-    // ── 1단계: 번호판(기존 경로 그대로 — computeOccupancy 위임, 재구현 금지) ──
-    const rows = computeOccupancy(floorPolygons, plateCandidates).map((r) =>
-      r.occupied
-        ? { idx: r.idx, occupied: true, source: 'plate', center: r.center }
-        : { idx: r.idx, occupied: false, source: null },
-    );
-
-    // ── 2단계: bbox 폴백(1단계 비점유 슬롯만) ──
-    // 슬롯 위치별 최대 겹침 후보 1대만 유지(argmax). rows 는 floorPolygons 와 같은 순서.
+    // ── 1단계: 차량 접지밴드 겹침 argmax 귀속(주 매칭기) ──
+    // 슬롯 위치별 최대 겹침 차량 1대만 유지(argmax). rows 는 floorPolygons 와 같은 순서.
     const bestByPos = new Map();
     for (const v of vehicles) {
       const rect = v?.rect;
       if (!rect) continue;
-      // 후보 제외: plate 중심이 어떤 폴리곤 안에 든 차량 → 1단계가 이미 소비(이중 마킹 차단).
-      // 포함: plate 없음 OR plate 중심이 모든 폴리곤 밖(bbox 로 점유 구제).
-      if (v.plate) {
-        const c = quadCentroid(v.plate.quad);
-        if (c && floorPolygons.some((f) => pointInQuad(c.x, c.y, f.quad))) continue;
-      }
       const band = groundBand(rect, this.groundBandRatio);
       const bandArea = area(band);
       if (bandArea <= 0) continue; // 퇴화 rect — src onPlaceFilter 와 동일 처리.
@@ -178,16 +175,61 @@ export class OccupancyJudge {
           bestPos = j;
         }
       }
+      // 차량은 최대 겹침 슬롯 1개에만 지원 → 한 차량의 이중 점유는 구조적으로 불가.
       if (bestPos >= 0 && bestRatio >= this.minBandOverlap) {
         const prev = bestByPos.get(bestPos);
-        if (!prev || bestRatio > prev.ratio) bestByPos.set(bestPos, { ratio: bestRatio, rect });
+        if (!prev || bestRatio > prev.ratio) bestByPos.set(bestPos, { ratio: bestRatio, v });
       }
     }
 
+    const placedPlateKeys = new Set(); // 배치 차량의 attached plate 좌표키 — 2단계 중복 차단.
+    const placedVehicles = new Set();
     for (const [pos, cand] of bestByPos) {
-      if (rows[pos].occupied) continue; // plate 우선 — 1단계 점유 슬롯은 절대 덮지 않음.
-      rows[pos] = { idx: floorPolygons[pos].idx, occupied: true, source: 'bbox', vehicleRect: cand.rect };
+      const v = cand.v;
+      placedVehicles.add(v);
+      // source 는 귀속 근거가 아니라 번호 인식 여부. plate 퇴화(중심 null)면 bbox 로 강등(throw 금지).
+      const c = v.plate ? quadCentroid(v.plate.quad) : null;
+      rows[pos] = c
+        ? {
+            idx: floorPolygons[pos].idx,
+            occupied: true,
+            source: 'plate',
+            center: c,
+            plateQuad: v.plate.quad,
+            vehicleRect: v.rect,
+          }
+        : { idx: floorPolygons[pos].idx, occupied: true, source: 'bbox', vehicleRect: v.rect };
+      if (c) placedPlateKeys.add(quadKey(v.plate.quad));
     }
+
+    // ── 2단계: 번호판 중심 폴백(1단계 비점유 슬롯만 — computeOccupancy 위임, 재구현 금지) ──
+    // 후보: 차량에 귀속 안 된 standalone plate ∪ 미배치 차량(임계 미달·경합 패배)의 plate.
+    const fallbackPlates = [
+      ...(Array.isArray(detect?.plates) ? detect.plates : []).filter(
+        (p) => p?.quad && !placedPlateKeys.has(quadKey(p.quad)),
+      ),
+      ...vehicles.filter((v) => !placedVehicles.has(v) && v?.plate).map((v) => v.plate),
+    ];
+    const openPos = [];
+    const openPolys = [];
+    floorPolygons.forEach((f, j) => {
+      if (!rows[j].occupied) {
+        openPos.push(j);
+        openPolys.push(f);
+      }
+    });
+    // computeOccupancy 는 입력 폴리곤 순서를 보존 → k 번째 결과 = openPos[k] 위치.
+    computeOccupancy(openPolys, fallbackPlates).forEach((r, k) => {
+      if (r.occupied) {
+        rows[openPos[k]] = {
+          idx: r.idx,
+          occupied: true,
+          source: 'plate',
+          center: r.center,
+          plateQuad: r.plateQuad,
+        };
+      }
+    });
 
     return rows;
   }

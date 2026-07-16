@@ -41,11 +41,16 @@ export interface OccupancyJudgement {
   /** 바닥 폴리곤 전역 인덱스(입력 그대로). */
   idx: number;
   occupied: boolean;
-  /** 판정 근거. null = 빈 면. */
+  /**
+   * 번호 인식 여부(귀속 근거가 아님 — 슬롯 귀속은 차량 접지밴드가 담당).
+   * 'plate' = 귀속 차량이 번호판 보유(또는 차량 미귀속 번호판 폴백), 'bbox' = 차량 귀속·번호 미인식, null = 빈 면.
+   */
   source: 'plate' | 'bbox' | null;
   /** source==='plate' 일 때만: 번호판 중심(기존 computeOccupancy center 그대로). */
   center?: NormalizedPoint;
-  /** source==='bbox' 일 때만: 판정 근거 차량 bbox(정규화). */
+  /** source==='plate' 일 때만: 번호판 OBB quad — 점유영역 사다리꼴 축 소스. */
+  plateQuad?: NormalizedPoint[];
+  /** 차량 접지로 귀속된 행(source 'plate'/'bbox' 공통): 그 차량 bbox. 번호판 폴백 행에는 없다. */
   vehicleRect?: NormalizedRect;
 }
 

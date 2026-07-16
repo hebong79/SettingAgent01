@@ -468,17 +468,19 @@ export function quadCentroid(quad) {
  * 그 폴리곤 내부(pointInQuad 재사용)면 occupied=true, center=그 번호판 중심(첫 매칭).
  * floorPolygons: [{ idx, quad:[{x,y}×4] }] — 현재 프리셋 파일 바닥ROI.
  * plates: [{ quad:[{x,y}×4] }] — LPD 번호판 OBB(여러 소스 합집합, 호출측이 구성).
- * 반환: [{ idx, occupied, center? }] (center 는 occupied 일 때만).
+ * 반환: [{ idx, occupied, center?, plateQuad? }] (center/plateQuad 는 occupied 일 때만).
  * throw 금지 — floorPolygons/plates 누락·비배열 시 []( graceful, 강등 철학).
  */
 export function computeOccupancy(floorPolygons, plates) {
   if (!Array.isArray(floorPolygons)) return [];
-  const centers = (Array.isArray(plates) ? plates : [])
-    .map((p) => quadCentroid(p?.quad))
-    .filter((c) => c !== null);
+  const cands = (Array.isArray(plates) ? plates : [])
+    .map((p) => ({ center: quadCentroid(p?.quad), quad: p?.quad }))
+    .filter((c) => c.center !== null);
   return floorPolygons.map((f) => {
-    const center = centers.find((c) => pointInQuad(c.x, c.y, f.quad));
-    return center ? { idx: f.idx, occupied: true, center } : { idx: f.idx, occupied: false };
+    const hit = cands.find((c) => pointInQuad(c.center.x, c.center.y, f.quad));
+    return hit
+      ? { idx: f.idx, occupied: true, center: hit.center, plateQuad: hit.quad }
+      : { idx: f.idx, occupied: false };
   });
 }
 
@@ -584,26 +586,30 @@ export function removePlaceSpace(placeRoi, idx) {
 
 /**
  * 전체 주차면 평면 목록(R2). 전 카메라·전 프리셋을 하나의 목록으로 전역 인덱스 오름차순 산출.
- * - 점유: 프리셋별로 computeOccupancy(파일 바닥ROI × LPD 번호판 중심) 재사용.
+ * - 점유: judge(OccupancyJudge) 주입 시 그 판정기로 산출 — 실소비처(app.js)는 주입해 오버레이와
+ *   같은 기준(차량 접지 귀속)을 쓴다. 미전달 시 computeOccupancy(번호판 중심) 기본 경로(하위호환).
+ *   occupancy.js→core.js 단방향 의존을 지키려 import 대신 주입으로 받는다.
  * - parkingSlotsByKey(최종화 후 DB parking_slots)에 slotIdx===globalIdx 행이 있으면 그 행의
  *   occupied/vpd/lpd 를 우선 사용(DB 태그 보존). 단 그 프리셋의 DB 행 전체가 파일 전역번호 체계와
  *   일치할 때만 채택 — 구 run(프리셋별 0-based) 처럼 다른 체계면 통째 기각(부분 겹침 오귀속 방지).
  * 반환: [{ globalIdx, cam, preset, key, occupied, vpd, lpd }] — globalIdx 오름차순.
  * throw 금지 — placeRoi null/빈 → [](graceful).
  */
-export function buildFlatSlotRows({ placeRoi, detectByKey, parkingSlotsByKey }) {
+export function buildFlatSlotRows({ placeRoi, detectByKey, parkingSlotsByKey, judge }) {
   if (!placeRoi || typeof placeRoi !== 'object') return [];
   const rows = [];
   for (const key of Object.keys(placeRoi)) {
     const [cam, preset] = key.split(':').map(Number);
     const spaces = Array.isArray(placeRoi[key]) ? placeRoi[key] : [];
     const detect = detectByKey?.[key];
-    const plates = [
-      ...(detect?.plates ?? []),
-      ...(detect?.vehicles ?? []).map((v) => v.plate).filter(Boolean),
-    ];
     const floorPolys = spaces.map((sp) => ({ idx: sp.idx, quad: sp.points }));
-    const occById = new Map(computeOccupancy(floorPolys, plates).map((o) => [o.idx, o.occupied]));
+    const occRows = judge
+      ? judge.judge(floorPolys, detect)
+      : computeOccupancy(floorPolys, [
+          ...(detect?.plates ?? []),
+          ...(detect?.vehicles ?? []).map((v) => v.plate).filter(Boolean),
+        ]);
+    const occById = new Map(occRows.map((o) => [o.idx, o.occupied]));
     const dbRows = parkingSlotsByKey?.[key] ?? [];
     // DB 행 집합이 파일 전역번호 체계와 완전히 일치할 때만 태그 채택. 구 run(0-based {0..6})은
     // 신 전역번호({1..7})와 부분만 겹쳐 한 칸 시프트된 값을 진짜처럼 표시하므로 통째 기각 → 파일 계산 점유로 폴백.

@@ -191,6 +191,8 @@ export interface OccupancySpace {
   idx: number;
   occupied: boolean;
   center?: NormalizedPoint;
+  /** occupied 일 때만: 판정 근거 번호판 OBB quad(입력 그대로) — 점유영역 사다리꼴 축 소스. */
+  plateQuad?: NormalizedPoint[];
 }
 export function computeOccupancy(
   floorPolygons: Array<{ idx: number; quad: NormalizedPoint[] }> | null | undefined,
@@ -227,6 +229,9 @@ export function buildFlatSlotRows(args: {
   detectByKey?: Record<string, { vehicles?: Array<{ plate?: { quad: NormalizedPoint[] } }>; plates?: Array<{ quad: NormalizedPoint[] }> }> | null;
   // vpd/lpd 는 SqliteStore.getParkingSlots(ParkingSlotView) 의 검출 객체(없으면 null) — 존재 여부만 태그로 쓴다.
   parkingSlotsByKey?: Record<string, Array<{ slotIdx: number; vpd?: NormalizedRect | null; lpd?: NormalizedQuad | null; occupied?: boolean }>> | null;
+  // 점유 판정기(occupancy.js:OccupancyJudge) 주입 — 전달 시 차량 접지 귀속 기준으로 판정한다.
+  // 미전달 기본 경로(번호판 중심)는 하위호환용이며 시차 오귀속 결함이 남는다 — 실소비처는 주입할 것.
+  judge?: { judge(floorPolygons: Array<{ idx: number; quad: NormalizedPoint[] }>, detect: unknown): Array<{ idx: number; occupied: boolean }> };
 }): FlatSlotRow[];
 
 export interface SlotLike {

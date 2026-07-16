@@ -50,7 +50,8 @@ describe('OccupancyJudge.judge', () => {
   it('T1 번호판만(vehicles 없음) → computeOccupancy 와 idx·occupied·center 동치 + source=plate', () => {
     const plates = [plateAt(0.2, 0.2), plateAt(0.6, 0.2)]; // slot1, slot2 각각
     const rows = judge.judge(FLOORS, { plates });
-    const base = computeOccupancy(FLOORS, plates);
+    // plateQuad 는 양쪽 모두 additive → 동치 비교는 {idx,occupied,center} 로 투영해 확인.
+    const base = computeOccupancy(FLOORS, plates).map((r) => ({ idx: r.idx, occupied: r.occupied, center: r.center }));
     expect(rows.map((r) => ({ idx: r.idx, occupied: r.occupied, center: r.center }))).toEqual(base);
     for (const r of rows) {
       if (r.occupied) {
@@ -113,10 +114,17 @@ describe('OccupancyJudge.judge', () => {
     expect(rows[1].occupied).toBe(true);
   });
 
-  it('T7 plate 중심이 모든 폴리곤 밖인 plate 보유 차량 → 2단계 bbox 판정', () => {
+  it('T7 plate 중심이 모든 폴리곤 밖인 plate 보유 차량 → 접지 슬롯 점유 + source=plate', () => {
     const veh = { rect: R_IN_S1, plate: plateAt(0.2, 0.9) }; // plate 중심 y=0.9 → 슬롯 밖
     const rows = judge.judge(FLOORS, { vehicles: [veh] });
-    expect(rows[0]).toEqual({ idx: 1, occupied: true, source: 'bbox', vehicleRect: R_IN_S1 });
+    expect(rows[0]).toEqual({
+      idx: 1,
+      occupied: true,
+      source: 'plate',
+      center: { x: 0.2, y: 0.9 },
+      plateQuad: veh.plate.quad,
+      vehicleRect: R_IN_S1,
+    });
   });
 
   it('T8 한 슬롯 bbox 후보 2대 → occupied 1회, vehicleRect=겹침 최대 차량', () => {

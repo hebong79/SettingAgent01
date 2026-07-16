@@ -63,6 +63,7 @@ import {
   groundModelsByKey, // ground-model 응답 models[] → cam:preset 맵(순수)
 } from './core.js';
 import { OccupancyJudge } from './occupancy.js'; // 번호판 우선·bbox 폴백 점유 판정(순수 컴포넌트).
+import { computeOccupancyRegions } from './occupancyRegion.js'; // 번호판 기준 점유영역 사다리꼴(겹침 회피 자동 배율, 순수).
 
 const occupancyJudge = new OccupancyJudge(); // 임계값 기본(groundBandRatio=0.25, minBandOverlap=0.15). 매 프레임 재사용.
 
@@ -364,13 +365,30 @@ function updateLogicOccupancy() {
   }));
   if (!floorPolys.length) return;
   const detect = state.detectByKey[key]; // 프리셋 키로 조회 → 항상 그 프리셋 검출(일치 판정 불요).
-  // OccupancyJudge: 1단계 번호판(computeOccupancy 위임) → 2단계 비점유 슬롯 bbox 폴백. union 은 judge 내부에서 조립.
+  // OccupancyJudge: 1단계 차량 접지밴드 argmax 귀속 → 2단계 비점유 슬롯 번호판 폴백. 후보 조립은 judge 내부.
+  const rows = occupancyJudge.judge(floorPolys, detect);
+  // 점유영역 사다리꼴: plate 점유분만 모집단(bbox 폴백은 축 소스가 없어 미생성 — 기존 주황 원 유지).
+  const region = computeOccupancyRegions(
+    rows.filter((o) => o.source === 'plate' && o.plateQuad).map((o) => ({ idx: o.idx, quad: o.plateQuad })),
+  );
+  if (region.overlapPairs.length && !occRegionOverlapWarned.has(key)) {
+    occRegionOverlapWarned.add(key);
+    console.warn(`[OccupancyRegion] ${key} 겹침 잔존:`, region.overlapPairs);
+  }
+  const polyByIdx = new Map(region.regions.map((g) => [g.idx, g.polygon]));
   state.occComputeByKey[key] = {
-    spaces: occupancyJudge
-      .judge(floorPolys, detect)
-      .map((o) => ({ id: o.idx, occupied: o.occupied, source: o.source, center: o.center, vehicleRect: o.vehicleRect })),
+    spaces: rows.map((o) => ({
+      id: o.idx,
+      occupied: o.occupied,
+      source: o.source,
+      center: o.center,
+      vehicleRect: o.vehicleRect,
+      region: polyByIdx.get(o.idx),
+    })),
   };
 }
+
+const occRegionOverlapWarned = new Set(); // 점유영역 겹침 잔존 프리셋별 console.warn 1회 가드(렌더 스팸 방지).
 
 /**
  * 점유율 오버레이(R5: LPD 번호판 중심 = 점유 판정 근거, 작은 원으로 표시). 로직 점유(state.occComputeByKey)
@@ -381,6 +399,19 @@ function updateLogicOccupancy() {
 function drawOccupancyOverlay(ctx) {
   if (!$('roi-occupancy').checked) return;
   const occ = state.occComputeByKey[currentFrameKey()];
+  // 점유영역 사다리꼴 먼저(면 레이어) → 아래 원/라벨이 그 위에 남는다.
+  for (const sp of occ?.spaces ?? []) {
+    if (!sp.occupied || !sp.region) continue;
+    const pts = toPixelQuad(sp.region, overlay.width, overlay.height); // 클램프 후 3~8각형.
+    ctx.beginPath();
+    pts.forEach((p, i) => (i ? ctx.lineTo(p.px, p.py) : ctx.moveTo(p.px, p.py)));
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(255, 77, 77, 0.18)'; // 점유=빨강 계열 반투명 채움(중심 원과 동색).
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255, 77, 77, 0.9)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
   for (const sp of occ?.spaces ?? []) {
     if (!sp.occupied) continue;
     if (sp.source === 'bbox' && sp.vehicleRect) {
@@ -865,6 +896,7 @@ function renderSlotList() {
       placeRoi: state.placeRoi,
       detectByKey: state.detectByKey,
       parkingSlotsByKey: state.parkingSlotsByKey,
+      judge: occupancyJudge, // 목록 뱃지를 오버레이와 같은 판정기로 정합(주입 — core.js→occupancy.js 순환 회피).
     });
     for (const r of rows) {
       const div = document.createElement('div');
