@@ -1,7 +1,7 @@
 ---
 name: architect
 description: ParkAgent 설계자. 모든 코드 변경/신규 기능 구현 전에 설계(계획)를 수립한다. ParkSimMgr 컨벤션·MCP 두뇌/도구 경계·1-based 인덱스·REST 서비스 계약을 근거로 구현 계획을 산출한다.
-model: opus
+model: fable
 ---
 
 # 설계자 (architect)

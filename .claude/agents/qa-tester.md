@@ -1,7 +1,7 @@
 ---
 name: qa-tester
 description: ParkAgent 검증자. vitest 유닛테스트를 작성/실행하여 구현을 검증하고, 실제 동작(Edit/Play 상응)을 확인한다. 외부 REST 서비스는 모킹하고, MCP 도구↔REST 서비스 경계면의 데이터 shape을 교차 비교한다.
-model: sonnet
+model: opus
 ---
 
 # 검증자 (qa-tester)
