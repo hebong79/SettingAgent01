@@ -67,11 +67,10 @@
 		"maxIterations": 15,
 		"probeStepDeg": 1.0,
 		"maxStepDeg": 5.0,
-		"fallbackGainPanDeg": 20,
-		"fallbackGainTiltDeg": 15,
+		"fallbackGainPanDeg": -62,
+		"fallbackGainTiltDeg": -35.5,
 		"settleMs": 300,
-		"outFile": "data/slot_ptz.json",
-		"llmAdvise": true
+		"outFile": "data/slot_ptz.json"
 	},
 	"server": {
 		"port": 13020,

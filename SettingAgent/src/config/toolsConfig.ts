@@ -94,8 +94,8 @@ const CaptureSchema = z.object({
 });
 
 /**
- * 주차면별 번호판 중심정렬·줌 PTZ 캘리브레이션(/calibrate/*) 설정(설계서 §3.4).
- * 결정형 적응형 비례제어 + (옵셔널) LLM 자문. 실 단위는 후속(시뮬 도(°) 한정).
+ * 주차면별 번호판 중심정렬·줌 센터라이징(/calibrate/*) 설정(설계서 §3.4).
+ * 결정형 적응형 비례제어(PlatePtz 위임). 실 단위는 후속(시뮬 도(°) 한정).
  */
 const CalibrateSchema = z.object({
   /** 목표 번호판 가로폭(정규화). */
@@ -110,15 +110,17 @@ const CalibrateSchema = z.object({
   probeStepDeg: z.number().positive(),
   /** 1스텝 최대 보정(도, 진동 방지). */
   maxStepDeg: z.number().positive(),
-  /** probe 실패 시 기본 게인(°/정규화). */
+  /**
+   * **zoomRef=1 기준** fallback 게인(°/정규화). PlatePtz 가 시작 zoom 으로 스케일해 사용.
+   * cam1 시뮬 실측(−36.6/−21.0 @z1.69341) 유래 — 카메라별(FOV·마운트) 상이 가능하므로
+   * 새 장비에서는 diagSweep 로 재실측할 것. 부호가 반대면 P 제어가 역방향 발산한다.
+   */
   fallbackGainPanDeg: z.number(),
   fallbackGainTiltDeg: z.number(),
   /** move 후 정착 대기(ms). */
   settleMs: z.number().int().nonnegative(),
   /** 산출물 경로. */
   outFile: z.string().min(1),
-  /** LLM 자문 사용 여부(false 면 순수 결정형, 설계서 §0-C). */
-  llmAdvise: z.boolean(),
 });
 
 /**
@@ -274,8 +276,8 @@ export const DEFAULT_TOOLS_CONFIG: ToolsConfig = {
   },
   calibrate: {
     targetPlateWidth: 0.2, centerTol: 0.03, widthTol: 0.02, maxIterations: 15,
-    probeStepDeg: 1.0, maxStepDeg: 5.0, fallbackGainPanDeg: 20, fallbackGainTiltDeg: 15,
-    settleMs: 300, outFile: 'data/slot_ptz.json', llmAdvise: true,
+    probeStepDeg: 1.0, maxStepDeg: 5.0, fallbackGainPanDeg: -62, fallbackGainTiltDeg: -35.5,
+    settleMs: 300, outFile: 'data/slot_ptz.json',
   },
   ground: { enabled: true, minDepthEdgePx: 250, slotWidthM: 2.5, slotDepthM: 5.0 },
   server: { port: 13020, apiKeyEnv: 'SETTING_API_KEY' },

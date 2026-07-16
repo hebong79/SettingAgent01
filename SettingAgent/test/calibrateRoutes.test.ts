@@ -28,8 +28,8 @@ const setupCfg = {
 function calCfg(outFile: string): ToolsConfig['calibrate'] {
   return {
     targetPlateWidth: 0.2, centerTol: 0.03, widthTol: 0.02, maxIterations: 30,
-    probeStepDeg: 1.0, maxStepDeg: 5.0, fallbackGainPanDeg: 20, fallbackGainTiltDeg: 15,
-    settleMs: 0, outFile, llmAdvise: false,
+    probeStepDeg: 1.0, maxStepDeg: 5.0, fallbackGainPanDeg: -62, fallbackGainTiltDeg: -35.5,
+    settleMs: 0, outFile,
   };
 }
 

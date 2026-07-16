@@ -74,8 +74,8 @@ async function main(): Promise<void> {
     camera,
   });
 
-  // 주차면별 번호판 중심정렬·줌 PTZ 캘리브레이션(/calibrate/*). 결정형 비례제어 + LLM 자문(toggle).
-  const calibrator = new PtzCalibrator({ camera, lpd, brain, repo, cfg: tools.calibrate });
+  // 주차면별 번호판 중심정렬·줌 센터라이징(/calibrate/*). PlatePtz 결정형 폐루프 위임 + DB(centering_slot) 미러.
+  const calibrator = new PtzCalibrator({ camera, lpd, repo, cfg: tools.calibrate, store: sqlite });
 
   // 웹 뷰어 통합(SettingViewer). enabled=false 면 sources 미빌드(헤드리스).
   const sources = tools.viewer.enabled ? buildSourceRegistry(tools) : undefined;

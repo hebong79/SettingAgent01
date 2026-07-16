@@ -4,6 +4,8 @@ import { dirname } from 'node:path';
 import type {
   AggregatedSlot,
   CaptureRunRow,
+  CenteringSlotRow,
+  CenteringSlotView,
   CheckpointRow,
   DetectionRow,
   ParkingSlotRow,
@@ -32,7 +34,7 @@ export class SqliteStore {
     this.db.close();
   }
 
-  /** 8테이블 + 인덱스 보장(IF NOT EXISTS — 재생성 무해). */
+  /** 9테이블 + 인덱스 보장(IF NOT EXISTS — 재생성 무해). */
   private ensureSchema(): void {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS capture_run (
@@ -99,6 +101,15 @@ export class SqliteStore {
         pan REAL, tilt REAL, zoom REAL,
         updated_at TEXT,
         PRIMARY KEY (run_id, preset_key, slot_idx)
+      );
+      CREATE TABLE IF NOT EXISTS centering_slot (
+        slot_id TEXT NOT NULL,
+        cam_id INTEGER NOT NULL,
+        preset_id INTEGER NOT NULL,
+        preset_slotidx INTEGER,
+        pos TEXT NOT NULL,
+        updated_at TEXT,
+        PRIMARY KEY (cam_id, preset_id, slot_id)
       );
       CREATE INDEX IF NOT EXISTS idx_det_obs ON detection(observation_id);
       CREATE INDEX IF NOT EXISTS idx_obs_run_preset ON observation(run_id, preset_idx);
@@ -476,6 +487,37 @@ export class SqliteStore {
       }
     });
     tx(rows);
+  }
+
+  // ── 센터라이징된 주차면 PTZ(centering_slot · /calibrate/ptz 산출) ──
+  /**
+   * 센터라이징 성공 슬롯 PTZ 를 (cam_id, preset_id, slot_id) 키로 upsert(트랜잭션 · upsertFloorRoi 미러).
+   * ★ 전량 delete 금지 — 부분 캘리브레이션(start(slotIds))이 타깃 외 성공 행을 전멸시키지 않도록 키 단위 갱신.
+   */
+  upsertCenteringSlots(rows: CenteringSlotRow[]): void {
+    const stmt = this.db.prepare(
+      `INSERT INTO centering_slot (slot_id, cam_id, preset_id, preset_slotidx, pos, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(cam_id, preset_id, slot_id) DO UPDATE SET
+         preset_slotidx=excluded.preset_slotidx, pos=excluded.pos, updated_at=excluded.updated_at`,
+    );
+    const tx = this.db.transaction((list: CenteringSlotRow[]) => {
+      for (const r of list) {
+        stmt.run(r.slotId, r.camIdx, r.presetIdx, r.presetSlotIdx ?? null, r.pos, r.updatedAt);
+      }
+    });
+    tx(rows);
+  }
+
+  /** 전체 조회(cam/preset/슬롯순서 정렬). pos 는 JSON 문자열 그대로 — 소비측이 파싱. */
+  getCenteringSlots(): CenteringSlotView[] {
+    return this.db
+      .prepare(
+        `SELECT slot_id AS slotId, cam_id AS camIdx, preset_id AS presetIdx,
+                preset_slotidx AS presetSlotIdx, pos, updated_at AS updatedAt
+         FROM centering_slot ORDER BY cam_id, preset_id, preset_slotidx, slot_id`,
+      )
+      .all() as CenteringSlotView[];
   }
 
   getParkingSlots(runId: number): ParkingSlotView[] {

@@ -2,7 +2,6 @@ import { describe, it, expect } from 'vitest';
 import { PtzCalibrator, type PtzCalibratorDeps } from '../src/calibrate/PtzCalibrator.js';
 import type { CameraClient } from '../src/clients/CameraClient.js';
 import type { LpdClient, PlateBox } from '../src/clients/LpdClient.js';
-import type { SetupBrain } from '../src/brain/SetupBrain.js';
 import type { Repository } from '../src/store/Repository.js';
 import type { ToolsConfig } from '../src/config/toolsConfig.js';
 import type { SetupArtifact } from '../src/domain/types.js';
@@ -10,15 +9,15 @@ import { rectToQuad } from '../src/domain/geometry.js';
 import type { SlotPtzArtifact } from '../src/calibrate/types.js';
 
 /**
- * 검증자(qa-tester): PtzCalibrator (camera/lpd/brain 모킹, sleep/now 주입).
+ * 검증자(qa-tester): PtzCalibrator (camera/lpd 모킹, sleep/now 주입).
  * ★ 명령 PTZ 추적: 모킹 LPD 가 응답 PTZ 가 아닌 "명령한 PTZ"(requestImage ptz override)에 따라
  *   번호판 위치/폭을 만든다(시뮬 echo 0/0/1 무관 가정 재현). 순서(중심→줌)·수렴·폴백 검증.
  */
 
 const cfg: ToolsConfig['calibrate'] = {
   targetPlateWidth: 0.2, centerTol: 0.03, widthTol: 0.02, maxIterations: 30,
-  probeStepDeg: 1.0, maxStepDeg: 5.0, fallbackGainPanDeg: 20, fallbackGainTiltDeg: 15,
-  settleMs: 0, outFile: 'data/slot_ptz.json', llmAdvise: false,
+  probeStepDeg: 1.0, maxStepDeg: 5.0, fallbackGainPanDeg: -62, fallbackGainTiltDeg: -35.5,
+  settleMs: 0, outFile: 'data/slot_ptz.json',
 };
 
 /** plateRoiByPreset 1슬롯 fixture. */
@@ -167,31 +166,6 @@ describe('PtzCalibrator 다수 번호판', () => {
     await waitDone(cal);
     const it = getSaved()!.items[0];
     expect(it.centered).toBe(true); // 노이즈에 끌려가지 않고 수렴
-  });
-});
-
-describe('PtzCalibrator LLM off/실패 폴백', () => {
-  it('brain=undefined → 결정형만으로 동작', async () => {
-    const { cal, getSaved } = makeCalibrator({ brain: undefined });
-    cal.start();
-    await waitDone(cal);
-    expect(getSaved()!.items[0].centered).toBe(true);
-  });
-
-  it('llmAdvise=true 인데 adviseCentering=null → 결정형 폴백 수렴', async () => {
-    const brain = { enabled: true, adviseCentering: async () => null } as unknown as SetupBrain;
-    const { cal, getSaved } = makeCalibrator({ brain, cfg: { ...cfg, llmAdvise: true } as ToolsConfig['calibrate'] });
-    cal.start();
-    await waitDone(cal);
-    expect(getSaved()!.items[0].centered).toBe(true);
-  });
-
-  it('adviseCentering occluded=true → 스킵 reason occluded', async () => {
-    const brain = { enabled: true, adviseCentering: async () => ({ occluded: true }) } as unknown as SetupBrain;
-    const { cal, getSaved } = makeCalibrator({ brain, cfg: { ...cfg, llmAdvise: true } as ToolsConfig['calibrate'] });
-    cal.start();
-    await waitDone(cal);
-    expect(getSaved()!.items[0].reason).toBe('occluded');
   });
 });
 

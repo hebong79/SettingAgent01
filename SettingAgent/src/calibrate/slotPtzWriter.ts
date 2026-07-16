@@ -5,16 +5,22 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { SetupArtifact } from '../domain/types.js';
 import { quadBoundingRect } from '../domain/geometry.js';
+import { logger } from '../util/logger.js';
 import type { PlateTarget, SlotPtzArtifact } from './types.js';
 
 /**
  * setup_artifact → 캘리브레이션 대상 펼침. plateRoiByPreset 보유 슬롯 전부,
  * 키(`${camIdx}:${presetIdx}`)마다 1 항목. globalIdx 는 globalIndex 역참조(없으면 null).
+ * presetSlotIdx 는 해당 프리셋 coveredSlotIds 순서(1-based, 미포함 시 null).
  */
 export function expandPlateTargets(artifact: SetupArtifact): PlateTarget[] {
   // slotId → globalIdx 역참조 맵(설계서 §2: 없으면 null).
   const globalBySlot = new Map<string, number>();
   for (const g of artifact.globalIndex) globalBySlot.set(g.slotId, g.globalIdx);
+
+  // `${camIdx}:${presetIdx}` → coveredSlotIds(프리셋 내 위치 순서) 맵.
+  const coveredByPreset = new Map<string, string[]>();
+  for (const p of artifact.presets) coveredByPreset.set(`${p.camIdx}:${p.presetIdx}`, p.coveredSlotIds);
 
   const targets: PlateTarget[] = [];
   for (const slot of artifact.slots) {
@@ -24,6 +30,10 @@ export function expandPlateTargets(artifact: SetupArtifact): PlateTarget[] {
       const camIdx = Number(camStr);
       const presetIdx = Number(presetStr);
       if (!Number.isInteger(camIdx) || !Number.isInteger(presetIdx)) continue;
+      const pos = coveredByPreset.get(key)?.indexOf(slot.slotId) ?? -1;
+      if (pos < 0) {
+        logger.warn({ slot: slot.slotId, cam: camIdx, preset: presetIdx }, '프리셋 coveredSlotIds 미포함 → presetSlotIdx null');
+      }
       targets.push({
         camIdx,
         presetIdx,
@@ -31,6 +41,7 @@ export function expandPlateTargets(artifact: SetupArtifact): PlateTarget[] {
         globalIdx: globalBySlot.get(slot.slotId) ?? null,
         // 캘리브레이션 내부 math 는 rect 사용 → quad→축정렬 boundingRect 유도(기존 zoom/centering 재사용).
         plateRoi: quadBoundingRect(quad),
+        presetSlotIdx: pos >= 0 ? pos + 1 : null,
       });
     }
   }

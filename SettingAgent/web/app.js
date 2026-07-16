@@ -2003,7 +2003,7 @@ async function capFinalize() {
   }
 }
 
-// --- PTZ 캘리브레이션(주차면별 번호판 중심정렬·줌 → slot_ptz.json) ------
+// --- 센터라이징(주차면별 번호판 중심정렬·줌 → slot_ptz.json · DB centering_slot) ------
 // capPoll 패턴 차용(pollPlan 재사용). 절대경로 /calibrate/* 직접 폴링.
 let calPollTimer = null;
 let prevCalState = 'idle';
@@ -2017,7 +2017,11 @@ async function calStart() {
     body: '{}',
   });
   const data = await res.json().catch(() => ({}));
-  $('cal-msg').textContent = res.ok ? `시작됨 (대상 ${data.total} 슬롯)` : `시작 실패: ${data.error ?? res.status}`;
+  // total=0 은 코드 실패가 아니라 입력 부재(setup_artifact 에 번호판 ROI 슬롯 0) — 원인을 알려준다.
+  const okMsg = data.total === 0
+    ? '대상 0 — 셋업 산출물에 번호판 ROI 슬롯이 없습니다(최종화 필요)'
+    : `시작됨 (대상 ${data.total} 슬롯)`;
+  $('cal-msg').textContent = res.ok ? okMsg : `시작 실패: ${data.error ?? res.status}`;
   calPoll();
 }
 

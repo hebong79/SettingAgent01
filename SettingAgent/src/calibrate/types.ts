@@ -13,6 +13,11 @@ export interface PlateTarget {
   globalIdx: number | null;
   /** 대상 번호판 prior ROI(정규화) — 다수 번호판 중 최근접 선택 기준. */
   plateRoi: NormalizedRect;
+  /**
+   * 프리셋 내 슬롯 순서(1-based, presets[].coveredSlotIds 순서). DB centering_slot.preset_slotidx 소스.
+   * 프리셋 부재·coveredSlotIds 미포함 시 null(0/−1 발명 금지).
+   */
+  presetSlotIdx: number | null;
 }
 
 /** PTZ 상태(명령값 추적 — 시뮬 응답 echo 신뢰 불가, 설계서 ★). */

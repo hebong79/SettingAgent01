@@ -40,7 +40,8 @@ describe('config 분리', () => {
     const def = loadToolsConfig('config/__nope__.json');
     expect(def.calibrate.targetPlateWidth).toBe(0.2);
     expect(def.calibrate.outFile).toBe('data/slot_ptz.json');
-    expect(def.calibrate.llmAdvise).toBe(true);
+    expect(def.calibrate.fallbackGainPanDeg).toBe(-62);
+    expect(def.calibrate.fallbackGainTiltDeg).toBe(-35.5);
     // 실제 config/tools.config.json → calibrate 섹션 파싱.
     const real = loadToolsConfig();
     expect(real.calibrate.centerTol).toBeGreaterThan(0);

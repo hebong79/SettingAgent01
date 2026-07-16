@@ -111,6 +111,31 @@ export interface ParkingSlotView {
   zoom: number | null;
 }
 
+/**
+ * 센터라이징 성공 슬롯의 PTZ 저장 행(centering_slot, /calibrate/ptz 산출).
+ * ★ 컬럼명 cam_id/preset_id 는 마스터 지정 — 기존 관례(cam_idx/preset_idx)와 다르다(JOIN 시 유의).
+ */
+export interface CenteringSlotRow {
+  slotId: string;
+  camIdx: number; // → cam_id (1-based)
+  presetIdx: number; // → preset_id (1-based)
+  /** 프리셋 내 슬롯 순서(1-based). 도출 불가 시 null. */
+  presetSlotIdx: number | null;
+  /** 직렬화 완료 PTZ JSON: {"pan":..,"tilt":..,"zoom":..}. */
+  pos: string;
+  updatedAt: string;
+}
+
+/** centering_slot 조회 결과(AS 매핑 shape). pos 는 미파싱 문자열(소비측 파싱). */
+export interface CenteringSlotView {
+  slotId: string;
+  camIdx: number;
+  presetIdx: number;
+  presetSlotIdx: number | null;
+  pos: string;
+  updatedAt: string | null;
+}
+
 /** LLM 체크포인트 기록 행. */
 export interface CheckpointRow {
   id: number;
