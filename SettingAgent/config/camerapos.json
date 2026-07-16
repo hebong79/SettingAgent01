@@ -8,17 +8,17 @@
           "cam_id": 1,
           "preset_id": 1,
           "sname": "Preset 1",
-          "pan": 20,
+          "pan": 22,
           "tilt": 6.8,
-          "zoom": 1.6
+          "zoom": 1.69341
         },
         {
           "cam_id": 1,
           "preset_id": 2,
-          "sname": "Preset",
+          "sname": "Preset 2",
           "pan": 56.6,
           "tilt": 7.4,
-          "zoom": 1.9
+          "zoom": 2.03134
         },
         {
           "cam_id": 1,
@@ -26,7 +26,7 @@
           "sname": "Preset 3",
           "pan": 43.5,
           "tilt": 18.8,
-          "zoom": 1.4
+          "zoom": 1.46583
         }
       ]
     }

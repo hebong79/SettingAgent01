@@ -101,15 +101,14 @@ export interface OnPlaceOpts {
 /**
  * fovBaseV 추정 실패 시 폴백(도). **zoom=1 기준** 수직 FOV.
  *
- * 이전 값 24.017 은 `PtzCamRoi.json` 의 `camera.fov` 였는데, 그것은 **zoom=1.4 에서의 fov 스냅샷**이라
- * base(zoom=1) 로 쓰면 f 가 +42% 틀린다(재중심 PTZ 가 항상 ~30% 미달 → 대상이 중심에서 평균 154px 이탈, 라이브 실측).
- * 33.1 은 **독립 3자 일치**로 고른 값이다:
- *   ① 라이브 실측(pan 2° 회전 → 픽셀 이동량 ZNCC, 프리셋 줌대역 zoom 1.4~1.9): 32.6~33.5°
- *   ② 지면모델 공동추정(poolFovBaseV, 실데이터): 33.102°
- *   ③ 설계서 GT(camera.fov=24.01697 @ zoom=1.4 역산): 33.167°
- * 폴백이 실제로 쓰이면 항상 advisory 로그를 남긴다(조용한 강등 금지 — 이 버그가 숨었던 이유).
+ * 이전 값 33.1 은 각도 반비례식(hFOV=58/zoom) Unity 렌더에 탄젠트 피팅한 근사값이었다.
+ * Unity가 탄젠트 광학 모델(tan(hFOV/2)=tan(29°)/zoom)로 전환됨에 따라
+ * zoom=1 base는 정확히 CObjCamera.DEFAULT_VERT_FOV = 34.6348°(수평 58° @ 16:9)로 정합된다.
+ *   검증: Camera.HorizontalToVerticalFieldOfView(58°, 16/9) = 34.6348°
+ * fovBaseV 재추정(groundModel·poolFovBaseV)이 성공하면 이 폴백은 쓰이지 않는다.
+ * 폴백이 실제로 쓰이면 항상 advisory 로그를 남긴다(조용한 강등 금지).
  */
-const FALLBACK_FOV_BASE_V = 33.1;
+const FALLBACK_FOV_BASE_V = 34.6348;
 const FALLBACK_ASPECT = 16 / 9;
 const FRONT_BIAS = 0.62;
 const ZOOM_FACTORS = [2, 3, 4, 5];

@@ -367,14 +367,16 @@ describe('runDetect — 주차면 필터(OnPlaceOpts)', () => {
 });
 
 /**
- * 폴백 상수 = **33.1°**(zoom=1 기준 수직 FOV).
+ * 폴백 상수 = **34.6348°**(zoom=1 기준 수직 FOV = CObjCamera.DEFAULT_VERT_FOV).
  * 이전 값 24.017 은 `camera.fov`(zoom=1.4 에서의 fov 스냅샷)를 base 로 오인한 값이라 f 가 +42% 틀렸다.
- * 33.1 은 독립 3자 일치로 고른 값: 라이브 실측 32.6~33.5° / 지면모델 추정 33.102° / 설계 GT 33.167°.
+ * [2026-07-15] Unity 줌↔FOV 를 각도 반비례식에서 **탄젠트 광학 모델**로 전환하면서 base 를 34.6348 로 정합했다
+ *   (수평 58° @ 16:9 의 수직 FOV; Unity 탄젠트 SetZoomByFOV/detectMath.fovV 와 일치).
+ *   종전 33.1 은 각도렌더 이미지에 탄젠트 추정을 피팅한 과도값이었다(레거시 데이터에서만 성립).
  */
-const FALLBACK_FOV = 33.1;
+const FALLBACK_FOV = 34.6348;
 
 describe('loadDetectCfg — 추정 불가 시 폴백 상수', () => {
-  it('placeRoiFile undefined → 폴백(fovBaseV=33.1, aspect=16/9, frontBias/zoomFactors 상수)', async () => {
+  it('placeRoiFile undefined → 폴백(fovBaseV=34.6348, aspect=16/9, frontBias/zoomFactors 상수)', async () => {
     const out = await loadDetectCfg(undefined, 1);
     expect(out.fovBaseV).toBeCloseTo(FALLBACK_FOV, 6);
     expect(out.aspect).toBeCloseTo(16 / 9, 6);
@@ -421,10 +423,11 @@ describe('★ loadDetectCfg C3 — fovBaseV 는 지면모델 추정, camera.fov 
   const load = (path: string) => loadDetectCfg(path, 1, { cameraposFile: CAMPOS, ground: GROUND });
 
   /**
-   * ⚠️ 폴백(33.1)이 추정치(≈33.0)와 **거의 같아졌다** — 이제 **값만으로 두 경로를 구별할 수 없다.**
-   * (폴백이 24.017 이던 시절엔 값 차이가 곧 구별이었다.) 따라서 검출력을 **구조적 단언**으로 옮긴다:
+   * ⚠️ 동결 픽스처(PtzCamRoi.unity.json)는 **레거시 각도모델** 지오메트리라, 탄젠트 추정기가 돌리면 ≈33.19°
+   *   (각도모델 등가 base)를 낸다. 폴백은 이제 탄젠트 base 34.6348° 이므로 두 값이 다시 벌어져 **구별 가능**하다.
+   *   (실운영 데이터를 탄젠트 Unity 로 재생성하면 추정도 34.6° 로 수렴한다.) 검출력은 **구조적 단언**으로 유지:
    *   추정 경로는 estimateGroundModels 의 출력과 **소수 9자리까지 동일**해야 한다 —
-   *   조용히 폴백으로 떨어지면(33.1) 이 단언이 깨진다.
+   *   조용히 폴백으로 떨어지면(34.6348) 이 단언이 깨진다.
    */
   it('추정 fovBaseV 는 폴백 상수와 **다른 값**이다 — 조용한 폴백 강등 검출(공허한 단언 방지)', async () => {
     const out = await load(UNITY_FIXTURE);

@@ -41,12 +41,11 @@
             <label><input id="roi-plate" type="checkbox" checked /> 번호판</label>
             <label><input id="roi-floor" type="checkbox" checked /> 바닥</label>
             <label><input id="roi-occupancy" type="checkbox" checked /> 점유</label>
-            <label><input id="roi-detect" type="checkbox" checked /> 검출</label>
             <label title="주차면을 3D 육면체로 표시(지면모델 기반). 기존 바닥 ROI 는 그대로 유지">
               <input id="roi-cuboid" type="checkbox" /> 육면체
             </label>
             <label title="차량을 3D 육면체로 표시(det 검출 + seg 마스크 접지선). 정밀수집·검출 실행 시 자동 갱신. ⚠️ 배치는 미검증 추정이다(배지 참조)">
-              <input id="roi-vcuboid" type="checkbox" checked /> 차량육면체
+              <input id="roi-vcuboid" type="checkbox" /> 차량육면체
             </label>
             <label title="VPD seg 마스크(차량 실루엣)를 반투명으로 표시. 실루엣 정합·접지 하단 뜸 육안 검증용. 지면모델 배선 시에만 산출됨">
               <input id="roi-mask" type="checkbox" /> 마스크
@@ -60,7 +59,7 @@
             <span id="ground-badge" class="badge ground-badge" title="지면모델 산출 근거">지면모델: 없음</span>
             <span id="anchor-badge" class="badge ground-badge" hidden title="2 DOF 앵커 지표(차량 접지선 vs 슬롯 격자)">앵커: —</span>
             <button id="det-delete" disabled title="선택한 검출 박스 삭제(임시·메모리만) — Delete/Backspace, Esc 해제">검출 삭제</button>
-            <button id="roi-clear" title="화면에 그려진 주차면·선택 표시 초기화">표시 초기화</button>
+            <button id="roi-clear" title="바닥 ROI 제외한 모든 오버레이 삭제(검출·점유·육면체·마스크·선택). Hide 아님 — 데이터 삭제라 재토글로 복원 안 됨. 바닥은 유지">표시 초기화</button>
           </div>
         </div>
         <div class="viewport-shell">
@@ -292,12 +291,13 @@
 
       <!-- 옵션(설정) 뷰: '옵션' 탭에서 전체폭 표시. llm.config/tools.config 편집 대상 값 편집·저장. -->
       <section id="options-view" class="analyze-view options-view" hidden>
-        <div class="analyze-head">
-          <div>
-            <h2>옵션 (설정)</h2>
-            <p>LLM · VPD · LPD 엔드포인트 편집. <b>API 키는 서버 env 로만 주입</b>되어 편집·표시하지 않습니다. 저장 후 <b>서버 재시작 필요</b>.</p>
+        <div class="analyze-head view-hero">
+          <div class="view-hero-copy">
+            <span class="view-eyebrow">SYSTEM CONFIGURATION</span>
+            <h2>옵션 설정</h2>
+            <p>LLM, 차량·번호판 검출 서비스의 연결 정보를 관리합니다. API 키는 서버 환경변수로만 주입됩니다.</p>
           </div>
-          <div class="toolbar">
+          <div class="toolbar view-actions">
             <button id="opt-reload">새로고침</button>
             <button id="opt-save" class="primary">저장</button>
           </div>
@@ -306,61 +306,94 @@
           ⚠ 저장되었습니다. 변경을 적용하려면 SettingAgent 서버를 재시작하세요. (config 는 nodemon 감시 밖 — 자동 반영되지 않음)
         </div>
         <div id="opt-msg" class="opt-msg"></div>
-        <div class="an-grid">
-          <section class="panel-section">
-            <div class="section-title">LLM (두뇌)</div>
-            <label class="field full">활성 모델 (런타임 전환 · 재시작 불필요)
-              <select id="opt-llm-active"></select>
-            </label>
-            <div id="opt-llm-active-msg" class="opt-keyname"></div>
-            <label class="field full">Provider
-              <select id="opt-llm-provider">
-                <option value="qwen3">qwen3</option>
-                <option value="gemma">gemma</option>
-                <option value="claude">claude</option>
-                <option value="codex">codex</option>
-                <option value="gemini">gemini</option>
-                <option value="openai-compatible">openai-compatible</option>
-              </select>
-            </label>
-            <label class="field full">Model <input id="opt-llm-model" type="text" autocomplete="off" /></label>
-            <label class="field full">Base URL <input id="opt-llm-baseurl" type="text" autocomplete="off" /></label>
-            <div id="opt-llm-keyname" class="opt-keyname"></div>
+        <div class="settings-layout">
+          <section class="panel-section settings-card settings-card-llm">
+            <div class="settings-card-head">
+              <div>
+                <div class="section-title">LLM (두뇌)</div>
+                <p>현재 사용할 모델과 연결 Provider를 설정합니다.</p>
+              </div>
+              <span class="settings-chip">Runtime</span>
+            </div>
+            <div class="settings-form settings-form-llm">
+              <label class="settings-field settings-field-wide">
+                <span>활성 모델 <small>런타임 전환 · 재시작 불필요</small></span>
+                <select id="opt-llm-active"></select>
+              </label>
+              <div id="opt-llm-active-msg" class="settings-note settings-field-wide"></div>
+              <label class="settings-field">Provider
+                <select id="opt-llm-provider">
+                  <option value="qwen3">qwen3</option>
+                  <option value="gemma">gemma</option>
+                  <option value="claude">claude</option>
+                  <option value="codex">codex</option>
+                  <option value="gemini">gemini</option>
+                  <option value="openai-compatible">openai-compatible</option>
+                </select>
+              </label>
+              <label class="settings-field">Model <input id="opt-llm-model" type="text" autocomplete="off" /></label>
+              <label class="settings-field settings-field-wide">Base URL <input id="opt-llm-baseurl" type="text" autocomplete="off" /></label>
+              <div id="opt-llm-keyname" class="settings-note settings-field-wide"></div>
+            </div>
           </section>
-          <section class="panel-section">
-            <div class="section-title">VPD (차량 검출)</div>
-            <label class="field full">Endpoint <input id="opt-vpd-endpoint" type="text" autocomplete="off" /></label>
-            <label class="field full">Det Path <input id="opt-vpd-detpath" type="text" autocomplete="off" /></label>
-            <div id="opt-vpd-keyname" class="opt-keyname"></div>
+
+          <section class="panel-section settings-card">
+            <div class="settings-card-head">
+              <div>
+                <div class="section-title">VPD (차량 검출)</div>
+                <p>차량 검출 API의 서버와 요청 경로입니다.</p>
+              </div>
+              <span class="settings-chip">Vehicle</span>
+            </div>
+            <div class="settings-form">
+              <label class="settings-field">Endpoint <input id="opt-vpd-endpoint" type="text" autocomplete="off" /></label>
+              <label class="settings-field">Det Path <input id="opt-vpd-detpath" type="text" autocomplete="off" /></label>
+              <div id="opt-vpd-keyname" class="settings-note"></div>
+            </div>
           </section>
-          <section class="panel-section">
-            <div class="section-title">LPD (번호판 검출)</div>
-            <label class="field full">Endpoint <input id="opt-lpd-endpoint" type="text" autocomplete="off" /></label>
-            <label class="field full">Det Path <input id="opt-lpd-detpath" type="text" autocomplete="off" /></label>
-            <div id="opt-lpd-keyname" class="opt-keyname"></div>
+
+          <section class="panel-section settings-card">
+            <div class="settings-card-head">
+              <div>
+                <div class="section-title">LPD (번호판 검출)</div>
+                <p>번호판 검출 API의 서버와 요청 경로입니다.</p>
+              </div>
+              <span class="settings-chip">License plate</span>
+            </div>
+            <div class="settings-form">
+              <label class="settings-field">Endpoint <input id="opt-lpd-endpoint" type="text" autocomplete="off" /></label>
+              <label class="settings-field">Det Path <input id="opt-lpd-detpath" type="text" autocomplete="off" /></label>
+              <div id="opt-lpd-keyname" class="settings-note"></div>
+            </div>
           </section>
         </div>
 
         <!-- Unity RPC 콘솔: 13020 → Unity 13110 프록시 호출(결정형 제어). controlToken 설정 시 토큰 필요. -->
-        <div class="an-grid">
-          <section class="panel-section">
-            <div class="section-title">Unity RPC 콘솔</div>
-            <label class="field full">Control Token (viewer.controlToken 설정 시)
+        <section class="panel-section settings-card rpc-card">
+          <div class="settings-card-head">
+            <div>
+              <div class="section-title">Unity RPC 콘솔</div>
+              <p>Unity 제어 API를 선택해 요청을 실행하고 응답을 확인합니다.</p>
+            </div>
+            <span class="settings-chip">Advanced</span>
+          </div>
+          <div class="rpc-form">
+            <label class="settings-field">Control Token <small>viewer.controlToken 설정 시에만 필요</small>
               <input id="viewer-token" type="text" autocomplete="off" placeholder="미설정이면 비워둠" />
             </label>
-            <label class="field full">Method
+            <label class="settings-field">Method
               <select id="rpc-method"></select>
             </label>
-            <label class="field full">Params (JSON, 비우면 없음)
-              <textarea id="rpc-params" rows="4" autocomplete="off" placeholder='{ "cam": 1, "value": 10 }'></textarea>
+            <label class="settings-field rpc-params-field">Params <small>JSON · 비우면 파라미터 없음</small>
+              <textarea id="rpc-params" rows="5" autocomplete="off" placeholder='{ "cam": 1, "value": 10 }'></textarea>
             </label>
-            <div class="toolbar">
+            <div class="toolbar rpc-actions">
               <button id="rpc-reload">카탈로그 새로고침</button>
               <button id="rpc-call" class="primary">호출</button>
             </div>
             <pre id="rpc-result" class="rpc-result"></pre>
+          </div>
           </section>
-        </div>
       </section>
 
       <!-- DB 뷰어: 'DB' 탭에서 전체폭 표시. observations.sqlite 테이블 선택·검색·조회(읽기 전용). -->

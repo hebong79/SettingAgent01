@@ -87,6 +87,10 @@ export function slotLabel(slotId: string, globalIndex?: GlobalIndexEntry[]): str
 export function fpsToInterval(fps: number): number;
 export function clampZoom(z: number, min?: number, max?: number): number;
 export function stepPtz(cur: Ptz, dir: string, step: number): Ptz;
+export function resolveAbsPtz(
+  cur: Ptz,
+  raw: { pan?: string; tilt?: string; zoom?: string },
+): Ptz;
 export function clampPanelWidth(px: number, min?: number, max?: number): number;
 
 export interface CameraListItem {

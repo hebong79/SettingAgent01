@@ -46,7 +46,7 @@ export function clampZoom(z, min = ZOOM_MIN, max = ZOOM_MAX) {
 
 /**
  * 방향/스텝 → 절대 PTZ 환산. dir ∈ {'up','down','left','right','zoomIn','zoomOut'}.
- * zoom 은 ±1 단계(클램프), pan/tilt 는 ±step.
+ * pan/tilt·zoom 모두 ±step(zoom 은 clampZoom 1~36). step 입력값이 배율 증분을 결정한다.
  */
 export function stepPtz(cur, dir, step) {
   const next = { pan: cur.pan, tilt: cur.tilt, zoom: cur.zoom };
@@ -64,15 +64,35 @@ export function stepPtz(cur, dir, step) {
       next.tilt = cur.tilt - step;
       break;
     case 'zoomIn':
-      next.zoom = clampZoom(cur.zoom + 1);
+      next.zoom = clampZoom(cur.zoom + step);
       break;
     case 'zoomOut':
-      next.zoom = clampZoom(cur.zoom - 1);
+      next.zoom = clampZoom(cur.zoom - step);
       break;
     default:
       break;
   }
   return next;
+}
+
+/**
+ * 절대 이동 입력값(문자열) → PTZ. 빈 칸/비수치는 현재 PTZ 를 유지한다(0/1 로 리셋하지 않음).
+ * 버그 수정: 기존 인라인 핸들러는 `Number('')||0`, `...||1` 로 빈 칸을 pan/tilt=0·zoom=1 로 강제 리셋해,
+ * zoom 만 채우면 pan/tilt 가 0 으로 튀고 zoom 만 비우면 배율이 1(최광각)로 돌아갔다.
+ * raw = { pan, tilt, zoom } 입력창 문자열. zoom 은 clampZoom(1~36) 적용.
+ */
+export function resolveAbsPtz(cur, raw) {
+  const pick = (s, fallback) => {
+    const t = (s ?? '').trim();
+    if (t === '') return fallback;
+    const n = Number(t);
+    return Number.isFinite(n) ? n : fallback;
+  };
+  return {
+    pan: pick(raw.pan, cur.pan),
+    tilt: pick(raw.tilt, cur.tilt),
+    zoom: clampZoom(pick(raw.zoom, cur.zoom)),
+  };
 }
 
 /**

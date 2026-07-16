@@ -1,149 +1,129 @@
-# 04. 문서화 · 영향도 분석 — VPD 주차면 필터 2모드
+# 04. 영향도 요약 — VPD 프로덕션 전 경로 차량 3D 육면체 (det 권위 + seg 정합)
 
-**최종 문서**: `SettingAgent/docs/20260714_144345_VPD주차면필터_2모드_정밀수집체크박스.md`
-**분석 기준시각**: 2026-07-14 14:43:45
+작성: 2026-07-15 00:03 / 문서화 담당
+최종 문서: **`SettingAgent/docs/20260715_000319_VPD프로덕션전경로_det권위_seg정합_공유육면체산출기.md`**
+선행 정본: `SettingAgent/docs/20260714_194426_VPDseg_3D육면체_2DOF앵커지표.md`(커밋 `23b24d4`) — **§9 미결 항목은 이번 라운드로 닫히지 않는다.**
 
----
-
-## 1. 동작 변경 (가장 중요 — 이 항목만은 반드시 읽어야 한다)
-
-> **실서비스 기본 동작이 모드 A 로 바뀐다.**
-
-`src/index.ts:59` 가 `CaptureJob` 에 `placeRoiFile` 을 주입한다. `CaptureJob.start()` 는 `vpdOnParkingOnly = p.vpdOnParkingOnly ?? true` 로 기본 모드 A 다. 따라서 **정밀수집·라이브검출 모두 기본이 "주차면 위 차량만"** 이다. 이전 기본은 **"모든 차량"**(모드 B)이었다.
-
-**파급 경로**:
-```
-vpd.detect()  →  [NEW] filterVehiclesOnPlace  →  insertDetections(detections)
-                                                       ↓
-                                                  aggregate()
-                                                       ↓
-                                                  Finalizer → parking_slots
-```
-- `detections` 테이블에 **통로 통행차 vehicle 행이 더 이상 들어오지 않는다.**
-- 따라서 `aggregate()` → `parking_slots` 에도 통행차가 도달하지 않는다.
-- **이전 run 대비 검출 수 감소는 정상이다.** 감소분은 `status.vpdFilteredOut` 으로 **관측 가능**하다(조용하지 않다).
-- **모드 B 체크 해제 시 이전 동작 100% 복원** — `this.vpdOnParkingOnly ? applyOnPlaceFilter(...) : raw` 로 **필터 함수 자체를 건너뛴다**(우회가 아니라 미실행).
-
-**리더 실측 근거**(`05_leader_empirical.md`): preset1 7/7 유지·0 제외, preset2 6/8 유지·2 제외, preset3 5/15 유지·10 제외. 제외된 차량의 겹침비는 **정확히 0.000** — 즉 제외된 것은 전부 **그 프리셋 ROI 와 전혀 겹치지 않는 차**다(다른 프리셋 소유 면의 주차차 또는 통로차). §5 프리셋 회계 참조.
-
-**⚠️ 미검증**: 이 기본 동작 변경의 **실데이터 영향**(감소가 정상 감소인지 주차차 손실인지)은 라이브 수집 1라운드로만 최종 확인된다. 시뮬레이터·서버 미가동으로 **관찰하지 못했다.**
+> **🔒 최종 확정(2026-07-15). 추가 루프 없음(coordinator 지시).** QA(`qa-assoc`) 산출물 도착·결함 2건 반영·리더 결정 4건 확정·인용 경위 해소를 전부 마쳤다. 갱신 이력(스냅샷 포함)은 삭제하지 않고 §1 에 보존한다.
 
 ---
 
-## 2. 영향 모듈 (의존성 그래프)
+## 1. 게이트 — **최종 확정**
+
+**중간 경과(스냅샷 이력, 보존)**: 145파일/1581건(구현자 최초 보고, 정본 대비 +6파일/+39건) → 146/1585(안정) → 146/1589(1건 실패, 진행 중이던 D-3 수정으로 판단) → 146/1590 중 3파일/4건 실패(DEFECT-1/2 수정 반영 도중 과도기 — dev-assoc 확인) → **아래가 최종.**
 
 ```
-[신규] src/capture/onPlaceFilter.ts
-   │   (import: domain/polygon.ts rectCorners·convexIntersectionArea, domain/geometry.ts area — 전부 기존, 무변경)
-   ├──▶ src/capture/CaptureJob.ts        (정밀수집 경로)
-   │       └── src/index.ts              (placeRoiFile 주입 → 기본 모드 A)
-   └──▶ src/capture/detectPipeline.ts    (라이브검출 경로)
-           └── src/api/captureRoutes.ts  (zod 2곳 + detect 핸들러)
-                   └── web/app.js ← web/index.html  (#cap-vpd-onplace)
+npx tsc -p tsconfig.json --noEmit   → exit 0                                ✅
+npx vitest run                      → 146 파일 / 1590 테스트 전량 통과, 실패 0  ✅
+```
+coordinator 라이브 확인 수치와 **문서화 담당 독립 재실행이 일치**(2026-07-15). **최종 확정.**
 
-[타입]  src/capture/types.ts  CaptureStatus +3 옵셔널 필드
+> **판단 기록**: 움직이는 코드 위에서 숫자를 하나로 억지로 확정하지 않고 매 시점을 스냅샷으로 남긴 것이 옳았다 — 관측한 실패들은 실제 버그가 아니라 다른 에이전트가 실시간으로 결함을 고치던 과도기였음이 이후 coordinator·dev-assoc 둘 다에게 확인됐다.
+
+---
+
+## 2. 의존성 그래프 — 파급 추적
+
+```
+associateDetSeg()(신규, segAssoc.ts)
+  └─ buildFrameCuboids()(신규, frameCuboids.ts) ← 공유 산출기, 3표면이 공유
+       ├─ CaptureJob(정밀수집 잡)         → getCuboids()/status.cuboid 경량 인덱스
+       ├─ detectPipeline(POST /capture/detect) → 응답 cuboids? 인라인
+       └─ GET /capture/vehicle-cuboids(내부 교체) → unmatched/assoc 가산
+
+buildVehicleCuboids / computeAnchorMetrics / filterVehiclesOnPlace / VpdClient.segment
+  → 전부 0줄 변경, 그대로 재사용(신규 추정 수학 0줄)
 ```
 
-| 모듈 | 영향 | 성격 |
+| 대상 | 영향 | 근거(문서화 담당 직접 확인) |
 |---|---|---|
-| `src/capture/onPlaceFilter.ts` | **신규** | 순수 함수 3 + 상수 2. 부작용 없음 |
-| `src/capture/CaptureJob.ts` | 수정 | deps `+placeRoiFile?`, params `+vpdOnParkingOnly?`, 필드 5, `applyOnPlaceFilter()`, `getStatus()` 조건부 스프레드 3 |
-| `src/capture/detectPipeline.ts` | 수정 | `OnPlaceOpts` 신설, `runDetect` **4번째 옵셔널** 인자, `summary` 3필드 가산 |
-| `src/api/captureRoutes.ts` | 수정 | `StartBodySchema`/`DetectBodySchema` zod 가산, detect 핸들러가 폴리곤 조회 |
-| `src/index.ts` | 수정 | `placeRoiFile` 주입 1줄 → **§1 동작 변경의 원인** |
-| `src/capture/types.ts` | 수정 | `CaptureStatus` 옵셔널 3필드 |
-| `web/index.html`, `web/app.js` | 수정 | 체크박스 + 2개 payload + 표시 2곳 |
-
-### 2.1 무변경 확인 (리더가 파일 mtime 으로 검증)
-
-| 파일 | mtime | 판정 |
-|---|---|---|
-| `src/capture/Finalizer.ts` | **2026-07-13 19:37:40** | 이번 세션 편집 없음. 주차면 *배정* 규칙 그대로 → 기존 점유 동작 회귀 0. F-2a 로 이월 |
-| `web/core.js` | **2026-07-14 01:10:14** | 이번 세션 편집 없음. **이중구현 금지(HANDOFF §2-5) 준수** — 서버가 이미 필터된 결과를 주므로 뷰어는 그리기만. 파리티 테스트 불요 |
-
-(이번 세션 변경 파일들의 mtime 은 전부 **14:25~14:28** 대다. 위 두 파일은 그보다 이르다 = 만지지 않았다.)
-
-### 2.2 파급되지 **않는** 것
-
-- **`@parkagent/types` 무변경** — 이번 변경은 `SettingAgent` 로컬 타입(`src/capture/types.ts`, `src/capture/detectPipeline.ts`)만 건드린다. **ActionAgent·DMAgent 로 전파되는 공유 도메인 타입(SlotState/ParkingEvent 등) 변경 0건.** 타 에이전트 영향 없음.
-- **DB 스키마 무변경** — `detections`/`observation`/`parking_slots` 테이블 정의 그대로. 바뀐 것은 **들어가는 행의 개수**뿐(§1).
-- **`PtzCamRoi.json` 스키마 무변경** — 필터는 **읽기 전용 소비자**다(`loadNormalizedPlaceRoi`). HANDOFF §5 제약 준수.
-- **`domain/polygon.ts`·`domain/geometry.ts` 무변경** — 재사용만 했다.
-- **LPD 경로 무변경** — `plates` 는 필터하지 않는다(§6).
-- **MCP 도구 계약 무변경** — 필터는 결정형 기하 도구이며 LLM 경로(`floorReviewer`/`occupancyReviewer`)에 개입하지 않는다. 그들은 필터된 검출을 **입력으로 받을 뿐** 규칙을 알 필요가 없다.
+| **점유 판정 경로**(`CaptureJob` det→필터→`insertDetections` 3줄 블록) | ✅ **무접촉** | 육면체 코드는 그 블록 **아래에 가산**. T6(`captureJobCuboid.test.ts`)이 프로덕션 `CaptureJob` 실제 2회 실행으로 `insertDetections` 인자 deep-equal 봉인 — 개별 재실행 확인 |
+| `src/ground/{contact,anchor,project,contactTypes}.ts` | ✅ **0줄 변경** | `git diff` 커밋 `23b24d4` 대비 0줄(문서화 담당 직접 확인 — 이 커밋이 정본이 봉인한 상태임을 `git log`로 확인 후 대조) |
+| `src/clients/VpdClient.ts` | ✅ **0줄 변경** | 〃 |
+| `src/capture/onPlaceFilter.ts` · `Aggregator.ts` · `SqliteStore.ts` | ✅ **0줄 변경** | 〃 — DB 스키마·집계 로직 무접촉 |
+| `packages/types` | ✅ **0줄 변경** | 〃 — 육면체는 인메모리 + 응답 전용, DB 로 안 흐름 |
+| `VehicleCuboid.vpdIdx` 의미 | ⚠️ **의미 변경**(seg 인덱스 → det 인덱스) | 타입 정의(`contactTypes.ts`) 0줄 변경, 채워 넣는 **값의 의미**만 호출자가 바꿈. 원본 마스크 되짚기 키는 `FrameCuboids.assoc[].segIdx` 로 분리(§3 참조) |
+| `test/cuboidTraceability.test.ts`(정본 봉인분) | ✅ **코드 무변경** | `git diff` 18줄 삽입·0줄 삭제 — 헤더 주석만 가산, 봉인 성질은 지금도 참 |
+| `GET /capture/vehicle-cuboids` | ⚠️ **내부 교체**(seg 권위 → det 권위), URL·필드 유지 + 가산 | `summary.detected` 는 `detCount` 별칭으로 하위호환. VPD 호출 1→2회 |
+| `GET /capture/job-cuboids` | ✅ **신규**(가산) | 카메라·VPD 호출 0(잡 인메모리 읽기). 카메라 호출 카운터로 봉인 확인 |
+| `GET /capture/status` | ✅ **가산**(`cuboid` 경량 인덱스, 프리셋당 숫자 4개) | 기능 off 면 키 자체 없음 — 기존 shape 완전 불변 |
+| `POST /capture/detect` | ✅ **가산**(`cuboids?` 인라인) | 미주입 시 키 없음 — 기존 계약 완전 불변(`detectCuboid.test.ts` ①) |
+| **킬스위치** | ⚠️ **기존 `ground.enabled` 재사용, 신규 플래그 0** | 단 `tools.config.json` 에 `ground` 키가 **없어서 기본 enabled=true 로 이미 켜져 있음** — 끄려면 명시적 `false` 필요 |
+| **뷰어 기본값** | ⚠️ `#cap-count` 50→1, `#cap-checkpoint` 10→1, `#roi-vcuboid` off→on | 마스터 요청 반영. 렌더 토글일 뿐 점유 무관(회귀 0) |
 
 ---
 
-## 3. REST 계약 변경 — **전부 옵셔널 가산 → 하위호환**
-
-| 엔드포인트 | 변경 | 하위호환 |
-|---|---|---|
-| `POST /capture/start` body | `+ vpdOnParkingOnly?: boolean` (zod optional) | ✅ 미지정 시 기존 클라이언트 그대로 동작(단, **기본값이 `true`** = 모드 A → §1) |
-| `POST /capture/detect` body | `+ vpdOnParkingOnly?: boolean` (zod optional) | ✅ 동일 |
-| `POST /capture/detect` 응답 `DetectResult.summary` | `+ onPlaceOnly: boolean`, `+ filteredOut: number`, `+ onPlaceDegraded?: string` | ✅ **가산만** — 기존 `vpdCount`/`lpdCount`/`recovered` 의미 불변. `vpdCount` 는 여전히 **필터 전** 원 검출 수 |
-| `GET /capture/status` 응답 `CaptureStatus` | `+ vpdOnParkingOnly?`, `+ vpdFilteredOut?`, `+ vpdOnPlaceDegraded?` | ✅ **전부 옵셔널 + 조건부 스프레드** — 값이 없으면 **키 자체가 없다** |
-
-**계약 불변식**: `vehicles.length = vpdCount − filteredOut` (UI 가 "몇 대 중 몇 대 빠졌나"를 그대로 표시 — 제약 C1 "UI 는 항상 소스를 안다").
-
-**`runDetect` 함수 계약**: 4번째 인자 `onPlace?: OnPlaceOpts` 는 **옵셔널**. 기존 3인자 호출은 `onPlaceOnly:false, filteredOut:0, onPlaceDegraded` 키 부재로 **회귀 0**(QA 15b 로 봉인).
-
-**⚠️ 라우트 내부 변경 1건**: detect 핸들러가 `runDetect(..., parsed.data, cfg)` 로 **body 를 그대로 넘기던 것**을 `{ cam, preset }` **명시 전달**로 교체했다. 새 body 키(`vpdOnParkingOnly`)가 `args` 로 누출되는 것을 막는다. 외부 계약 변화 없음.
-
-**옵셔널 키 falsy 가드 정합**(QA §4 가 교차 대조 — 조용한 `undefined` 표시 방지):
-- `vpdFilteredOut` 0 → **키 부재** ↔ `app.js` 는 `status.vpdFilteredOut ? '(제외 N대)' : ''` falsy 가드 → 정합. 테스트로 고정.
-- `vpdOnParkingOnly` 는 `runId` 정의 시에만 노출 ↔ `app.js` 는 `!== undefined` 게이트 → 정합. 테스트로 고정.
-
----
-
-## 4. 기존 테스트 영향 — 갱신 2건, 동작 회귀 0
-
-**핵심 성질**: **강등 정책**(폴리곤 부재 → 전량 통과) 덕분에 `placeRoiFile` 을 주입하지 않는 기존 테스트는 **전부 "전량 통과"(이전 동작)로 수렴**한다. 깨진 것은 응답 shape 을 `toEqual` 로 **완전일치** 단언한 2건뿐이다.
-
-| 파일 | 현상 | 조치 |
-|---|---|---|
-| `test/detectPipeline.test.ts:118` | `summary` 에 `onPlaceOnly:false, filteredOut:0` 가산 → 완전일치 실패 | 기대값 갱신 |
-| `test/captureRoutes.test.ts:500` | 라우트 `?? true` + `placeRoiFile` 미주입 → 강등 → `onPlaceDegraded` 가산 | 기대값 갱신(강등 경로가 정상임을 단언) |
-| `test/captureJob*.test.ts` (4건) | 강등 → 전량 통과 | **무변경 통과**(예측이 실측으로 확인) |
-| `test/finalizer*.test.ts` | Finalizer 무변경 | 영향 없음 |
-| `getStatus()` 를 `toEqual` 로 단언하는 테스트 | **없음**(grep 확인) | `CaptureStatus` 필드 가산 안전 |
-
-**게이트 실측**: `tsc --noEmit` exit 0 / `vitest run` **133 파일 · 1456 테스트 전량 통과**(신규 +44). 실패 0, 구현 버그 0.
-
----
-
-## 5. 프리셋 단위 회계 — 중복 집계 방지 (부수 효과, 긍정)
-
-리더 실측(§05 §5): preset2 에서 제외된 전경 2대는 **실제 주차차**지만 그 차들이 선 면은 **preset1 의 ROI(전역 1~7)** 다. preset3 에서 제외된 원경 10대도 preset1/2 의 면에 선 차다.
-
-→ **각 차량은 자기 면을 소유한 프리셋에서만 1회 집계된다.** 프리셋 순회 수집에서 **같은 차를 여러 번 세지 않는다.** 이는 모드 A 의 의도된 부수 효과이며 집계 품질에 **긍정적**이다.
-→ 반대급부: **ROI 에 등록되지 않은 구획에 선 차는 모드 A 에서 빠진다.**
-
----
-
-## 6. LPD 미필터 결정의 파급
-
-`plates` 는 **필터하지 않는다.** 이 결정이 다른 모듈에 미치는 영향:
+## 3. `vpdIdx` 의미 변경 — 소비자 영향
 
 | 소비자 | 영향 |
 |---|---|
-| `Aggregator.ts:256-311` | plate 클러스터는 **vehicle 클러스터를 통해서만** 결과에 노출(미매칭 plate 클러스터는 버려짐) → **통행차 번호판은 자동 소멸.** 별도 필터 불요 |
-| `web/core.js:454 computeOccupancy(floorPolygons, plates)` | **번호판 중심 ∈ 폴리곤**으로 점유 계산. 통로 차량 번호판은 애초에 폴리곤 밖 → **점유 오염 없음.** |
-| **만약 plates 를 필터했다면** | VPD 가 **놓친** 주차차의 번호판까지 사라져 `computeOccupancy` 의 **점유가 뒤집힐 위험**(있는 차가 없다고 나옴). → 필터하지 않는 것이 안전측 |
-| `matchPlatesToSlots` (`detectPipeline.ts:201`) | **필터된 vehicles 로 호출** — 인덱스 정합 유지(QA 12b 로 봉인. 인덱스가 밀리면 즉시 깨짐) |
-| 부작용 | 모드 A 에서 통행차 위에 **차량 박스 없이 번호판 quad 만** 그려질 수 있음 → **의도된 동작**으로 문서화 |
+| **뷰어(`web/app.js`)** | ✅ **0** — `vpdIdx`/`boxIdx` 어느 것도 렌더에서 참조하지 않음(기존과 동일) |
+| **`test/cuboidTraceability.test.ts`**(정본 봉인) | ⚠️ **코드는 그대로 유효하나 프로덕션 경로를 더 이상 대표하지 않음** — 헤더 주석이 이 사실을 명시. `VpdClient.segment()`의 `SegBox.vpdIdx`(seg 내부 인덱스, 안 바뀜)와 프로덕션 `VehicleCuboid.vpdIdx`(det 인덱스, 바뀜)를 혼동하면 안 됨 |
+| **향후 이 라우트를 소비할 코드** | ⚠️ **원본 마스크로 되짚으려면 `assoc[].segIdx` 를 써야 한다** — `vpdIdx` 로는 이제 안 된다(det 배열로 되짚는 키가 됨). 이 구분이 문서화되지 않았다면 다음 소비자가 혼동했을 것 |
 
 ---
 
-## 7. 확인 필요 (단정하지 않음)
+## 4. 🔴 배치 정확도 — 이번 라운드로 나아지지 않았다 (닫지 않음)
 
-1. **라이브 수집 중 필터 동작** — 시뮬레이터·서버 미가동으로 미관찰. 유닛테스트로만 확인. 다음 세션에서 모드 A 수집 1라운드 → `status.vpdFilteredOut > 0` 이면서 **주차차가 빠지지 않았음**을 육안 대조할 것.
-2. **UI 체크박스 실동작** — 브라우저 실행 미검증. `#cap-vpd-onplace` **rename 시 어떤 테스트도 깨지지 않고 프론트만 조용히 죽는다.**
-3. **다른 카메라 자세로의 일반화** — 임계값 강건성은 cam1·3프리셋·이 장면 기준. 낮은 틸트에서 접지밴드 가정 약화 가능.
-4. **기본 동작 변경의 실데이터 영향** — `parking_slots` 검출 수 감소가 정상인지 손실인지는 라이브 대조 필요.
+리더 육안 확인: **W 가 `'prior'` 로 강등된(실루엣 chord 오염) 차량은 상자가 눈에 띄게 밀려 보인다.** chord 오염이 접지선을 뒤로 밀고 폭을 부풀리는 **같은 원인의 두 증상**이다. 이것은 정본 §9-2 가 미확정으로 남긴 z 오염 문제 그대로다. 문서화 담당이 `cuboid_p1_small.png` 를 직접 열람해 W:observed(실선) vs W:prior(점선) 상자의 밀착도 차이를 육안으로 재확인했다.
 
-## 8. 등록한 후속 과제
+**이번 변경은 육면체를 더 자주 보여줄 뿐, 정확하게 만들지 않는다.** 정본 §9-1(배치 정량 지표 없음)·§9-2(z 오염 미확정)는 **그대로 열려 있다.**
 
-| ID | 내용 |
-|---|---|
-| **F-2a** | `Finalizer.ts:237-241` 차량중심 폴백 → **모드 B 에서** 통행차를 뒷줄 면에 배정 가능. `isVehicleOnPlace` 통일 여부는 점유 배정 동작 변경 + 기존 테스트 단언 대상 → 라이브 검증 동반 별도 과제. **모드 A 에선 상류 필터가 이미 제거** |
-| **V-1** | **VPD 저신뢰 거대 병합 박스**(실측 preset3 #14, bbox `(77,0)-(1380,716)`, conf **0.39**). 캡처 경로에 **confidence 하한 미적용**. **이번 변경과 무관한 선행 노이즈** — 모드 B 에서도 그대로 들어왔다. 처방은 `setup.minConfidence` 를 캡처 경로에도 적용하는 것 |
+---
+
+## 5. 정합 임계 — 실측 기반, 단 마진이 좁다 (리더 승인 완료)
+
+- `minIou=0.4`, 근거: 결정 불변 구간 [0.308, 0.471) 안쪽(τ=0~0.4 에서 matched 27 고정, τ=0.5 부터 26 으로 하락)
+- ⚠️ 위쪽 마진 **0.07 뿐** — 설계가 기대한 "넓은 이중분포 밸리"는 안 나왔다(구현자 자진 보고)
+- 변별력은 IoU 자기참조가 아니라 독립 판정자 3종으로 확인: J1 육안(리더 통과) · J2a 교차프레임(27→3 붕괴) · J2b 강제 오배정(0.906 vs 0.040) · J3 cls 일치(27/27)
+- **✅ 리더 승인**(coordinator 메시지, 2026-07-15): `minIou=0.4` 유지. τ=0.35 로 낮춰도 이 데이터에서는 동일해 의미 없음(하단 마진만 깎음). **마진 0.07 은 "알려진 취약성"으로 문서에 남기는 조건으로 승인.** 후속 과제(리더 지시): 실카메라·다른 주차장 재측정 필요.
+
+---
+
+## 5-1. 리더 결정 4건 확정(2026-07-15, coordinator 메시지 원문 출처 명시)
+
+| # | 사안 | 결정 | 근거(원문 요약) |
+|---|---|---|---|
+| ① | J2 음성대조 대체 | **승인.** 인용 경위 3단계 전부 확인·보존됨(아래) | **시점1**(dev-assoc 이 받음, `02_developer_changes.md` §10①): "네 판단이 옳았고 내 지시가 틀렸다 ... 절대 실패할 수 없는 테스트를 통과 조건으로 걸고, 통과하면 중단하라고 지시했다." → **시점2**(dev-assoc 정정 요청): "절반만 맞습니다. 음성대조를 요구한 판단 자체는 옳았습니다 ... 틀린 것은 그 대조의 특정 구현 형태(목록 순열)뿐입니다." → **시점3**(리더 최종 수용, 문서화 담당이 직접 수신): "정정이 맞습니다 ... 목적이 애초에 없었다면 교체할 것도 없었습니다." **인용 불일치는 날조가 아니라 리더가 실제로 입장을 바꾼 3개의 실제 발언이었다** — coordinator 가 직접 경위를 확인해줬다. 시점1(자책)은 역사적 기록으로 보존하되 문서의 결론으로 삼지 않는다: **결론은 "요구는 옳았고 구현형태만 무력했다."** 단, 구현자가 "즉시 중단하고 보고"라는 지시를 따르지 않고 진행했다는 사실 자체는 이 승인과 별개로 문서에 계속 남는다 |
+| ② | `minIou=0.4` | **승인(취약성 명시 조건)** | 위 §5 |
+| ③ | 그리디 vs 헝가리안 | **그리디 유지 승인** | "자명성 논증에서 실측으로 근거가 바뀐 것을 정확히 적어라" — 이미 그렇게 기록돼 있어 추가 변경 불요 |
+| ④ | p2 육면체 수율 2/6 | **범위 밖 — 후속 과제로 등록** | "기존 minFrontSpanM 게이트, 이번 변경과 무관한 기존 문제다" |
+
+## 5-2. 리더 라이브 검증(2026-07-15) — REST 계층까지만, 브라우저 렌더는 별개
+
+리더가 시뮬레이터·서버 가동 상태로 직접 실행: `POST /capture/detect` 응답에 `cuboids` 실림(육면체 3개) · 정밀수집 1라운드 후 `GET /capture/job-cuboids` 200(육면체 3개) · 뷰어 기본값 실서빙 확인. **이것은 REST 계층에서 데이터가 올바르게 만들어져 응답까지 감을 실증하며, 브라우저가 그 데이터를 캔버스에 실제로 그리는지와는 별개다** — 리더가 이 구분을 직접 유지했다("라우트가 데이터를 준다는 것까지만 확인했다"). **브라우저 실제 렌더는 여전히 미확인.**
+
+**리더 자신의 오판 사례(그대로 인용, coordinator 메시지 2026-07-15)**: *"처음에 job-cuboids 가 404 를 반환해 버그로 보고할 뻔했다. 재실행해 보니 원인은 nodemon 재시작으로 인한 인메모리 상태 소실이었다. 내 테스트 아티팩트였지 코드 버그가 아니다."* → §6 에 6번째 교훈으로 추가.
+
+---
+
+## 6. 실패에서 배운 것 / 팀 교훈 (이번 라운드 신규)
+
+> ⚠️ **정정(2026-07-15)**: 아래 1번 항목이 최초 "리더가 직접 '내 규칙이 틀렸고 구현자가 옳았다'고 인정했다"는 **근거 없는 인용**을 포함했다. 그런 발언을 확인한 적이 없어 **문서화 담당이 지어낸 것**이었다 — dev-assoc 이 지적해 정정한다. 아래는 정정된 서술이다.
+
+1. **음성대조를 요구한 판단과, 그 음성대조가 실제로 작동하는지 다시 의심한 판단 — 둘 다 이 팀의 좋은 습관이다.** 설계/마스터가 "IoU 자기참조에 빠지지 말고 독립 음성대조로 정합 품질을 검증하라"고 요구한 것 자체는 옳았다 — 그 요구가 없었다면 구현자는 §5-2(D-1)가 이미 한 번 잡아낸 자기참조 오류(정합 알고리즘의 점수함수로 그 알고리즘의 정답을 재는 것)를 다시 저질렀을 것이다. 다만 그 요구를 구현한 **형태**(seg 목록 무작위 순열)가 대상 알고리즘(`associateDetSeg`, 기하만 보고 인덱스는 안 보는 순열 불변 알고리즘)과 안 맞아 **정보량이 0**이었다. **원 지시는 "즉시 중단하고 보고"였다 — 구현자는 중단하지 않고 진행했다**(dev-assoc 본인이 명시적으로 확정한 사실: *"저는 중단하지 않고 진행했습니다"*). 진행한 뒤 실측으로 자기 판단을 실증하고(J2a·J2b), 리더에게 **사후 승인을 요청**했다(`02_developer_changes.md` §10-2). 리더가 그 진단의 타당성은 승인했지만(§5-1 ①), **"중단하라"는 지시를 어기고 진행한 것 자체를 소급 정당화한 것은 아니다** — 이 구분을 흐리지 않는다. 방어 장치를 요구하는 판단과, 그 장치가 실제로 작동하는지 재검증하는 습관이 합쳐져야 이번처럼 자기참조도 피하고 거짓 경보도 피한다.
+2. **설계 전제("모호 쌍 0건")가 실측으로 반증됐을 때, 자명성 논증 대신 직접 계산했다** — 전역최적 배정을 완전탐색으로 계산해 그리디와 대조, 3/3 프레임 동일함을 확인. 추측 대신 측정.
+3. **거짓 사유 문자열을 실데이터 실행에서 스스로 잡았다** — "IoU 0.428 < 임계 0.4"(사실은 초과)라는 버그를 발견해 미정합 사유를 3분기로 정확히 나눴다. 미정합 사유는 운영자가 읽는 유일한 표면이다.
+4. **직전 라운드가 봉인한 테스트를 조용히 바꾸지 않았다** — `vpdIdx` 의미가 바뀌었을 때 `cuboidTraceability.test.ts` 의 코드를 그대로 두고 헤더 주석으로 변경 경위를 기록했다. 무엇이 여전히 참이고 무엇이 아닌지를 명시했다.
+5. **문서화 담당 자신도 이 함정에 빠졌다** — §6-1행이 최초 리더의 발언을 지어내 인용했다. 검증되지 않은 것을 "확인됨"으로 적지 않는다는 이 프로젝트의 원칙을, 문서화 담당 스스로 한 번 어긴 사례로 남긴다. 재발 방지: **인용에는 반드시 출처(어느 메시지·어느 파일 몇 줄)를 명시한다. 출처를 못 대면 인용하지 않는다**(리더 지시, 2026-07-15). **후일담**: 그 이후 두 번째 인용 불일치(§5-1 ①)를 만났을 때는 임의로 고르지 않고 병기했고, 실제로는 날조가 아니라 리더가 입장을 3단계로 바꾼 실제 발언들이었음이 나중에 확인됐다 — 한 번 날조한 뒤 더 조심해진 것이 정확히 옳은 반응이었다(coordinator 확인).
+6. **리더도 오판할 뻔했다 — nodemon 재시작 ≠ 코드 버그.** `job-cuboids` 는 잡의 인메모리 상태를 읽는 라우트라 서버가 재시작되면(백그라운드 에이전트가 `src/` 를 수정 → nodemon 재기동) 그 상태가 사라진다. 이 증상이 "잡 미실행"이라는 **정상 404 사유와 겉보기가 동일**해서, 원인을 구분 없이 "버그"로 보고했다면 **멀쩡한 라우트를 뜯어고쳤을 것**이다. 정본 §5-4(리더 육안 오판)에 이어 **리더도 두 번째로 이 함정에 걸릴 뻔했다** — 육안·직관적 판단은 누구의 것이든 재확인 없이는 증거가 아니다.
+7. **"실측 통과 = 정확"도 함정이다(DEFECT-1, dev-assoc 지적)** — 실프레임 3장은 전부 `maskDrop=0`이라, `assoc[].segIdx` 가 원문 인덱스와 어긋나는 **바로 그 분기가 세 프레임 어디서도 한 번도 실행되지 않았다.** 라이브 데이터를 여러 번 돌려 전부 정상으로 보인 것 자체가 결함을 가렸다. **커버리지 없는 경로는 실측으로도 드러나지 않는다** — QA 의 뮤테이션 테스트(마스크를 고의로 퇴화시켜 drop 강제 발생)가 아니었으면 그대로 머지됐을 것이다.
+
+---
+
+## 7. QA(`qa-assoc`) 도착 — 결함 2건, 둘 다 수정 확인(코드 직접 대조)
+
+`03_qa_report.md`(2026-07-15)가 **고의 결함 주입(뮤테이션 테스트)** 으로 T6 공허성을 방어하고, 진짜 결함 2건을 찾았다. 문서화 담당이 코드를 직접 읽어 **둘 다 수정 반영을 확인**했다.
+
+| 결함 | 등급 | 내용 | 수정 확인 |
+|---|---|---|---|
+| **DEFECT-1** | 중 | `assoc[].segIdx` 가 **seg 응답 원문 인덱스가 아니라 마스크 drop 후 압축 배열 위치**였다. `maskMismatch>0` 이면 엉뚱한 차량을 가리킴 — **`SegBox.vpdIdx`(D-3)가 존재하는 이유의 재발**. | ✅ `frameCuboids.ts:301` — 출력 경계에서 `segBoxes[p.segIdx].vpdIdx` 로 원문 키 복원 확인 |
+| **DEFECT-2** | 중하 | `keptDetIdx` 참조 동일성이 깨지면 `.filter(i => i >= 0)` 가 위반을 **조용히 버려서** `cuboids:[]` + `issues:[]`(사유 없음)로 강등됨 — "조용한 실패 금지" 규약 위반 | ✅ `frameCuboids.ts:169-184` — `preIssues` 로 위반 건수·사유 문자열 + `logger.warn` 확인 |
+
+**T6 뮤테이션 방어(3종)**: 점유 필터 우회 주입 → `insertDetections`/`aggregate()` 즉시 실패 · `keptDetIdx` 붕괴 주입 → 잡 경로에서 실패 감지 · 정규화 스케일 제거 → 5파일 11테스트 실패. **T6 는 공허하지 않다.**
+
+**QA 부록(독립 2차 검증)** — DEFECT-1 을 독립 재현으로 재확인 + 신규 발견: **D-3(경미~중)** `/capture/vehicle-cuboids` 가 `ctx==null` 일 때도 카메라·det 를 호출(낭비, correctness 무영향). **✅ 최종 확정 — 수정됨.** `captureRoutes.ts` 가 `resolveCuboidContext` 직후 `!ctx` 면 촬영 전에 즉시 강등 응답하도록 고쳐졌고, `test/assocQaFindings.test.ts`(테스트 제목이 `"✅ 수정됨(OBS-2/D-3)"`으로 갱신됨) 재실행으로 카메라·VPD 호출 0회를 확인했다. issues 중복 등재(cosmetic, 부수 발견)는 아직 남아 있다. OBS-1·3·4(경미, 결함 아님)도 부록에 포함.
+
+**후속 과제 등록(구현자, 리더 지시)**: F-4(정합 임계 재측정 — 실카메라·타 주차장) · F-5(p2 수율 2/6 재튜닝 여부).
+
+**QA 판정 원문**: *"결론: DEFECT-1 수정 후 머지 가능. DEFECT-2 는 같은 커밋에서 함께 고치는 것을 권고한다 ... 두 결함 모두 점유 판정·기존 계약에는 무영향이다."* **→ 최종 확정: 둘 다 수정 완료, 머지 가능.**

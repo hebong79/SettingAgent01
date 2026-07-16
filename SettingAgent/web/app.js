@@ -7,6 +7,7 @@ import {
   slotLabel,
   clampZoom,
   stepPtz,
+  resolveAbsPtz, // 절대이동 입력 → PTZ(빈 칸=현재값 유지, 순수).
   createStreamLoop,
   moveRenderDirective, // 이동 시 렌더 경로 결정(순수). 루프3: stream=재연결 / poll·off=tick.
   captureProgress,
@@ -113,12 +114,31 @@ const HANDLE_PX = 8; // 핸들 사각형 반경(px).
 // { kind:'floorVertex', index, ... } | { kind:'vpdResize', handle, ... } | { kind:'vpdMove', ... } | null
 let dragState = null;
 
-/** 화면에 그려진 주차면 ROI·선택 표시를 초기화(데이터는 보존 — 표시만 끔). */
+/** 슬롯 ROI·선택 표시만 숨김(데이터 보존). 수집 시작(capStart) 전용 — 검출/점유/육면체 등 라이브 레이어는 유지한다. */
 function clearRoiDisplay() {
   state.roiHidden = true;
   state.selectedSlotId = null;
   drawRoiOverlay();
   renderSelectionInfo();
+}
+
+/**
+ * [표시 초기화 버튼] 바닥 ROI(파일 기반 state.placeRoi)만 남기고 나머지 오버레이 **데이터를 삭제**한다.
+ * Hide(토글 off)가 아니라 실제 삭제 — 재토글로도 복원되지 않는다(다음 검출/수집 때 새로 채워짐).
+ * 바닥은 파일 소스(placeRoi)와 #roi-floor 토글을 건드리지 않아 그대로 표시된다.
+ */
+function resetOverlayDisplay() {
+  state.detectByKey = {};        // 검출 차량/번호판 삭제.
+  state.occComputeByKey = {};    // 로직 점유(원) 삭제.
+  state.occByKey = {};           // 점유율 요약 삭제.
+  state.vcuboidByKey = {};       // 차량 육면체 + seg 마스크 삭제.
+  state.selectedSlotId = null;   // 슬롯 선택 해제.
+  state.selectedPlaceIdx = null; // 바닥 선택 하이라이트 해제.
+  state.selectedDetect = null;   // [기능2] 검출 박스 선택 해제.
+  renderDetectSelection();       // #det-delete 버튼 비활성 동기화.
+  drawRoiOverlay();
+  renderSelectionInfo();
+  renderSlotList();              // 목록(검출 count·점유) 삭제 반영.
 }
 
 const frame = $('frame');
@@ -771,25 +791,33 @@ function drawPlateQuad(ctx, quad, recovered) {
 
 /**
  * 라이브 검출 오버레이(§04-D2). VPD rect=청록(#00e5ff) + 귀속/복원 번호판 quad, 매칭 안 된 base LPD 도 표시(R1).
- * 현재 프리셋(currentFrameKey) 결과만. #roi-detect 토글. roiHidden/mapping 무관(수집 중 라이브).
+ * 현재 프리셋(currentFrameKey) 결과만. roiHidden/mapping 무관(수집 중 라이브).
+ * 차량(#roi-vehicle)=차량 박스, 번호판(#roi-plate)=번호판 quad 를 각각 독립 가드(검출 마스터 토글 없음).
  */
 function drawDetectOverlay(ctx) {
   const d = state.detectByKey[currentFrameKey()]; // 프리셋 키로 조회 → 현재 프레임 프리셋 검출(보존분).
-  if (!$('roi-detect').checked || !d) return;
+  if (!d) return;
+  // 차량/번호판 토글이 각각 차량 박스·번호판 quad 를 독립 제어(검출 체크박스 관계없이 동작).
+  const showVehicle = $('roi-vehicle').checked;
+  const showPlate = $('roi-plate').checked;
   const sel = state.selectedDetect; // [기능2] 선택 박스 하이라이트·핸들.
   (d.vehicles ?? []).forEach((v, i) => {
-    const { px, py, pw, ph } = toPixel(v.rect, overlay.width, overlay.height);
-    const selected = sel?.kind === 'vehicle' && sel.index === i;
-    ctx.strokeStyle = selected ? '#ff4d4d' : '#00e5ff'; // 선택=굵은 대비색 / VPD 차량 bbox=청록.
-    ctx.lineWidth = selected ? 4 : 2;
-    ctx.strokeRect(px, py, pw, ph);
-    if (v.plate) drawPlateQuad(ctx, v.plate.quad, v.plate.recovered);
-    if (selected) drawHandles(ctx, px, py, pw, ph); // 8핸들(리사이즈 어포던스).
+    if (showVehicle) {
+      const { px, py, pw, ph } = toPixel(v.rect, overlay.width, overlay.height);
+      const selected = sel?.kind === 'vehicle' && sel.index === i;
+      ctx.strokeStyle = selected ? '#ff4d4d' : '#00e5ff'; // 선택=굵은 대비색 / VPD 차량 bbox=청록.
+      ctx.lineWidth = selected ? 4 : 2;
+      ctx.strokeRect(px, py, pw, ph);
+      if (selected) drawHandles(ctx, px, py, pw, ph); // 8핸들(리사이즈 어포던스).
+    }
+    if (v.plate && showPlate) drawPlateQuad(ctx, v.plate.quad, v.plate.recovered); // 차량 부속 번호판 → 번호판 토글.
   });
-  (d.plates ?? []).forEach((p, i) => {
-    drawPlateQuad(ctx, p.quad, false); // base LPD 전체(R1: LPD 모두).
-    if (sel?.kind === 'plate' && sel.index === i) drawQuadHandles(ctx, toPixelQuad(p.quad, overlay.width, overlay.height));
-  });
+  if (showPlate) {
+    (d.plates ?? []).forEach((p, i) => {
+      drawPlateQuad(ctx, p.quad, false); // base LPD 전체(R1: LPD 모두).
+      if (sel?.kind === 'plate' && sel.index === i) drawQuadHandles(ctx, toPixelQuad(p.quad, overlay.width, overlay.height));
+    });
+  }
 }
 
 /**
@@ -2635,8 +2663,8 @@ function wireOverlayEditing() {
   // mousedown: floor 정점 위면 정점 드래그 시작, 아니면 슬롯 선택/해제.
   overlay.addEventListener('mousedown', (e) => {
     const { nx, ny } = eventToNorm(e);
-    // [기능2] 검출 박스 편집(임시): roi-detect ON + Ctrl 아님(슬롯 편집과 물리 배타). mapping/roiHidden 가드 이전.
-    if ($('roi-detect').checked && !e.ctrlKey) {
+    // [기능2] 검출 박스 편집(임시): 차량/번호판 레이어 중 하나라도 표시 중 + Ctrl 아님(슬롯 편집과 물리 배타). mapping/roiHidden 가드 이전.
+    if (($('roi-vehicle').checked || $('roi-plate').checked) && !e.ctrlKey) {
       const dkey = currentFrameKey();
       const detect = state.detectByKey[dkey];
       if (detect) {
@@ -2875,12 +2903,11 @@ function wire() {
   $('roi-floor').addEventListener('change', drawRoiOverlay);
   $('roi-occupancy').addEventListener('change', drawRoiOverlay); // 점유 오버레이 토글.
   $('cap-floor-llm').addEventListener('change', drawRoiOverlay); // 바닥 ROI 소스(LLM/파일) 모드 전환 → 즉시 재렌더.
-  $('roi-detect').addEventListener('change', drawRoiOverlay); // 라이브 검출 오버레이 토글(§04).
   $('roi-cuboid').addEventListener('change', drawRoiOverlay); // 3D 육면체 레이어 토글(기본 off → 회귀 0).
   $('roi-mask').addEventListener('change', drawRoiOverlay); // VPD seg 마스크 오버레이 토글(순수 렌더 — masks 는 detect 응답에 동승, 별도 로드 불필요).
-  // 차량 육면체 토글(**기본 on** — Goal 1·2 가 "화면에 그려진다"인데 기본 off 면 아무것도 안 보인다).
+  // 차량 육면체 토글(**기본 off** — 마스터 요청 2026-07-15: 시작 시 체크 해제).
   // 렌더 토글일 뿐 점유 판정과 무관하다(회귀 0). 정밀수집·검출이 돌면 데이터는 자동으로 온다;
-  // 아무것도 안 돌고 있을 때 켜면 그때만 라이브 촬영 1회(캐시 있으면 재사용).
+  // 켤 때 해당 프리셋 캐시가 없으면 그때만 라이브 촬영 1회(캐시 있으면 재사용).
   $('roi-vcuboid').addEventListener('change', (e) => {
     drawRoiOverlay();
     if (e.target.checked && !state.vcuboidByKey[currentFrameKey()]) loadVehicleCuboids();
@@ -2897,7 +2924,7 @@ function wire() {
   });
   cuboidH.addEventListener('change', () => localStorage.setItem(CUBOID_H_KEY, String(cuboidHeight())));
   $('cap-detect-run').addEventListener('click', runLiveDetect); // 현재 프리셋 1회 검출 실행(§04).
-  $('roi-clear').addEventListener('click', clearRoiDisplay); // #5: 표시 초기화
+  $('roi-clear').addEventListener('click', resetOverlayDisplay); // #5: 표시 초기화 — 모든 오버레이 토글 off(데이터 보존).
   // 산출물(setup_artifact) 편집·결과 파일 도구(분석 탭으로 이관 — 핸들러·id 는 동일).
   $('slot-add').addEventListener('click', addSlot); // 요구 B: 전역 인덱스 중간삽입
   $('roi-delete').addEventListener('click', deleteSelectedSlot); // #2
@@ -2943,11 +2970,14 @@ function wire() {
   );
 
   $('btn-abs').addEventListener('click', () => {
-    move({
-      pan: Number($('abs-pan').value) || 0,
-      tilt: Number($('abs-tilt').value) || 0,
-      zoom: clampZoom(Number($('abs-zoom').value) || 1),
-    });
+    // 빈 칸은 현재 PTZ 유지(0/1 리셋 금지) — zoom 만 채워 이동해도 pan/tilt 프레이밍 보존.
+    move(
+      resolveAbsPtz(state.ptz, {
+        pan: $('abs-pan').value,
+        tilt: $('abs-tilt').value,
+        zoom: $('abs-zoom').value,
+      }),
+    );
   });
 
   $('btn-login').addEventListener('click', async () => {
