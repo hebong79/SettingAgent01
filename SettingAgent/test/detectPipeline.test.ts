@@ -6,6 +6,7 @@ import { runDetect, loadDetectCfg, type DetectDeps, type DetectCfg } from '../sr
 import { buildGroundInputs } from '../src/ground/groundInputs.js';
 import { estimateGroundModels } from '../src/ground/groundModel.js';
 import { parseCameraViews } from '../src/setup/mapTargets.js';
+import { projectBaseToView } from '../src/calibrate/detectMath.js';
 import type { CapturedImage, VehicleBox, NormalizedQuad, NormalizedPoint } from '../src/domain/types.js';
 import type { PlateBox } from '../src/clients/LpdClient.js';
 import type { CameraList } from '../src/viewer/CameraSource.js';
@@ -169,6 +170,68 @@ describe('runDetect — 미검출 차량 zoom 재시도 → recovered(inverse+cl
     expect(out.vehicles[0].plate).toBeUndefined();
     expect(camera.requestImage).toHaveBeenCalledTimes(5); // base + 4 뷰
     expect(out.summary.recovered).toBe(0);
+  });
+});
+
+/**
+ * zoom 재시도 중복 회수 가드(설계 09 §논점3·§2C). 진단 08: 재시도는 `matched` 를 한 번도 참조하지 않아
+ * **이미 다른 차량에 배정된 판을 회수**했다(p1 veh6 이 veh0 의 판을 훔침 — 역투영 오차로 좌표가 달라
+ * quadKey 동등성으로는 잡히지 않는다). 가드는 역투영 중심이 배정판과 ε=0.03 이내면 기각하고 **다음 줌 계속**.
+ *
+ * 뷰 판 좌표는 `projectBaseToView`(라운드트립 역방향)로 만든다 — 스텁 카메라 echo(0/0/1)가 viewPtz 이므로
+ * 원하는 base 중심으로 정확히 역투영되는 뷰 좌표를 얻는다(기하 신규 발명 0).
+ */
+describe('runDetect — 재시도 중복 회수 가드(DUP_EPS)', () => {
+  const fovOpts = { fovBaseV: cfg.fovBaseV, zoomRef: cfg.zoomRef, aspect: cfg.aspect };
+  const ECHO_PTZ = { pan: 0, tilt: 0, zoom: 1 }; // makeCamera 스텁의 requestImage echo.
+  /** base 좌표 (cx,cy) 로 역투영되는 뷰 번호판. */
+  const viewPlateAtBase = (cx: number, cy: number): PlateBox => {
+    const v = projectBaseToView({ x: cx, y: cy }, ECHO_PTZ, PRESET_PTZ, fovOpts);
+    return plate(v.x, v.y);
+  };
+
+  const V1 = vehicle(0.4, 0.4, 0.2, 0.2); // rect x 0.4~0.6 — 판 A(0.5,0.5) 귀속.
+  const V2 = vehicle(0.62, 0.42, 0.2, 0.2); // rect x 0.62~0.82 — A 중심 미포함 → 미귀속 → 재시도 진입.
+  const A = plate(0.5, 0.5);
+
+  it('G1 전 줌뷰가 배정판 사본만 반환 → plate undefined(전 시도 기각), requestImage 5회(상한 불변), recovered=0', async () => {
+    const camera = makeCamera({ presetPtz: PRESET_PTZ });
+    // 4개 뷰 전부 A 에서 0.01(p1 실측 중복 거리) 떨어진 판 → 전부 기각되어야 한다.
+    const dup = () => [viewPlateAtBase(0.51, 0.5)];
+    const deps: DetectDeps = { camera, vpd: makeVpd([V1, V2]), lpd: makeLpd([[A], dup(), dup(), dup(), dup()]) };
+    const out = await runDetect(deps, { cam: 1, preset: 1 }, cfg);
+
+    expect(out.vehicles[0].plate!.quad).toBe(A.quad); // V1 은 base 매칭 유지.
+    expect(out.vehicles[1].plate).toBeUndefined(); // ★ 훔친 판 대신 "판 없음"(source:'bbox' 강등).
+    expect(out.summary.recovered).toBe(0);
+    expect(camera.requestImage).toHaveBeenCalledTimes(5); // base + 4 뷰 — 호출 상한 불변.
+  });
+
+  it('G2 1차 뷰=중복 판 / 2차 뷰=신규 판 → 기각 후 **다음 줌 계속**해 신규 판 채택(attempts:2)', async () => {
+    const camera = makeCamera({ presetPtz: PRESET_PTZ });
+    const deps: DetectDeps = {
+      camera,
+      vpd: makeVpd([V1, V2]),
+      lpd: makeLpd([[A], [viewPlateAtBase(0.51, 0.5)], [viewPlateAtBase(0.72, 0.52)], [], []]),
+    };
+    const out = await runDetect(deps, { cam: 1, preset: 1 }, cfg);
+
+    const p = out.vehicles[1].plate;
+    expect(p).toBeDefined();
+    expect(p!.recovered).toBe(true);
+    expect(p!.attempts).toBe(2); // 1차 기각 → 중단이 아니라 계속.
+    expect(out.summary.recovered).toBe(1);
+  });
+
+  it('G3 신규 판이 최근접 배정판에서 0.13 거리(p1 veh2 정상 회수 상응) → 정상 recovered 유지(과차단 방지)', async () => {
+    const camera = makeCamera({ presetPtz: PRESET_PTZ });
+    // p1 실측: 정상 신규 회수점↔최근접 base 판 = 0.1357 ≫ ε=0.03.
+    const deps: DetectDeps = { camera, vpd: makeVpd([V1, V2]), lpd: makeLpd([[A], [viewPlateAtBase(0.63, 0.5)]]) };
+    const out = await runDetect(deps, { cam: 1, preset: 1 }, cfg);
+
+    expect(out.vehicles[1].plate!.recovered).toBe(true);
+    expect(out.vehicles[1].plate!.attempts).toBe(1);
+    expect(out.summary.recovered).toBe(1);
   });
 });
 

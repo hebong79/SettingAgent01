@@ -8,6 +8,7 @@ import type { VpdClient } from '../clients/VpdClient.js';
 import type { LpdClient } from '../clients/LpdClient.js';
 import type { NormalizedPoint, NormalizedQuad, NormalizedRect } from '../domain/types.js';
 import { readJpegSize } from '../util/jpeg.js';
+import { center, quadBoundingRect } from '../domain/geometry.js';
 import { filterVehiclesOnPlace, filterPlatesOnPlace } from './onPlaceFilter.js';
 import { matchPlatesToSlots } from '../setup/plateMatch.js';
 import { pickNearestPlate } from '../calibrate/controlMath.js';
@@ -113,6 +114,15 @@ const FALLBACK_ASPECT = 16 / 9;
 const FRONT_BIAS = 0.62;
 const ZOOM_FACTORS = [2, 3, 4, 5];
 const ZOOM_REF = 1;
+
+/**
+ * 중복 회수 판정 임계(정규화 유클리드 거리). 줌 재시도가 **이미 다른 차량에 배정된 번호판**을 회수하면
+ * 기각한다 — 역투영 오차로 좌표가 원본과 달라(1367 vs 1348px) 수치 동등성으로는 잡히지 않기 때문이다.
+ *
+ * 근거(진단 08 / 설계 09 §논점3 실측): 중복 회수점↔원본 판 = **0.0100** / 정상 신규 회수점↔최근접 배정판 = **0.1357**
+ * / base 판간 최소 간격 = **0.1102**. → 0.03 은 관측 역투영 오차의 3.0배 위, 정상 케이스 최소 거리의 1/4.5 아래.
+ */
+const DUP_EPS = 0.03;
 
 /** fovBaseV 추정 소스(설계 C3 — **실카메라도 줄 수 있는 값만**). 미주입 시 폴백 상수로 강등. */
 export interface DetectCfgSources {
@@ -295,6 +305,8 @@ export async function runDetect(
   const fovOpts: FovOpts = { fovBaseV: cfg.fovBaseV, zoomRef: cfg.zoomRef, aspect: cfg.aspect };
   const outVehicles: DetectVehicle[] = [];
   let recovered = 0;
+  // 이미 배정된 번호판 중심(base 매칭분 + 이 실행에서 확정된 recovered 분) — 재시도 중복 회수 가드용.
+  const assignedCenters = [...matched.values()].map((q) => center(quadBoundingRect(q)));
 
   for (let i = 0; i < vehicles.length; i++) {
     const v = vehicles[i];
@@ -314,9 +326,22 @@ export async function runDetect(
       const pick = pickNearestPlate(await deps.lpd.detect(view.jpg), { x: 0.5, y: 0.5, w: 0, h: 0 });
       if (pick) {
         const recQuad = inverseProjectQuad(pick.quad, viewPtz, basePtz, fovOpts);
+        // 중복 가드: 줌 뷰는 이웃 차량의 번호판도 담는다. 이미 배정된 판을 훔치면(≤DUP_EPS) 기각하고
+        // **다음 zoomFactor 로 계속**한다 — 더 좁아진 FOV 에서 자기 판을 찾을 기회를 보존(루프 상한 불변).
+        // 클램프 **전** 좌표로 판정한다(클램프는 v.rect 로 당기므로 훔친 판과 자기 판을 뭉갠다).
+        const rc = center(quadBoundingRect(recQuad));
+        const dup = assignedCenters.find((c) => Math.hypot(c.cx - rc.cx, c.cy - rc.cy) <= DUP_EPS);
+        if (dup) {
+          logger.warn(
+            { cam, preset, vehicle: i, zoomFactor: cfg.zoomFactors[a], dist: Math.hypot(dup.cx - rc.cx, dup.cy - rc.cy) },
+            '중복 회수 기각 — 이미 다른 차량에 배정된 번호판(다음 zoom 으로 계속)',
+          );
+          continue;
+        }
         // 역투영은 지면원근 오차(§04-A3)로 차량 밖에 떨어질 수 있음 → zoom-in 대상 차량(v.rect)으로 중심 클램프(표시 위치 보정).
         const clamped = clampQuadCenterToRect(recQuad, v.rect, cfg.frontBias);
         plate = { quad: clamped, confidence: pick.confidence, recovered: true, attempts: a + 1 };
+        assignedCenters.push(rc); // 후속 차량 재시도와의 중복도 차단.
         recovered += 1;
         break;
       }
