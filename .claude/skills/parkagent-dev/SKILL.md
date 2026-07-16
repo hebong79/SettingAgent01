@@ -27,7 +27,7 @@ ParkAgent 코드 개발을 **4인 에이전트 팀**으로 조율한다. CLAUDE.
 | 3. 검증 | qa-tester | general-purpose | 테스트 + `_workspace/03_qa_report.md` |
 | 4. 문서·영향도 | documenter | general-purpose | `*/docs/yyyyMMdd_hhmmss_*.md` + `_workspace/04_doc_impact.md` |
 
-**모든 Agent 호출의 `model` 파라미터는 `model-routing` 스킬의 작업별 모델선정 규칙을 따른다**(설계=`fable` / 구현·검증=`opus` / 문서화=`sonnet`. 예외·판단 기준 포함 — 규칙 본문은 그 스킬이 단일 출처). 구현↔검증은 통과까지 루프.
+**모든 Agent 호출의 `model` 파라미터는 `model-routing` 스킬의 작업별 모델선정 규칙을 따른다**(설계·구현·검증=`opus` / 문서화=`sonnet`. 예외·판단 기준 포함 — 규칙 본문은 그 스킬이 단일 출처). 구현↔검증은 통과까지 루프.
 
 ## Phase 0: 컨텍스트 확인
 

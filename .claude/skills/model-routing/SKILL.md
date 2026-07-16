@@ -1,24 +1,24 @@
 ---
 name: model-routing
-description: ParkAgent 하네스에서 **작업 성격별로 에이전트 모델을 배정**하는 단일 규칙(설계=fable / 구현·검증 goal·loop=opus / 문서화=sonnet). `Agent` 도구를 호출하기 전에 반드시 이 규칙으로 `model` 파라미터를 정한다. "어떤 모델로 돌려야 해", "모델 배정", "모델 선정", "설계는 fable로", "문서화는 sonnet으로", "opus로 구현", "에이전트 모델 바꿔줘" 같은 요청에 트리거. `parkagent-dev` 오케스트레이터가 4인 팀(architect/developer/qa-tester/documenter)을 호출할 때 참조하는 규칙 본문이다.
+description: ParkAgent 하네스에서 **작업 성격별로 에이전트 모델을 배정**하는 단일 규칙(설계·구현·검증 goal·loop=opus / 문서화=sonnet). `Agent` 도구를 호출하기 전에 반드시 이 규칙으로 `model` 파라미터를 정한다. "어떤 모델로 돌려야 해", "모델 배정", "모델 선정", "설계는 opus로", "문서화는 sonnet으로", "opus로 구현", "에이전트 모델 바꿔줘" 같은 요청에 트리거. `parkagent-dev` 오케스트레이터가 4인 팀(architect/developer/qa-tester/documenter)을 호출할 때 참조하는 규칙 본문이다.
 ---
 
 # 작업별 모델선정 규칙
 
-`Agent` 도구의 `model` 파라미터에 **소문자 별칭**을 넘겨 작업 성격에 맞는 모델을 배정한다. 허용값은 `fable` / `opus` / `sonnet` / `haiku` 넷뿐이다 — 다른 문자열은 쓰지 않는다.
+`Agent` 도구의 `model` 파라미터에 **소문자 별칭**을 넘겨 작업 성격에 맞는 모델을 배정한다. 허용값은 `opus` / `sonnet` / `haiku` 셋뿐이다 — 다른 문자열은 쓰지 않는다.
 
 ## 매핑표
 
 | 작업 | `model` | 근거 |
 |------|---------|------|
-| **설계**(architect) — 수학 모델·파라미터 표·테스트 케이스 명세 | `"fable"` | 가장 어려운 추론에 강하다. 설계는 1회 호출이라 비용 영향이 작고, 여기서 놓친 케이스는 구현·검증 루프 전체를 헛돌게 만든다. |
+| **설계**(architect) — 수학 모델·파라미터 표·테스트 케이스 명세 | `"opus"` | 가장 어려운 추론이 필요한 단계다. 설계는 1회 호출이라 비용 영향이 작고, 여기서 놓친 케이스는 구현·검증 루프 전체를 헛돌게 만든다. |
 | **구현·검증 goal/loop**(developer, qa-tester) — 코드 작성·유닛테스트·경험적 스샷 검증·파라미터 튜닝 | `"opus"` | 장기 에이전트 루프(도구 반복 호출·상태 유지)에 강하다. 이 단계는 여러 이터레이션을 도므로 관찰→수정 판단의 일관성이 결과를 좌우한다. |
 | **문서화**(documenter) — 한글 문서·영향도 분석 | `"sonnet"` | 이미 확정된 산출물을 정리·서술하는 작업이라 최상위 추론이 필요 없다. 속도·비용이 유리하다. |
 
 **적용:** `Agent` 도구 호출 시 `model` 파라미터로 직접 전달한다. 이 값은 에이전트 정의(`.claude/agents/*.md`)의 `model` frontmatter보다 우선한다.
 
 ```
-Agent({ subagent_type: "architect",  model: "fable",  prompt: ... })
+Agent({ subagent_type: "architect",  model: "opus",   prompt: ... })
 Agent({ subagent_type: "developer",  model: "opus",   prompt: ... })
 Agent({ subagent_type: "qa-tester",  model: "opus",   prompt: ... })
 Agent({ subagent_type: "documenter", model: "sonnet", prompt: ... })
@@ -28,8 +28,8 @@ Agent({ subagent_type: "documenter", model: "sonnet", prompt: ... })
 
 매핑은 기본값이지 족쇄가 아니다. 아래 기준으로 벗어날지 판단한다.
 
-- **설계를 낮춰도 되는 때**: 상수 하나 변경·오타 수정·이미 확정된 설계의 재적용처럼 **설계할 것이 없는** 작업. Fable 설계 호출은 과하다 — 설계 단계를 건너뛰거나 `opus`로 충분하다.
-- **설계를 반드시 fable로 두는 때**: 좌표계·기하·수치 파라미터가 얽혀 **틀린 설계가 루프를 통째로 낭비**시키는 작업.
+- **설계를 낮춰도 되는 때**: 상수 하나 변경·오타 수정·이미 확정된 설계의 재적용처럼 **설계할 것이 없는** 작업. 별도 설계 에이전트 호출은 과하다 — 설계 단계를 건너뛰거나 리더가 직접 판단한다.
+- **설계를 반드시 `opus`로 두는 때**: 좌표계·기하·수치 파라미터가 얽혀 **틀린 설계가 루프를 통째로 낭비**시키는 작업.
 - **관찰형 검증은 예외 없이 `opus`**: 스샷·좌표정합·동작 확인은 "무엇이 틀렸는지"를 이미지·로그에서 스스로 판단해 다음 수정을 정해야 한다. 이 판단이 흔들리면 루프가 수렴하지 않는다. 비용을 이유로 낮추지 마라.
 - **문서화를 `opus`로 올리는 때**: 문서가 단순 정리를 넘어 **아키텍처 판단·영향도 추론**을 새로 해야 하는 경우.
 - **단순 조회·질문**: `parkagent-dev` 스킬도 이 규칙도 쓰지 않는다. 직접 응답한다.
@@ -39,5 +39,6 @@ Agent({ subagent_type: "documenter", model: "sonnet", prompt: ... })
 
 VPD seg 큐보이드·점유 판정 작업을 이 매핑으로 수행해 성공했다.
 
-- Fable 설계 1회 → Opus developer 3회(구현·결함수정·파라미터확정) + Opus qa-tester 3회(스샷 증거) 루프 → Sonnet 문서화.
+- 설계 1회 → developer 3회(구현·결함수정·파라미터확정) + qa-tester 3회(스샷 증거) 루프 → Sonnet 문서화.
+  > 기록: 이 세션의 설계는 당시 규칙에 따라 **Fable**로 돌렸다(2026-07-17 규칙 변경으로 설계는 `opus`). 사례의 교훈은 모델 종류가 아니라 **단계별 배정과 경험적 검증**에 있으므로 그대로 유효하다.
 - **결함 1건(plateAxes 점순서 회전)이 유닛테스트가 아닌 경험적 스샷 검증에서만 발견됐다.** 관찰형 검증을 `opus`로 유지해야 하는 근거이자, 유닛테스트 통과만으로 성공을 선언하면 안 되는 근거다(`parkagent-dev`의 B 모드 판단 기준과 동일).
