@@ -103,3 +103,51 @@ export function dampGain(gain: { gainPan: number; gainTilt: number }, factor = 0
 export function buildSlotPtzJson(items: SlotPtzItem[], now: string): SlotPtzArtifact {
   return { createdAt: now, items };
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// r1 추가(01_architect_plan §2.5/§2.6) — 기존 함수·시그니처·동작 무변경, 순수 함수 추가만.
+// 라이브 실측이 드러낸 물리 2건(게인의 zoom 종속 · 대상 신원 추적)을 위한 수학.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * 게인의 zoom 스케일: 게인[°/정규화] ∝ FOV ∝ 1/zoom → gain(z) = gain(zRef)·zRef/z.
+ * 실측: gainPan≈−36.6, gainTilt≈−21.0 (zoom 1.69341 기준 — 둘 다 ★음수) → zoom 20 에서 약 1/12.
+ *   출처: 라이브 diagSweep 전체목록 공통변위(구현 probe 라이브 측정 −37.1/−21.2 와 일치).
+ *   ★ 이 값은 특정 시뮬 카메라(cam1)의 실측이며 게인은 장비마다(FOV·센서·마운트) 다르다.
+ * 게인은 항상 측정 기준 zoom(zoomRef)을 달고 다니며, 사용 시점 zoom 으로 스케일해서 쓴다.
+ */
+export function scaleGainForZoom(
+  gain: { gainPan: number; gainTilt: number; zoomRef: number },
+  zoom: number,
+): { gainPan: number; gainTilt: number } {
+  const k = gain.zoomRef / zoom;
+  return { gainPan: gain.gainPan * k, gainTilt: gain.gainTilt * k };
+}
+
+/**
+ * pan/tilt 명령 후 번호판 중심 예측: c' = c + dDeg/gain (estimateGain 의 역산).
+ * |gain|≈0 이면 해당 축은 예측 불가 → 직전 중심 유지.
+ */
+export function predictPlateCenter(
+  center: { cx: number; cy: number },
+  deltaDeg: { dPan: number; dTilt: number },
+  gain: { gainPan: number; gainTilt: number },
+): { cx: number; cy: number } {
+  const cx = Math.abs(gain.gainPan) > GAIN_EPS ? center.cx + deltaDeg.dPan / gain.gainPan : center.cx;
+  const cy = Math.abs(gain.gainTilt) > GAIN_EPS ? center.cy + deltaDeg.dTilt / gain.gainTilt : center.cy;
+  return { cx, cy };
+}
+
+/**
+ * zoom 명령 후 번호판 중심 예측: 화면 중심 기준 방사 확대 c' = 0.5 + (c−0.5)·zNew/zOld.
+ * zoomFrom≈0 이면 예측 불가 → 직전 중심 유지.
+ */
+export function predictCenterAfterZoom(
+  center: { cx: number; cy: number },
+  zoomFrom: number,
+  zoomTo: number,
+): { cx: number; cy: number } {
+  if (Math.abs(zoomFrom) <= GAIN_EPS) return { cx: center.cx, cy: center.cy };
+  const k = zoomTo / zoomFrom;
+  return { cx: 0.5 + (center.cx - 0.5) * k, cy: 0.5 + (center.cy - 0.5) * k };
+}
