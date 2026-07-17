@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import {
   estimatePlateQuadFromNeighbors,
   buildPlateAnchoredQuad,
@@ -6,9 +6,11 @@ import {
   type PlateNeighbor,
 } from '../src/capture/floorRoi.js';
 import { Finalizer } from '../src/capture/Finalizer.js';
-import { SqliteStore } from '../src/capture/SqliteStore.js';
 import { plateAngleRad } from '../src/domain/geometry.js';
 import type { Repository } from '../src/store/Repository.js';
+import type { SqliteStore } from '../src/capture/SqliteStore.js';
+import type { DetectionRow } from '../src/capture/types.js';
+import type { CaptureSnapshot } from '../src/capture/CaptureJob.js';
 import type {
   SetupArtifact,
   NormalizedRect,
@@ -27,6 +29,13 @@ import type { ToolsConfig } from '../src/config/toolsConfig.js';
  *  - 불변식5(게이트2): 실측 plateQuad 존재 시 추정 미적용(실측 우선) — Finalizer 통합.
  *  - 불변식6(게이트3): plate 부재 슬롯이 추정 quad 로 floor ROI 각도를 추종하되,
  *    slot.plateRoiByPreset 은 저장되지 않고(예상 quad 미저장) deconflict 에도 미주입 — Finalizer 통합.
+ *
+ * ★ DB 스키마 개편 후 재작성(Finalizer 통합부만): 구 store.createRun/insertObservation/insertDetections
+ *   + finalize(runId) 경로 폐기 — 인메모리 CaptureSnapshot({dets, presetRounds, aggregated, occByPreset})
+ *   을 직접 구성해 finalizer.finalize(snapshot) 을 호출한다(설계서 §2.3). Finalizer 는 snapshot.dets/
+ *   presetRounds 로 자체 재집계하므로 snapshot.aggregated 는 이 테스트에서 빈 배열로 충분하다
+ *   (보존할 체크포인트 status 이력이 없음). placeRoiFile 미주입 → slot_setup 저장 분기 미실행 →
+ *   FinalizerDeps.store 는 미사용(최소 fake 로 대체, 실 DB 불필요).
  */
 
 // ── 앞변 각도 헬퍼(plateAnchoredQuadInvariants.test.ts 와 동일 규약) ─────────
@@ -141,9 +150,8 @@ const fakeRepo = (): { repo: Repository; saved: SetupArtifact[] } => {
   const saved: SetupArtifact[] = [];
   return { saved, repo: { saveArtifact: (a: SetupArtifact) => saved.push(a), loadArtifact: () => saved.at(-1) ?? null, path: 'mem' } as unknown as Repository };
 };
-let stores: SqliteStore[] = [];
-afterEach(() => { for (const s of stores) { try { s.close(); } catch { /* noop */ } } stores = []; });
-function mem(): SqliteStore { const s = new SqliteStore(':memory:'); stores.push(s); return s; }
+/** placeRoiFile 미주입 → Finalizer 의 slot_setup 저장 분기가 미실행 → store 미사용(최소 fake). */
+const fakeStore = {} as unknown as SqliteStore;
 
 const boundingRect = (q: NormalizedQuad): NormalizedRect => {
   const xs = q.map((p) => p.x);
@@ -154,34 +162,37 @@ const boundingRect = (q: NormalizedQuad): NormalizedRect => {
 };
 
 /**
- * 같은 프리셋(1:1)에 2개 차량 클러스터를 seed. 좌측(x≈0.15)은 옵션 plate(quad),
- * 우측(x≈0.65)은 옵션 plate(quad). 서로 clusterDist(0.06) 밖이라 별 클러스터, 각 support=3.
+ * 같은 프리셋(1:1)에 2개 차량 클러스터를 인메모리 DetectionRow[] 로 직접 구성한다(구 SQLite 관측/검출
+ * 적재 대체 — 설계서 §2.2). 좌측(x≈0.15)은 옵션 plate(quad), 우측(x≈0.65)은 옵션 plate(quad).
+ * 서로 clusterDist(0.06) 밖이라 별 클러스터, 각 support=3(round 1~3 × vehicle 1건).
  */
-function seedTwoSlots(
-  store: SqliteStore,
-  leftPlate?: NormalizedQuad,
-  rightPlate?: NormalizedQuad,
-): number {
-  const runId = store.createRun({ plannedCount: 3, intervalMs: 1, startedAt: 'T' });
+function seedTwoSlots(leftPlate?: NormalizedQuad, rightPlate?: NormalizedQuad): CaptureSnapshot {
   const lv = { x: 0.15, y: 0.4, w: 0.1, h: 0.1 };
   const rv = { x: 0.65, y: 0.4, w: 0.1, h: 0.1 };
+  const dets: DetectionRow[] = [];
+  let obsSeq = 0;
   for (const round of [1, 2, 3]) {
-    const obs = store.insertObservation({ runId, roundIdx: round, camIdx: 1, presetIdx: 1, capturedAt: 'C', pan: 0, tilt: 0, zoom: 1, imgName: 'x' });
-    const dets: Parameters<SqliteStore['insertDetections']>[3] = [
-      { kind: 'vehicle', x: lv.x, y: lv.y, w: lv.w, h: lv.h, conf: 0.9 },
-      { kind: 'vehicle', x: rv.x, y: rv.y, w: rv.w, h: rv.h, conf: 0.9 },
-    ];
-    if (leftPlate) { const r = boundingRect(leftPlate); dets.push({ kind: 'plate', x: r.x, y: r.y, w: r.w, h: r.h, conf: 0.9, quad: leftPlate }); }
-    if (rightPlate) { const r = boundingRect(rightPlate); dets.push({ kind: 'plate', x: r.x, y: r.y, w: r.w, h: r.h, conf: 0.9, quad: rightPlate }); }
-    store.insertDetections(obs, 1, 1, dets);
+    const obsId = ++obsSeq;
+    dets.push({ observationId: obsId, roundIdx: round, camIdx: 1, presetIdx: 1, kind: 'vehicle', x: lv.x, y: lv.y, w: lv.w, h: lv.h, conf: 0.9 });
+    dets.push({ observationId: obsId, roundIdx: round, camIdx: 1, presetIdx: 1, kind: 'vehicle', x: rv.x, y: rv.y, w: rv.w, h: rv.h, conf: 0.9 });
+    if (leftPlate) {
+      const r = boundingRect(leftPlate);
+      dets.push({ observationId: obsId, roundIdx: round, camIdx: 1, presetIdx: 1, kind: 'plate', x: r.x, y: r.y, w: r.w, h: r.h, conf: 0.9, quad: leftPlate });
+    }
+    if (rightPlate) {
+      const r = boundingRect(rightPlate);
+      dets.push({ observationId: obsId, roundIdx: round, camIdx: 1, presetIdx: 1, kind: 'plate', x: r.x, y: r.y, w: r.w, h: r.h, conf: 0.9, quad: rightPlate });
+    }
   }
-  return runId;
+  // Finalizer 가 fresh 재집계(aggregate(dets, presetRounds, ...)) 하므로 aggregated 는 빈 배열로 충분
+  // (보존할 체크포인트 status 이력 없음) — occByPreset 도 이 테스트 무관(빈 맵).
+  return { dets, presetRounds: new Map([['1:1', 3]]), aggregated: [], occByPreset: new Map() };
 }
 
-async function runFinalize(store: SqliteStore, runId: number): Promise<SetupArtifact> {
+async function runFinalize(snapshot: CaptureSnapshot): Promise<SetupArtifact> {
   const { repo } = fakeRepo();
-  const finalizer = new Finalizer({ store, repo, cfg: captureCfg, roiPadding: 0, yBandTolerance: 0.1, now: () => 'T' });
-  const r = await finalizer.finalize(runId);
+  const finalizer = new Finalizer({ store: fakeStore, repo, cfg: captureCfg, roiPadding: 0, yBandTolerance: 0.1, now: () => 'T' });
+  const r = await finalizer.finalize(snapshot);
   return r.artifact;
 }
 
@@ -190,11 +201,10 @@ describe('Finalizer 통합 — 게이트2(실측 우선)·게이트3(예상 quad
   const bySlot = (a: SetupArtifact, id: string) => a.slots.find((s) => s.slotId === id)!;
 
   it('게이트6: plate 부재 슬롯 → floor ROI 각도는 이웃 θ 추종, plateRoiByPreset 은 미저장', async () => {
-    const store = mem();
     // 우측(neighbor)만 25° plate 보유, 좌측(target)은 plate 완전 부재.
     const rightPlate = rotatedPlateQuad(0.70, 0.45, 0.03, 0.015, (25 * Math.PI) / 180);
-    const runId = seedTwoSlots(store, undefined, rightPlate);
-    const art = await runFinalize(store, runId);
+    const snapshot = seedTwoSlots(undefined, rightPlate);
+    const art = await runFinalize(snapshot);
 
     const left = bySlot(art, 'c1p1s1'); // plate 부재 target
     const right = bySlot(art, 'c1p1s2'); // plate 보유 neighbor
@@ -211,9 +221,8 @@ describe('Finalizer 통합 — 게이트2(실측 우선)·게이트3(예상 quad
   });
 
   it('대조(불변식4): 이웃도 plate 부재면 target floor ROI 는 상수(θ=0) 폴백', async () => {
-    const store = mem();
-    const runId = seedTwoSlots(store, undefined, undefined); // 둘 다 plate 부재
-    const art = await runFinalize(store, runId);
+    const snapshot = seedTwoSlots(undefined, undefined); // 둘 다 plate 부재
+    const art = await runFinalize(snapshot);
     const left = bySlot(art, 'c1p1s1');
     // 각도 0(축정렬) — 앞변 수평 ≤3°.
     const floor = left.floorRoiByPreset!['1:1'] as NormalizedQuad;
@@ -222,12 +231,11 @@ describe('Finalizer 통합 — 게이트2(실측 우선)·게이트3(예상 quad
   });
 
   it('게이트2(실측 우선): target 이 자기 plate(0°) 보유 시 이웃(40°) 무시하고 실측 각도 사용', async () => {
-    const store = mem();
     // 좌측 target: 자기 plate 축정렬(0°). 우측 neighbor: 40°.
     const leftPlate = rotatedPlateQuad(0.20, 0.45, 0.03, 0.015, 0);
     const rightPlate = rotatedPlateQuad(0.70, 0.45, 0.03, 0.015, (40 * Math.PI) / 180);
-    const runId = seedTwoSlots(store, leftPlate, rightPlate);
-    const art = await runFinalize(store, runId);
+    const snapshot = seedTwoSlots(leftPlate, rightPlate);
+    const art = await runFinalize(snapshot);
     const left = bySlot(art, 'c1p1s1');
     const floor = left.floorRoiByPreset!['1:1'] as NormalizedQuad;
     // 실측 0° 사용 → 앞변 수평(≤3°), 이웃 40° 에 끌려가지 않음.

@@ -173,29 +173,6 @@ export interface OccupancyJudgment {
   confidence: number;
 }
 
-// ── 캘리브레이션 자문(번호판 중심정렬·줌 PTZ) ─────────────────
-// 좌표를 "생성"하지 않는다 — 소폭 보정 제안·수렴/가림 판정만(호출측이 클램프·폴백).
-export interface CenteringAdviceInput {
-  /** 현재 명령 PTZ 화면 JPEG(base64). 비전 모델용. */
-  imageBase64: string;
-  /** 번호판 중심 오차(정규화). */
-  err: { errX: number; errY: number };
-  /** 현재 번호판 정규화 가로폭. */
-  plateWidth: number;
-  /** 목표(중심 허용오차·목표 폭). */
-  target: { centerTol: number; targetWidth: number };
-  /** 제어 단계(중심정렬/줌). */
-  phase: 'center' | 'zoom';
-}
-export const CenteringAdviceSchema = z.object({
-  suggestPan: z.number().optional(),
-  suggestTilt: z.number().optional(),
-  suggestZoomFactor: z.number().optional(),
-  converged: z.boolean().optional(),
-  occluded: z.boolean().optional(),
-});
-export type CenteringAdvice = z.infer<typeof CenteringAdviceSchema>;
-
 /** 셋업 두뇌. 비활성/실패 시 각 메서드는 null 을 반환(결정형 폴백). */
 export interface SetupBrain {
   readonly enabled: boolean;
@@ -210,8 +187,6 @@ export interface SetupBrain {
   recognizeFloorRoi?(input: FloorRoiInput): Promise<FloorRoiResult | null>;
   /** 프리셋 점유율 판정(옵셔널). 비활성/미설정 시 null(결정형 폴백 없음 — 저장 생략). */
   judgeOccupancy?(input: OccupancyInput): Promise<OccupancyJudgment | null>;
-  /** 캘리브레이션 중심정렬·줌 자문(옵셔널). 비활성/실패 시 null(결정형 폴백). */
-  adviseCentering?(input: CenteringAdviceInput): Promise<CenteringAdvice | null>;
   /** LLM 강제 구동(warm-up/preload · 옵셔널). best-effort — 성공 true, 비활성/실패 false(throw 안 함). */
   warmup?(): Promise<boolean>;
 }

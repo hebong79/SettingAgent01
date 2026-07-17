@@ -271,7 +271,7 @@ export const DEFAULT_TOOLS_CONFIG: ToolsConfig = {
   presetProvider: { type: 'camerapos', unityUrl: '', refreshOnRun: false },
   capture: {
     defaultCount: 50, intervalMs: 30000, moveIntervalMs: 1000, checkpointEvery: 10,
-    checkpointTriggerMode: 'rounds', checkpointIntervalMs: 60000, dbFile: 'data/observations.sqlite',
+    checkpointTriggerMode: 'rounds', checkpointIntervalMs: 60000, dbFile: 'data/setting.sqlite',
     clusterDist: 0.06, clusterMinSupport: 3, minConfidence: 0.5, moveBeforeCapture: true,
   },
   calibrate: {

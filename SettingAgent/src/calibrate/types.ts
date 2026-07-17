@@ -50,20 +50,6 @@ export interface SlotPtzArtifact {
   items: SlotPtzItem[];
 }
 
-/** LLM 자문(좌표 생성 아님 — 소폭 보정 제안·판정). 전부 옵셔널. */
-export interface CenteringAdvice {
-  /** pan 보정 제안(도, 호출측이 클램프). */
-  suggestPan?: number;
-  /** tilt 보정 제안(도, 호출측이 클램프). */
-  suggestTilt?: number;
-  /** zoom 배율 제안(0.5~2.0 클램프). */
-  suggestZoomFactor?: number;
-  /** 수렴 판정. */
-  converged?: boolean;
-  /** 가림·소실 판정(true 면 슬롯 스킵). */
-  occluded?: boolean;
-}
-
 /** 캘리브레이션 잡 상태머신 상태. */
 export type CalibrateState = 'idle' | 'running' | 'done' | 'error';
 

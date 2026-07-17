@@ -2,7 +2,7 @@ import type { ICameraClient } from '../clients/CameraClient.js';
 import type { LpdClient } from '../clients/LpdClient.js';
 import type { Repository } from '../store/Repository.js';
 import type { SqliteStore } from '../capture/SqliteStore.js';
-import type { CenteringSlotRow } from '../capture/types.js';
+import type { SlotCenteringRow } from '../capture/types.js';
 import type { ToolsConfig } from '../config/toolsConfig.js';
 import { logger } from '../util/logger.js';
 import { quadBoundingRect } from '../domain/geometry.js';
@@ -26,7 +26,7 @@ export interface PtzCalibratorDeps {
   repo: Repository;
   cfg: ToolsConfig['calibrate'];
   /** centering_slot 미러 저장(옵셔널). 미주입 시 JSON 만 저장 — 잡은 정상 동작. */
-  store?: Pick<SqliteStore, 'upsertCenteringSlots'>;
+  store?: Pick<SqliteStore, 'upsertSlotCentering'>;
   /** PlatePtz 팩토리 주입(테스트 시임). 기본=new PlatePtz({camera, lpd, sleep}, opts). */
   makePlatePtz?: (opts: PlatePtzOpts) => PlatePtzApi;
   /** slot_ptz.json writer 주입(테스트는 캡처 stub). 기본=writeSlotPtz. */
@@ -56,7 +56,7 @@ export class PtzCalibrator {
   private readonly camera: ICameraClient;
   private readonly cfg: ToolsConfig['calibrate'];
   private readonly repo: Repository;
-  private readonly store?: Pick<SqliteStore, 'upsertCenteringSlots'>;
+  private readonly store?: Pick<SqliteStore, 'upsertSlotCentering'>;
   private readonly makePlatePtz: (opts: PlatePtzOpts) => PlatePtzApi;
   private readonly writer: (artifact: ReturnType<typeof buildSlotPtzJson>, outFile: string) => void;
   private readonly now: () => string;
@@ -123,7 +123,7 @@ export class PtzCalibrator {
         this.done += 1;
       }
       this.writer(buildSlotPtzJson(items, this.now()), this.cfg.outFile);
-      this.saveCenteringSlots(targets, items);
+      this.saveCenteringSlots(items);
       this.current = undefined;
       this.endedAt = this.now();
       this.state = 'done';
@@ -195,29 +195,39 @@ export class PtzCalibrator {
   }
 
   /**
-   * centering_slot 미러 저장(성공 항목만 · best-effort). items 는 targets 와 인덱스 1:1.
-   * 실패해도 JSON(정본)·잡 완료를 막지 않는다 — Finalizer 의 parking_slots 격리 패턴.
+   * slot_setup 센터라이징 부분 갱신(성공 항목만 · best-effort). slot_id 키 UPDATE(pan/tilt/zoom/centered/img1).
+   * ★ 정수 slot_id = it.globalIdx(setup_artifact.globalIndex 역참조, 전역 1..N). globalIdx 부재면 매핑 불가 → 스킵.
+   *   구 CenteringSlotRow(문자열 slotId + pos JSON) → SlotCenteringRow(정수 slot_id + 분해 pan/tilt/zoom, 설계서 §2-4).
+   * 실패해도 JSON(정본)·잡 완료를 막지 않는다 — Finalizer 의 slot_setup 격리 패턴.
    */
-  private saveCenteringSlots(targets: PlateTarget[], items: SlotPtzItem[]): void {
+  private saveCenteringSlots(items: SlotPtzItem[]): void {
     if (!this.store) return;
     const updatedAt = this.now();
-    const rows: CenteringSlotRow[] = [];
-    items.forEach((it, i) => {
-      if (!it.centered || !it.converged) return;
+    const rows: SlotCenteringRow[] = [];
+    for (const it of items) {
+      if (!it.centered || !it.converged) continue;
+      if (it.globalIdx == null) {
+        logger.warn(
+          { slot: it.slotId, cam: it.camIdx, preset: it.presetIdx },
+          'globalIdx 부재 → slot_setup 센터라이징 매핑 불가(스킵)',
+        );
+        continue;
+      }
       rows.push({
-        slotId: it.slotId,
-        camIdx: it.camIdx,
-        presetIdx: it.presetIdx,
-        presetSlotIdx: targets[i]?.presetSlotIdx ?? null,
-        pos: JSON.stringify(it.ptz),
+        slotId: it.globalIdx, // 정수 전역 slot_id(= slot_setup.slot_id, §2-5 정합).
+        pan: it.ptz.pan,
+        tilt: it.ptz.tilt,
+        zoom: it.ptz.zoom,
+        centered: 1,
+        img1: null,
         updatedAt,
       });
-    });
+    }
     if (rows.length === 0) return;
     try {
-      this.store.upsertCenteringSlots(rows);
+      this.store.upsertSlotCentering(rows);
     } catch (e) {
-      logger.warn({ err: e, rows: rows.length }, 'centering_slot 저장 실패(JSON 은 정상 — 잡 계속)');
+      logger.warn({ err: e, rows: rows.length }, 'slot_setup 센터라이징 갱신 실패(JSON 은 정상 — 잡 계속)');
     }
   }
 

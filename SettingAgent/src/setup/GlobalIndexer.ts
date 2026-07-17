@@ -12,6 +12,12 @@ export interface IndexableSlot {
  * 전 카메라·전 프리셋의 슬롯을 정렬하여 전역 슬롯 인덱스를 부여한다 (할일 7, 아키텍처 §7).
  * 정렬 규칙(확정): camIdx ASC → presetIdx ASC → 프리셋 내 위치(positionIdx) ASC.
  * 동일 입력 → 동일 결과(결정적, 멱등).
+ *
+ * ★ slot_id 단일화(설계서 §2-5·§8.2): 본 규칙(cam→preset→프리셋내순서)은 `normalizeGlobalIdx`
+ *   (placeRoi.ts — slot_setup.slot_id 부여, cam→preset→parking_spaces 배열순)와 **동일 컨벤션**이다.
+ *   따라서 setup_artifact.globalIndex[].globalIdx == slot_setup.slot_id 가 성립한다(전제: PtzCamRoi.json 의
+ *   parking_spaces 배열순이 프리셋 내 공간 순서(orderByPosition, 상→하·좌→우)와 일치 — 통상 페인팅 순서).
+ *   이 정합으로 PtzCalibrator 의 정수 slot_id(=it.globalIdx) 센터라이징 UPDATE 가 올바른 slot_setup 행을 맞춘다.
  */
 export function buildGlobalIndex(slots: IndexableSlot[]): GlobalSlotIndex[] {
   const sorted = [...slots].sort(

@@ -16,13 +16,20 @@ import type { VpdClient } from '../src/clients/VpdClient.js';
 import type { LpdClient } from '../src/clients/LpdClient.js';
 import type { Repository } from '../src/store/Repository.js';
 import type { CapturedImage, SetupArtifact } from '../src/domain/types.js';
+import type { AggregatedSlot } from '../src/capture/types.js';
 import type { ToolsConfig } from '../src/config/toolsConfig.js';
 import type { SetupTarget } from '../src/setup/SetupOrchestrator.js';
 
 /**
- * 검증자(qa-tester): /capture/* REST (fastify.inject).
- * start/status/stop/finalize/runs/runs:id/aggregate + zod 400 + 중복 409.
+ * 검증자(qa-tester): /capture/* REST (fastify.inject) — DB 스키마 개편 후 재작성.
+ * start/status/stop/finalize/aggregate/occupancy + zod 400 + 중복 409.
  * 기존 /setup/*·/mapping 회귀 확인(가산·불변).
+ *
+ * ★ run_id 폐기(설계서 §3): `/capture/runs` 제거, `/capture/runs/:id/aggregate` → `/capture/aggregate`,
+ *   `/capture/runs/:id/occupancy` → `/capture/occupancy`(둘 다 CaptureJob 인메모리 getter 위임).
+ *   `/capture/finalize` 바디에 runId 없음 — 현재 잡의 getSnapshot() 을 finalize. CaptureJobDeps 에서
+ *   `store` 가 제거되어 `new CaptureJob({...})` 리터럴에서도 제거했다(store 는 SqliteStore/buildServer.sqlite
+ *   에는 여전히 필요 — `/capture/slots` 가 store.getSlotSetup() 을 직접 쓴다).
  */
 
 const captureCfg: ToolsConfig['capture'] = {
@@ -50,7 +57,7 @@ function makeServer() {
   const store = new SqliteStore(':memory:');
   const queue: Array<() => void> = [];
   const job = new CaptureJob({
-    camera: fakeCamera(), vpd: fakeVpd(), store, cfg: captureCfg, lpdEnabled: false,
+    camera: fakeCamera(), vpd: fakeVpd(), cfg: captureCfg, lpdEnabled: false,
     setTimer: (fn) => { queue.push(fn); return queue as unknown as NodeJS.Timeout; },
     clearTimer: () => {}, sleep: async () => {}, now: () => 'T',
   });
@@ -136,7 +143,7 @@ describe('/capture/status·stop', () => {
   });
 });
 
-describe('/capture/finalize', () => {
+describe('/capture/finalize (runId 폐기 — 현재 잡 인메모리 스냅샷 finalize)', () => {
   it('running 중 finalize → 409', async () => {
     const s = makeServer(); app = s.app; store = s.store;
     await app.inject({ method: 'POST', url: '/capture/start', payload: { count: 5, targets: [target] } });
@@ -145,92 +152,107 @@ describe('/capture/finalize', () => {
     expect(JSON.parse(r.body).state).toBe('running');
   });
 
-  it('런 없음(미지정 runId) → 404', async () => {
+  it('잡을 한 번도 시작하지 않은 상태(idle)에서도 finalize 가능 → 200 slots:0(runId 불필요)', async () => {
     const s = makeServer(); app = s.app; store = s.store;
     const r = await app.inject({ method: 'POST', url: '/capture/finalize', payload: {} });
-    expect(r.statusCode).toBe(404);
-    expect(JSON.parse(r.body).error).toContain('no run');
+    expect(r.statusCode).toBe(200);
+    const body = JSON.parse(r.body);
+    expect(body.ok).toBe(true);
+    expect(body.slots).toBe(0); // 빈 스냅샷(검출 없음) → 강등 slots 0.
+    expect(body).toHaveProperty('globalCount');
   });
 
-  it('종료된 런 finalize → 200 {ok, slots, globalCount}', async () => {
+  it('중지된 잡 finalize → 200 {ok, slots, globalCount}', async () => {
     const s = makeServer(); app = s.app; store = s.store;
-    // 런을 직접 만들고 종료(LLM off 결정형 강등 — 빈 검출이면 slots 0).
-    const runId = s.store.createRun({ plannedCount: 1, intervalMs: 1, startedAt: 'T' });
-    s.store.endRun(runId, { status: 'done', stopReason: 'count', endedAt: 'T1' });
-    const r = await app.inject({ method: 'POST', url: '/capture/finalize', payload: { runId } });
+    await app.inject({ method: 'POST', url: '/capture/start', payload: { count: 5, targets: [target] } });
+    await app.inject({ method: 'POST', url: '/capture/stop' }); // 타이머 미발화(roundRunning=false) → 즉시 stopped.
+    const r = await app.inject({ method: 'POST', url: '/capture/finalize', payload: {} });
     expect(r.statusCode).toBe(200);
     const body = JSON.parse(r.body);
     expect(body.ok).toBe(true);
     expect(body).toHaveProperty('slots');
     expect(body).toHaveProperty('globalCount');
   });
-});
 
-describe('/capture/runs·aggregate', () => {
-  it('runs → CaptureRunRow[] (메타)', async () => {
+  it('바디에 occupancy(로직 점유 스냅샷) 동봉 → 400 없이 수용(비교 불가 시 occupancyAgreement 미부착)', async () => {
     const s = makeServer(); app = s.app; store = s.store;
-    s.store.createRun({ plannedCount: 1, intervalMs: 1, startedAt: 'A' });
-    const r = await app.inject({ method: 'GET', url: '/capture/runs' });
+    const r = await app.inject({
+      method: 'POST', url: '/capture/finalize',
+      payload: { occupancy: [{ key: '1:1', spaces: [{ idx: 1, occupied: true }] }] },
+    });
     expect(r.statusCode).toBe(200);
     const body = JSON.parse(r.body);
-    expect(Array.isArray(body)).toBe(true);
-    expect(body[0]).toHaveProperty('plannedCount');
+    expect(body.ok).toBe(true);
+    // brain 미주입 → 비교 자체가 비활성(graceful skip) → occupancyAgreement 키 없음.
+    expect(body.occupancyAgreement).toBeUndefined();
+  });
+});
+
+describe('/capture/aggregate (구 /capture/runs/:id/aggregate — run_id 폐기)', () => {
+  it('초기 상태(캡처 이력 없음) → 200 빈 배열', async () => {
+    const s = makeServer(); app = s.app; store = s.store;
+    const r = await app.inject({ method: 'GET', url: '/capture/aggregate' });
+    expect(r.statusCode).toBe(200);
+    expect(JSON.parse(r.body)).toEqual([]);
   });
 
-  it('runs/:id/aggregate → AggregatedSlot[]', async () => {
+  it('job.getAggregated() 를 그대로 위임(AggregatedSlot[] shape 불변)', async () => {
     const s = makeServer(); app = s.app; store = s.store;
-    const runId = s.store.createRun({ plannedCount: 1, intervalMs: 1, startedAt: 'A' });
-    s.store.replaceAggregatedSlots(runId, [{
+    const fake: AggregatedSlot[] = [{
       presetKey: '1:1', clusterId: 1, camIdx: 1, presetIdx: 1, x: 0.1, y: 0.1, w: 0.1, h: 0.1,
       support: 3, occupancyRate: 0.5, plateX: null, plateY: null, plateW: null, plateH: null, plateQuad: null,
       confidence: 0, posSpread: 0, angleSpread: null, status: 'candidate',
-    }]);
-    const r = await app.inject({ method: 'GET', url: `/capture/runs/${runId}/aggregate` });
+    }];
+    vi.spyOn(s.job, 'getAggregated').mockReturnValue(fake);
+    const r = await app.inject({ method: 'GET', url: '/capture/aggregate' });
     expect(r.statusCode).toBe(200);
     const body = JSON.parse(r.body);
     expect(body).toHaveLength(1);
     expect(body[0].presetKey).toBe('1:1');
   });
-
-  it('runs/:id/aggregate (없는 id) → 404', async () => {
-    const s = makeServer(); app = s.app; store = s.store;
-    const r = await app.inject({ method: 'GET', url: '/capture/runs/999/aggregate' });
-    expect(r.statusCode).toBe(404);
-  });
-
-  it('runs/:id/aggregate (잘못된 id) → 400', async () => {
-    const s = makeServer(); app = s.app; store = s.store;
-    const r = await app.inject({ method: 'GET', url: '/capture/runs/abc/aggregate' });
-    expect(r.statusCode).toBe(400);
-  });
 });
 
-describe('/capture/runs/:id/occupancy (점유율 조회 — 성공기준 5)', () => {
-  it('occupancy 저장 후 조회 → 프리셋별 최신 shape', async () => {
+describe('/capture/occupancy (구 /capture/runs/:id/occupancy — 성공기준 5, run_id 폐기)', () => {
+  it('LLM off(occByPreset 비어있음) → 200 빈 배열', async () => {
     const s = makeServer(); app = s.app; store = s.store;
-    const runId = s.store.createRun({ plannedCount: 1, intervalMs: 1, startedAt: 'A' });
-    s.store.insertOccupancy(runId, {
-      camIdx: 1, presetIdx: 1, atRound: 2, occupiedCount: 2, total: 4, rate: 0.5,
-      spacesJson: JSON.stringify([{ id: 1, occupied: true }]), updatedAt: 'T',
-    });
-    const r = await app.inject({ method: 'GET', url: `/capture/runs/${runId}/occupancy` });
+    const r = await app.inject({ method: 'GET', url: '/capture/occupancy' });
+    expect(r.statusCode).toBe(200);
+    expect(JSON.parse(r.body)).toEqual([]);
+  });
+
+  it('job.getOccupancy() 를 그대로 위임(프리셋별 shape 불변)', async () => {
+    const s = makeServer(); app = s.app; store = s.store;
+    const fake = [{ camIdx: 1, presetIdx: 1, occupiedCount: 2, total: 4, rate: 0.5, spacesJson: JSON.stringify([{ id: 1, occupied: true }]) }];
+    vi.spyOn(s.job, 'getOccupancy').mockReturnValue(fake);
+    const r = await app.inject({ method: 'GET', url: '/capture/occupancy' });
     expect(r.statusCode).toBe(200);
     const body = JSON.parse(r.body);
     expect(body).toHaveLength(1);
-    expect(body[0]).toMatchObject({ camIdx: 1, presetIdx: 1, atRound: 2, occupiedCount: 2, total: 4, rate: 0.5 });
+    expect(body[0]).toMatchObject({ camIdx: 1, presetIdx: 1, occupiedCount: 2, total: 4, rate: 0.5 });
     expect(body[0]).toHaveProperty('spacesJson');
   });
+});
 
-  it('없는 id → 404', async () => {
+describe('/capture/slots (구 /capture/runs/:id/slots — store.getSlotSetup() 직접 위임)', () => {
+  it('store.getSlotSetup() 을 그대로 위임(SlotSetupView[] shape 통과)', async () => {
     const s = makeServer(); app = s.app; store = s.store;
-    const r = await app.inject({ method: 'GET', url: '/capture/runs/999/occupancy' });
-    expect(r.statusCode).toBe(404);
+    const fake = [{
+      slotId: 1, camId: 1, presetId: 1, presetSlotIdx: 1, presetKey: '1:1',
+      roi: [{ x: 0.2, y: 0.2 }, { x: 0.5, y: 0.2 }, { x: 0.5, y: 0.5 }, { x: 0.2, y: 0.5 }],
+      vpd: { x: 0.3, y: 0.3, w: 0.1, h: 0.1 },
+      lpd: null, occupyRange: null, pan: null, tilt: null, zoom: null, centered: false, img1: null, updatedAt: 'T',
+    }];
+    vi.spyOn(s.store, 'getSlotSetup').mockReturnValue(fake);
+    const r = await app.inject({ method: 'GET', url: '/capture/slots' });
+    expect(r.statusCode).toBe(200);
+    expect(JSON.parse(r.body)).toEqual(fake);
   });
 
-  it('잘못된 id → 400', async () => {
+  it('빈 slot_setup → 200 빈 배열', async () => {
     const s = makeServer(); app = s.app; store = s.store;
-    const r = await app.inject({ method: 'GET', url: '/capture/runs/abc/occupancy' });
-    expect(r.statusCode).toBe(400);
+    const r = await app.inject({ method: 'GET', url: '/capture/slots' });
+    expect(r.statusCode).toBe(200);
+    expect(JSON.parse(r.body)).toEqual([]);
   });
 });
 
@@ -276,7 +298,7 @@ describe('POST /capture/warmup (수동 강제 구동 §e)', () => {
     const warmup = vi.fn(warmupImpl);
     const brain = { enabled: true, warmup } as unknown as import('../src/brain/AgentRuntime.js').AgentRuntime;
     const job = new CaptureJob({
-      camera: fakeCamera(), vpd: fakeVpd(), store, cfg: captureCfg, lpdEnabled: false, brain,
+      camera: fakeCamera(), vpd: fakeVpd(), cfg: captureCfg, lpdEnabled: false, brain,
       setTimer: (fn) => { queue.push(fn); return queue as unknown as NodeJS.Timeout; },
       clearTimer: () => {}, sleep: async () => {}, now: () => 'T',
     });
@@ -362,7 +384,7 @@ describe('/capture/save·saves (정밀수집 결과 저장/열기)', () => {
     const s = new SqliteStore(':memory:');
     const queue: Array<() => void> = [];
     const job = new CaptureJob({
-      camera: fakeCamera(), vpd: fakeVpd(), store: s, cfg: captureCfg, lpdEnabled: false,
+      camera: fakeCamera(), vpd: fakeVpd(), cfg: captureCfg, lpdEnabled: false,
       setTimer: (fn) => { queue.push(fn); return queue as unknown as NodeJS.Timeout; },
       clearTimer: () => {}, sleep: async () => {}, now: () => 'T',
     });
@@ -475,7 +497,7 @@ describe('POST /capture/detect (라이브 VPD/LPD 검출 — §04)', () => {
     const s = new SqliteStore(':memory:');
     const queue: Array<() => void> = [];
     const job = new CaptureJob({
-      camera: fakeCamera(), vpd: fakeVpd(), store: s, cfg: captureCfg, lpdEnabled: false,
+      camera: fakeCamera(), vpd: fakeVpd(), cfg: captureCfg, lpdEnabled: false,
       setTimer: (fn) => { queue.push(fn); return queue as unknown as NodeJS.Timeout; },
       clearTimer: () => {}, sleep: async () => {}, now: () => 'T',
     });
@@ -568,7 +590,7 @@ describe('주차면 필터 REST 경계 (§6-16~18)', () => {
     const s = new SqliteStore(':memory:');
     const queue: Array<() => void> = [];
     const job = new CaptureJob({
-      camera: fakeCamera(), vpd: fakeVpd(), store: s, cfg: captureCfg, lpdEnabled: false,
+      camera: fakeCamera(), vpd: fakeVpd(), cfg: captureCfg, lpdEnabled: false,
       setTimer: (fn) => { queue.push(fn); return queue as unknown as NodeJS.Timeout; },
       clearTimer: () => {}, sleep: async () => {}, now: () => 'T',
     });

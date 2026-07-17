@@ -150,7 +150,7 @@ function makeServer(withCuboid: boolean) {
   const vpd = fakeVpd();
   const timers = makeManualTimers();
   const job = new CaptureJob({
-    camera, vpd, store: s, cfg: captureCfg, lpdEnabled: false,
+    camera, vpd, cfg: captureCfg, lpdEnabled: false,
     setTimer: timers.setTimer, clearTimer: timers.clearTimer, sleep: async () => {}, now: () => 'T',
     placeRoiFile: FIXTURE,
     ...(withCuboid ? { cuboidCtx: async () => CTX } : {}),

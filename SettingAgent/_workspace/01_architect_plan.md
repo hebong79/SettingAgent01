@@ -1,321 +1,411 @@
-# 01. 설계 — 점유영역 사다리꼴 표시(번호판 앵커) + 겹침 회피 자동 폭 스케일
+# 01. SettingAgent DB 스키마 전면 개편 + LLM 보조 최소화 — 설계(계획)
 
-> 설계자(architect) 산출물. 2026-07-16.
-> 직전 세션 산출물은 `_workspace_prev_20260716/` 으로 이관(00_HANDOFF 포함, vpd-seg-cuboid·OccupancyJudge 세션).
-> 실행 모드: **B. goal/loop** (성공 기준이 시각 관찰형 — 사다리꼴 모양·겹침·수평 정합).
-
----
-
-## 0. 마스터 요구사항(원문)과 해석
-
-> "점유판단후 점유 영역을 표시 할때 번호판 중심으로 상하좌우로 사다리꼴 모양의 4점을 만들어줘.
->  단, 1. 점유영역이 서로 겹치면 안된다. 2. 번호판중심으로 위가 좀 길어야 한다.
->  3. 가로/세로 모두 번호판영역의 가로 세로의 수평을 유지해야 한다. 4. 가로크기는 3.5~4배 정도 - 서로 겹치면 안됨.
->  가로크기 잡을때는 loop를 계속 돌아 크기를 자동으로 설정가능하게 만들어줘."
-
-| # | 요구 | 해석(확정) | 근거 |
-|---|------|-----------|------|
-| R1 | 점유영역 서로 겹침 금지 | **하드 제약**. 겹침 판정 = `convexIntersectionArea > AREA_EPS(1e-6)` | 1e-6 정규화 면적 ≈ FHD(1920×1080) 기준 약 2px² — "선이 스치는" 수준 이하만 허용. EPS(1e-9)는 부동소수 잡음과 구분 불가 |
-| R2 | 번호판 중심으로 위가 좀 길다 | **(a) 세로 방향 비대칭**: 중심→위 변 거리 > 중심→아래 변 거리 (`upRatio > downRatio`) 를 기본 채택. (b) "위 변의 폭" 해석은 `topWidthRatio` 파라미터로 별도 표현(아래 §2) | "길다"는 국어상 연장(extent)을 지칭. 주차 카메라는 위에서 내려다보고 번호판은 차량 전면(가까운 쪽)에 붙으므로 차체는 화면 위쪽으로 뻗음 → 위로 길어야 차량을 덮음. 두 해석 모두 파라미터로 존재하므로 goal/loop 관찰 중 즉시 전환 가능 |
-| R3 | 가로/세로 모두 번호판의 수평 유지 | 사다리꼴 **위/아래 변 ∥ 번호판 가로축(û)**, **중심축(위변중심↔아래변중심) ∥ 번호판 세로축(v̂)**. 좌우 빗변 자체는 사다리꼴 정의상 v̂ 와 평행 불가(위/아래 폭이 다르므로) — 중심축 평행이 "세로 수평"의 성립 가능한 유일 해석 | 기하적으로 위폭≠아래폭 + 좌우변∥v̂ 는 모순. `topWidthRatio=1.0`(평행사변형)일 때만 좌우변도 v̂ 평행 |
-| R4 | 가로크기 3.5~4배, loop 로 자동 | 배율 기준 = **번호판 폭 W**(평균 엣지). 런타임 **결정형 자동 탐색 루프**(§3)가 [3.5, 4.0] 에서 겹침 없는 최대 배율을 찾음 | "3.5~4배"는 실측 근거 있음: 한국 번호판 폭 ≈ 0.52m, 승용차 폭 ≈ 1.8~2.0m → 비 3.5~3.9 |
-
-**두 개의 "loop" 구분(혼동 금지):**
-- **(A) 런타임 자동 탐색 루프** — 코드 내부. 매 프레임 순수 함수로 실행되는 배율 이진탐색+축소 루프(§3).
-- **(B) 개발 goal/loop** — 하네스 B모드. 구현→스샷 관찰→파라미터 보정 반복(§7).
-
-**MCP 경계 판단**: 본 기능은 수치 반복·기하 계산(고빈도 프레임 루프) → 전부 **결정형 코드**. LLM 두뇌 개입 없음.
+> 본 문서는 **설계(계획)만**이다. 코드 수정 금지. 근거는 `파일:줄`로 명시한다.
+> 마스터 확정 결정(배경 A/B)은 변경 금지 전제로 두고, 그 위에서 검증 가능한 구현 계획을 수립한다.
 
 ---
 
-## 1. 현재 코드 사실(설계 근거, 직접 확인분)
+## 0. 요약 · 확정 결론 먼저
 
-| 항목 | 위치 | 사실 |
-|------|------|------|
-| 점유 판정 | `web/occupancy.js:138 OccupancyJudge.judge` | 1단계 plate(`computeOccupancy` 위임) → 2단계 bbox 폴백. plate 행 = `{idx, occupied:true, source:'plate', center}` — **plate quad 자체는 유실됨** |
-| plate 매칭 원본 | `web/core.js:474 computeOccupancy` | `plates.map(quadCentroid).filter(...)` 로 **중심만 남기고 quad 를 버림** → 여기서 quad 를 보존해야 함 |
-| plate 점 순서 규약 | ultralytics OBB | `NormalizedQuad = [TL, TR, BR, BL]`, 0~1 정규화 |
-| 오버레이 | `web/app.js:381 drawOccupancyOverlay` | `state.occComputeByKey[key].spaces` 를 소스로 plate=빨강 원, bbox=주황 원+'번호미인식'. `#roi-occupancy` 토글 가드 |
-| 판정→state 배선 | `web/app.js:359 updateLogicOccupancy` | judge 결과를 명시적 필드 매핑으로 `spaces` 에 저장 |
-| 기하 유틸(브라우저) | `web/occupancy.js` | `polygonArea/polygonCentroid/clipByHalfPlane/convexIntersectionArea` **이미 export 됨**(파리티 테스트 봉인) — 재사용, 신규 발명 금지 |
-| 최종화 스냅샷 | `web/app.js:1929` | `occComputeByKey → [{key, spaces:[{idx, occupied}]}]` 만 추출 — region 추가와 무관 |
-| 기존 테스트 강한 단언 | `test/occupancyJudge.test.ts:54` | T1이 judge 행 투영과 `computeOccupancy` 원본을 `toEqual` 비교 — computeOccupancy 반환 확장 시 **이 한 줄만** 투영 보정 필요(§6) |
+| 항목 | 결론 | 근거 |
+|---|---|---|
+| 최종 테이블 | 6개: `place_info` / `camera_info` / `preset_pos` / `slot_setup` / `parking_evnt` / `parking_slot` | 배경 A.2 |
+| 기존 테이블 | 10개 전부 폐기(신 DB 파일로 clean-cut) | 배경 A.1 |
+| run_id | DB에서 완전 제거. `CaptureJob` 인메모리 런 식별자로만 잔존 | 배경 A.3 |
+| 확정본 보호 | finalize 시 `slot_setup` 전량 **단일 트랜잭션 교체(실패 롤백)** | 배경 A.3 |
+| slot_setup.slot_roi 좌표계 | **정규화 0~1** (픽셀 아님). 원본 픽셀 역변환용 `img_w/img_h`를 `camera_info`에 보관 | §1.3 |
+| slot_id 체계 | **전역 정수 1..N** (`normalizeGlobalIdx` 결과). 문자열 `c{c}p{p}s{n}`은 미저장(파생) | §1.4 |
+| PTZ 저장 | `pan/tilt/zoom` REAL 3컬럼(JSON TEXT 금지) | 배경 설계요구 1 |
+| 가변정점 | `slot_roi/vpd_bbox/lpd_obb/occupy_range` 는 JSON TEXT | 배경 설계요구 1 |
+| LLM | 캡처 루프 LLM 전면 off(floor/checkpoint off). `judgeOccupancy`만 **축소된 보조**로 잔존(인메모리, 미영속) | 배경 B |
+| 캡처 중간테이블 | observation/detection/aggregated/floor_roi/occupancy/checkpoint **DB 미기록 → 인메모리 누적** | 배경 A.3 + §2 |
 
----
-
-## 2. 수학 모델
-
-### 2-1. 번호판 축 정의 (논점 1 결정)
-
-quad `[TL, TR, BR, BL]` 에서 **대변 평균 엣지 방향**:
-
-```
-u_raw = ((TR−TL) + (BR−BL)) / 2      // 가로(위+아래 엣지 평균)
-v_raw = ((BL−TL) + (BR−TR)) / 2      // 세로(좌+우 엣지 평균)
-û = u_raw / |u_raw| ,  v̂ = v_raw / |v_raw|
-W = (|TR−TL| + |BR−BL|) / 2          // 번호판 폭(배율 기준)
-```
-
-**결정 근거**: 원근 왜곡 quad 를 bilinear 곡면으로 볼 때 대변 평균은 파라미터 중심(0.5, 0.5)에서의 접선 방향과 일치 — "번호판 중심에서의 가로/세로 방향"이라는 R3 요구에 정확히 부합. 단일 엣지 채택 대비 OBB 정점 잡음이 절반으로 평균화됨. 대안(단일 엣지, 최소외접사각형 등)은 잡음 민감·과설계로 기각.
-
-**방향 정규화(안전장치)**: OBB 가 180° 뒤집혀 검출되면 v̂ 가 화면 위(−y)를 향한다. `v_raw.y < 0` 이면 `û ← −û, v̂ ← −v̂` 동시 반전(핸디드니스 보존). 화면상 "위"는 항상 `−v̂` 로 일관.
-
-**퇴화 가드**: `|u_raw| < 1e-9` 또는 `|v_raw| < 1e-9` 또는 quad 비4점 → 해당 인스턴스 region 생성 skip(null, throw 금지 — 강등 철학).
-
-### 2-2. 사다리꼴 4점 생성 (논점 2 통합 모델)
-
-번호판 중심 `C = quadCentroid(quad)`(기존 judge center 와 동일 정의), 배율 `s`:
-
-```
-bw = s · W                              // 아래 변 전체 폭 (배율 기준변)
-tw = topWidthRatio · bw                 // 위 변 전체 폭
-Ct = C − (upRatio · bw) · v̂            // 위 변 중심 (−v̂ = 화면 위)
-Cb = C + (downRatio · bw) · v̂          // 아래 변 중심
-
-TL' = Ct − (tw/2)·û      TR' = Ct + (tw/2)·û
-BL' = Cb − (bw/2)·û      BR' = Cb + (bw/2)·û
-반환 순서: [TL', TR', BR', BL']         // 기존 quad 규약 유지
-```
-
-성질: 위/아래 변 ∥ û (R3 가로), Ct·Cb 모두 직선 `C + t·v̂` 위 → 중심축 ∥ v̂ (R3 세로), `upRatio > downRatio` → 위로 김 (R2), 볼록(사다리꼴) — `convexIntersectionArea` 전제 충족.
-
-### 2-3. 파라미터 표
-
-| 파라미터 | 기본값 | 의미 | 근거 |
-|----------|--------|------|------|
-| `widthScaleMax` | 4.0 | 배율 탐색 상한 | 마스터 명시 "3.5~4배" |
-| `widthScaleMin` | 3.5 | 배율 탐색 하한(전역 단계) | 동상 |
-| `topWidthRatio` | 1.0 | 위 변 폭 / 아래 변 폭 | (갱신 2026-07-16) 마스터 지시로 평행사변형 확정(0.85→1.0), 구 원근 논거는 번호판이 수직면이라 미성립. 구 근거였던 "카메라가 내려다볼 때 먼 쪽(위)이 원근상 좁음"은 번호판이 수직면이고 사다리꼴의 '위'(−v̂)가 더 먼 곳이 아니라 더 높은 곳이라 성립하지 않았음. `topWidthRatio` 는 여전히 `RegionConfig` 파라미터로 남아 있어 필요 시 사다리꼴(<1.0)로 복귀 가능 |
-| `upRatio` | 0.90 | 중심→위 변 거리 / bw | 차체가 위로 뻗는 몫. **goal/loop 3차 스윕 육안 판정으로 확정(0.55→0.90)** — 0.55 는 앞코만 덮어(덮음률 p1 30.8%/p3 12.6%) "위가 좀 길어야 한다"가 시각적으로 약함. 0.90 은 p1 덮음률 43.8%, 사선뷰 p3 에서도 이웃침범률 14.6% < 자기 차 덮음률 18.9% 로 우위 유지. 1.30↑ 는 p1 상단이 지붕을 넘어 배경으로 뻗고 1.70 은 p3 이웃침범(33.6%)이 자기 차 덮음(33.3%)을 추월 → 오인 유발. R1·R4 무제약 확인(스윕 전 8수준 `globalScale=4.0`, `overlapPairs=[]`, 최대 교차면적 0.000e+0 — 사다리꼴은 v̂ 방향으로만 자라 좌우 평행 띠끼리 만나지 않음) |
-| `downRatio` | **0.60**(갱신 2026-07-16, 구값 0.30) | 중심→아래 변 거리 / bw | 마스터 지시로 2배 확정(0.30→0.60). upRatio(0.90) > downRatio(0.60) 로 R2 충족(비 3.00→1.50) — 상세 `_workspace/15_developer_changes_downratio.md`·`16_qa_report_downratio.md` |
-| `scaleQuantum` | 0.05 | 전역 배율 그리드 스냅(내림) | 프레임간 검출 떨림 → 배율 미세 요동 억제(무상태 결정성 유지). §3-4 |
-| `areaEps` | 1e-6 | 겹침 판정 면적 임계 | R1 표 참조 |
-| `shrinkFactor` | 0.9 | 인스턴스별 축소율(폴백 단계) | 기하급수 축소 → 종료 보장. §3-3 |
-| `maxShrinkIters` | 20 | 폴백 축소 반복 상한 | 0.9²⁰ ≈ 0.12 — 그 아래로 줄여도 안 풀리면 중심 자체가 밀착(비정상 검출) → 보고로 강등 |
-| `minScale` | 1.0 | 인스턴스 배율 하한 | 번호판 폭 미만 축소는 무의미(중심 원이 이미 있음) |
-
-전부 `RegionConfig` 생성자/인자 기본값 — **UI 노출 없음**(요구 없음, 규칙 2).
-
-### 2-4. 경계 클램프 (논점 4 결정)
-
-생성된 사다리꼴을 단위 정사각형 4개 내향 반평면(`x≥0, x≤1, y≥0, y≤1`)으로 `clipByHalfPlane` 4회 클립. 결과는 볼록 3~8각형(오버레이는 다각형 그대로 렌더). 전부 잘리면(정점 0) region=null.
-**겹침 판정도 클램프 후 다각형으로 수행** — 화면에 보이는 영역이 판정 대상이며, 클립은 부분집합 연산이라 §3 단조성을 깨지 않음.
-
-### 2-5. bbox 폴백 (논점 5 결정)
-
-`source==='bbox'`(번호판 없음)는 **사다리꼴 미생성** — 기존 주황 원 + '번호미인식' 유지.
-근거: 요구 원문이 "번호판 중심으로"이며 축(û, v̂)의 정의 자체가 plate quad 를 요구. bbox 에서 유사 사다리꼴을 발명하는 것은 추측성 코드(규칙 2). bbox region 은 겹침 판정 모집단에도 미포함.
+**신 DB 파일명 제안:** `data/setting.sqlite` (기존 `data/observations.sqlite`는 건드리지 않는다 → 롤백 지점). `tools.config.json`의 `capture.dbFile`을 이 값으로 교체. (기본값 `toolsConfig.ts:274`는 `data/observations.sqlite`.)
 
 ---
 
-## 3. 런타임 겹침 회피 자동 배율 탐색 (논점 3 결정)
+## 1. 최종 6테이블 DDL 초안 (better-sqlite3 `exec` 투입 수준)
 
-### 3-1. 전역 단일 배율 + 인스턴스별 폴백(2단계)
+> 규약
+> - **PRAGMA foreign_keys = ON** 은 SQLite 기본 OFF다. `SqliteStore` 생성자에서 연결마다 명시적으로 켠다: `this.db.pragma('foreign_keys = ON')` (현재 `SqliteStore.ts:29`는 `journal_mode=WAL`만 설정 — FK 미설정).
+> - 좌표계: **정규화 0~1**(원점 좌상단)을 표준으로 한다. `types.ts:3` "좌표는 모두 정규화(0~1), cam/preset/round 인덱스는 1-based" 규약 계승. 픽셀 저장 컬럼 없음.
+> - PTZ는 REAL 3컬럼. 가변정점 폴리곤/사각형은 JSON TEXT.
+> - 이미지: BLOB 금지, 상대경로 TEXT.
 
-- **1단계(주)**: 전역 단일 `s` — 모든 사다리꼴이 같은 배율 → 균일한 시각, "3.5~4배"라는 전역 스펙에 부합, 탐색 공간 1차원.
-- **2단계(폴백)**: 하한 3.5 에서도 겹치는 **쌍만** 개별 축소 — R1(하드 제약)을 지키기 위한 최소 개입. 겹치지 않는 인스턴스는 3.5 유지.
+```sql
+PRAGMA foreign_keys = ON;
 
-### 3-2. 단조성 논거(이진탐색 정당성)
+-- 1) 주차장(장소) — 현재 place_id=1 고정 (my_db_table §4)
+CREATE TABLE IF NOT EXISTS place_info (
+  place_id    INTEGER PRIMARY KEY,           -- 현재 항상 1
+  place_name  TEXT NOT NULL
+);
 
-모든 정점이 `C + s·(상수벡터)` 꼴(§2-2: bw, tw, up, down 모두 s 에 비례) → `s' < s` 이면 region(s') 는 region(s) 의 **C 중심 스타형 부분집합**. 단위사각 클립도 부분집합 보존. 따라서 임의 쌍의 교차 면적은 s 에 대해 단조 비감소 → "겹침 없음" 술어는 s 에 대해 단조 → 이진탐색 유효.
+-- 2) 카메라 (my_db_table §3 + 정규화 역변환 기준 img_w/img_h)
+CREATE TABLE IF NOT EXISTS camera_info (
+  cam_id       INTEGER PRIMARY KEY,          -- 1-based
+  cam_name     TEXT,
+  cam_uuid     TEXT,
+  url          TEXT,
+  user_id      TEXT,
+  password     TEXT,                         -- 평문. 노출 마스킹은 조회계층(§4)이 담당
+  rtsp_url     TEXT,
+  cam_type     TEXT NOT NULL DEFAULT 'ptz'
+                 CHECK (cam_type IN ('ptz','static')),
+  cam_company  TEXT,
+  place_id     INTEGER NOT NULL DEFAULT 1
+                 REFERENCES place_info(place_id),
+  img_w        INTEGER,                       -- PtzCamRoi 픽셀→정규화 역변환 기준(현재 1920)
+  img_h        INTEGER,                       -- (현재 1080). PtzCamRoi.json export 재생성에 필수
+  updated_at   TEXT
+);
 
-### 3-3. 의사코드
+-- 3) 프리셋 위치 PTZ = P1 존 (my_db_table §2). PTZ는 REAL 3컬럼
+CREATE TABLE IF NOT EXISTS preset_pos (
+  cam_id      INTEGER NOT NULL
+                REFERENCES camera_info(cam_id),
+  preset_id   INTEGER NOT NULL,              -- 1-based
+  sname       TEXT,                          -- camerapos.json 의 sname("Preset 1")
+  pan         REAL NOT NULL,
+  tilt        REAL NOT NULL,
+  zoom        REAL NOT NULL,
+  updated_at  TEXT,
+  PRIMARY KEY (cam_id, preset_id)
+);
 
-```
-computeOccupancyRegions(items, cfg):            // items = [{idx, quad}] plate 점유분, idx 오름차순 정렬
-  axes[i] ← plateAxes(items[i].quad)            // null(퇴화)은 모집단 제외
-  regionAt(i, s) ≔ clampToUnit(buildTrapezoid(axes[i], s))
-  anyOverlap(s) ≔ ∃ i<j: convexIntersectionArea(regionAt(i,s), regionAt(j,s)) > areaEps
+-- 4) 슬롯 셋업 = floor_ROI + centering 병합 (my_db_table §1 + §5)
+--    "전체 주차면 개수만큼, 슬롯당 1행" 이 불변식(run_id 없음)
+CREATE TABLE IF NOT EXISTS slot_setup (
+  slot_id        INTEGER PRIMARY KEY,        -- 전역 슬롯번호 1..N (normalizeGlobalIdx 결과)
+  cam_id         INTEGER NOT NULL,
+  preset_id      INTEGER NOT NULL,
+  preset_slotidx INTEGER,                    -- 프리셋 내 순서(1-based). 미도출 시 NULL
+  slot_roi       TEXT NOT NULL,              -- 정규화 4점 폴리곤 JSON: [[x,y],...] (painted slot)
+  vpd_bbox       TEXT,                       -- 정규화 차량 bbox JSON: {"x","y","w","h"}. 미점유 NULL
+  lpd_obb        TEXT,                       -- 정규화 번호판 OBB JSON: [[x,y]×4]. 부재 NULL
+  occupy_range   TEXT,                       -- 정규화 점유영역(발자국) 폴리곤 JSON. 부재 NULL
+  pan            REAL,                        -- 번호판중심 센터라이징 PTZ(=my_db_table 의 pos/ptz). 미센터라이징 NULL
+  tilt           REAL,
+  zoom           REAL,
+  centered       INTEGER NOT NULL DEFAULT 0
+                   CHECK (centered IN (0,1)),
+  img1           TEXT,                        -- 센터라이징 후 차량 스샷 상대경로. 부재 NULL
+  updated_at     TEXT,
+  FOREIGN KEY (cam_id, preset_id)
+    REFERENCES preset_pos(cam_id, preset_id),
+  UNIQUE (cam_id, preset_id, preset_slotidx)
+);
+CREATE INDEX IF NOT EXISTS idx_slot_setup_campreset
+  ON slot_setup(cam_id, preset_id);
 
-  // ── 1단계: 전역 이진탐색 [3.5, 4.0], 12회 고정 ──
-  if !anyOverlap(4.0): s* ← 4.0
-  else if anyOverlap(3.5): goto 2단계
-  else:
-    lo ← 3.5; hi ← 4.0                          // 불변식: lo 비겹침, hi 겹침
-    repeat 12: mid ← (lo+hi)/2; anyOverlap(mid) ? hi←mid : lo←mid
-    s* ← floor(lo / scaleQuantum) · scaleQuantum // 0.05 그리드 내림(축소 방향 → 비겹침 유지)
-    s* ← max(s*, 3.5)
-  return { regions: [regionAt(i, s*)…], globalScale: s*, overlapPairs: [] }
+-- 5) 주차 이벤트 이력 (my_db_table §6) — ActionAgent 소비, 지금은 스키마만
+CREATE TABLE IF NOT EXISTS parking_evnt (
+  evnt_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+  slot_id      INTEGER NOT NULL
+                 REFERENCES slot_setup(slot_id),
+  is_occupy    INTEGER NOT NULL
+                 CHECK (is_occupy IN (0,1)),
+  update_time  TEXT NOT NULL,
+  plate_num    TEXT,
+  img1         TEXT,                          -- 차량 이미지 상대경로
+  img2         TEXT                           -- 번호판 크롭 상대경로
+);
+CREATE INDEX IF NOT EXISTS idx_evnt_slot_time
+  ON parking_evnt(slot_id, update_time DESC);
 
-  // ── 2단계: 인스턴스별 shrink-to-fit (전역 3.5 에서도 겹침일 때만) ──
-  scale[i] ← 3.5 ∀i
-  repeat ≤ maxShrinkIters(20):
-    pairs ← 겹치는 (i,j) 전부 (i<j, idx 순 결정적 순회)
-    if pairs = ∅: break
-    for (i,j) in pairs: scale[i] ← max(minScale, scale[i]·0.9); scale[j] ← max(...)
-  return { regions: [regionAt(i, scale[i])…], globalScale: null,
-           overlapPairs: 잔존 겹침 쌍 }          // 잔존 시에도 표시는 함 + 호출측 console.warn 1회
+-- 6) 현재 주차면 상태 (my_db_table §7) — parking_evnt 와 컬럼 중복 금지
+--    현재상태 = 최신 이벤트 포인터. 상세는 JOIN 으로 조회
+CREATE TABLE IF NOT EXISTS parking_slot (
+  slot_id       INTEGER PRIMARY KEY
+                  REFERENCES slot_setup(slot_id),
+  last_evnt_id  INTEGER
+                  REFERENCES parking_evnt(evnt_id)
+);
 ```
 
-- **복잡도**: 1단계 O(12 · N² · k²), 2단계 O(20 · N²) — N(프리셋당 점유면) ≤ ~30, k(클립 후 정점) ≤ 8 → 프레임당 마이크로초 대. 성능 무풍.
-- **종료 보장**: 두 단계 모두 고정 반복 상한. 2단계는 기하급수 축소 + minScale 클램프로 무한루프 불가.
-- **결정성**: 순수 함수(입력 quads + cfg → 출력), 난수·시각·상태 없음, 쌍 순회는 idx 정렬 고정 → 같은 입력이면 항상 같은 출력.
-- **프레임 떨림(hysteresis 판단)**: 상태 보유 hysteresis 는 도입하지 않음 — 순수성·테스트 용이성 훼손 대비 이득 불확실. 대신 무상태인 `scaleQuantum` 스냅(0.05)으로 배율 요동을 흡수. goal/loop 관찰에서 떨림이 실재하면 후속 과제로 명시(§9 리스크).
+### 1.1 컬럼 병합 근거 (floor_ROI + centering → slot_setup)
+- my_db_table 의 `floor_ROI`(§1: slot_id/cam_id/preset_id/preset_slotidx/slot_roi/**pos**)와 `centering`(§5: slot_id/cam_id/preset_id/vpd_bbox/lpd_obb/occupy_range/**ptz**/img1)은 **키·카디널리티 동일**("전체 슬롯 개수만큼")이고 `pos`(floor_ROI)와 `ptz`(centering)는 **둘 다 번호판중심 센터라이징 PTZ로 동일값**이다 → 마스터 지정대로 `pan/tilt/zoom` 단일 3컬럼으로 병합. 중복 저장 제거.
+- 이 병합값은 코드상으로도 일치한다: `Finalizer.ts:242-253`가 한 슬롯의 roi/vpd/lpd/occupied/pan·tilt·zoom을 **한 행**으로 이미 조립하고, 센터라이징 PTZ는 `PtzCalibrator`→`slot_ptz.json`/`centering_slot`로 산출된다(`PtzCalibrator.ts:201-222`).
+
+### 1.2 각 컬럼의 원천 매핑
+| slot_setup 컬럼 | 원천 | 코드 근거 |
+|---|---|---|
+| slot_id | `normalizeGlobalIdx(place.byPreset)` 전역 1..N | `placeRoi.ts:92-112`, `Finalizer.ts:225` |
+| cam_id/preset_id | PtzCamRoi cameras[].camera.cam_id / presets[].preset_idx | `placeRoi.ts:41-47` |
+| preset_slotidx | 프리셋 내 위치(orderByPosition 순서, 1-based) | `Finalizer.ts:329` positionIdx, `slotPtzWriter.ts:33` |
+| slot_roi | PtzCamRoi parking_spaces[].points → 정규화 | `placeRoi.ts:75`, `Finalizer.ts:244` `roiJson` |
+| vpd_bbox | 공간배정된 차량 대표 bbox | `Finalizer.ts:245` `vpdJson` |
+| lpd_obb | 배정 차량의 plateQuad | `Finalizer.ts:246` `lpdJson` |
+| occupy_range | floor 발자국 폴리곤(결정형 `buildPlateAnchoredQuad`) | `Finalizer.ts:320,344` `floorRoiByPreset`/deconflicted |
+| pan/tilt/zoom | 센터라이징 성공 PTZ(`slot_ptz.json`/`centering_slot.pos`) | `PtzCalibrator.ts:207-213` |
+| centered | 센터라이징 성공 여부(1) | `PtzCalibrator.ts:206` `it.centered && it.converged` |
+
+### 1.3 slot_roi 좌표계 결정: **정규화 0~1** (확정)
+- **근거 1(코드 사실):** 현행 `parking_slots.roi_json`이 이미 정규화다 — `Finalizer.ts:244` `roiJson: JSON.stringify(sp.points)`이고 `sp.points`는 `placeRoi.ts:75`에서 `p.x / W, p.y / H`로 정규화된 값.
+- **근거 2(해상도 비종속):** VPD/LPD 검출·집계 전 파이프라인이 정규화(`types.ts:3`, `CaptureJob.ts:348-355`의 `v.rect.x` 등). 픽셀로 저장하면 파이프라인 전체와 좌표계 불일치 → 재변환 산재.
+- **근거 3(뷰어 정합):** 뷰어는 정규화 폴리곤을 오버레이한다(`core.js` normalize 경로). DB 정본이 정규화면 뷰어 무변경.
+- **트레이드오프/보완:** PtzCamRoi.json 원본은 픽셀(1920×1080, `PtzCamRoi.json:18-19`)이고 `PUT /capture/place-roi`의 역변환(`placeRoi.ts:141-144` `p.x * W`)은 W/H가 필요하다. 그래서 **`camera_info.img_w/img_h`를 추가**해 export(PtzCamRoi.json 재생성)와 역변환의 기준을 DB가 보유하게 한다. (컬럼 주석에 명시.)
+
+### 1.4 slot_id 전역 체계 도출 방법
+- PtzCamRoi.json 의 `parking_spaces[].idx`를 `normalizeGlobalIdx`가 **파일 전체 고유 1..N**으로 정규화한다(`placeRoi.ts:87-112`): 이미 1..N 순열이면 그대로, 아니면 `(cam asc → preset asc → 배열순)`으로 재부여.
+- 이 전역 1..N이 곧 `slot_setup.slot_id`. `setup_artifact.globalIndex[].globalIdx`와 **동일 정수**가 되도록 정합해야 한다(§8 리스크 참조 — 정렬 규칙 차이 주의).
+- 문자열 `c{cam}p{preset}s{pos}`(`Finalizer.ts:30-32`, `centering_slot.slot_id`=`c1p2s1`)는 `(cam_id, preset_id, preset_slotidx)`에서 파생 가능하므로 **slot_setup에 저장하지 않는다**(단순화). 캘리브레이션/artifact 경로는 여전히 문자열을 쓰므로 매핑 레이어 필요(§1.5).
+
+### 1.5 명명 통일 + 매핑 레이어 영향 범위(표)
+최종 스키마는 md 기준 **`cam_id` / `preset_id`**로 통일한다. 기존 코드 전반은 `camIdx/presetIdx`(TS 필드)·`cam_idx/preset_idx`(구 DB 컬럼)를 쓴다. 매핑 필요 지점:
+
+| 도메인 개념 | 기존 TS 필드 | 구 DB 컬럼 | 최종 DB 컬럼 | 매핑 영향 파일 |
+|---|---|---|---|---|
+| 카메라 | `camIdx` | `cam_idx`(대부분) / `cam_id`(centering_slot) | `cam_id` | SqliteStore(전량 재작성), Finalizer, CaptureJob, PtzCalibrator, captureRoutes, dbRoutes |
+| 프리셋 | `presetIdx` | `preset_idx` / `preset_id`(centering_slot) | `preset_id` | 위와 동일 |
+| 프리셋내 순서 | `positionIdx` / `presetSlotIdx` | `slot_idx`(0/1-based 혼재) / `preset_slotidx` | `preset_slotidx` | Finalizer.assemble, slotPtzWriter, PtzCalibrator |
+| 전역 슬롯번호 | `globalIdx` | `parking_slots.slot_idx`(정규화 후) | `slot_id` | Finalizer, GlobalIndexer |
+| 슬롯 문자열 | `slotId`(`c…p…s…`) | `centering_slot.slot_id` | (미저장·파생) | Finalizer, calibrate/* |
+
+> **주의(구 DB 실측):** 현행 `parking_slots.slot_idx`는 `0..17` 0-based 값이 남아 있다(백업/현행 DB 동일, `data/observations.sqlite` 조회 결과). 즉 코드 주석(`Finalizer.ts:223` "전역번호 1..N")과 저장 데이터가 불일치하는 레거시 행이 존재 → 신 스키마에선 `slot_id`를 항상 `normalizeGlobalIdx` 결과로 재부여해 통일한다. 구 행은 마이그레이션하지 않는다(§5).
+
+### 1.6 인덱스 · CHECK (요구사항 반영)
+- `idx_evnt_slot_time ON parking_evnt(slot_id, update_time DESC)` — 슬롯 최신 이벤트 조회.
+- `idx_slot_setup_campreset ON slot_setup(cam_id, preset_id)` — 프리셋 단위 조회(뷰어 오버레이).
+- CHECK: `is_occupy IN (0,1)`, `cam_type IN ('ptz','static')`, `centered IN (0,1)`.
+- (요구사항의 `slot_setup(cam_id, preset_id)` 인덱스는 위 `idx_slot_setup_campreset`로 충족. PK가 `slot_id` 단일이라 별도 인덱스가 유효.)
+
+### 1.7 이번 범위에서 **제외**하는 것(명시)
+- PtzCamRoi.json 의 카메라 외/내부 파라미터 `position/eulerAngles/fov`(`PtzCamRoi.json:7-18`)는 **지면모델(ground-model) 전용 입력**이다(`captureRoutes.ts:399-431`, `buildGroundInputs`). 이 기하는 `slot_setup`/`camera_info`의 대상이 아니며, ground-model 읽기 경로의 DB 이관은 **후속 과제**로 남긴다. → PtzCamRoi.json은 (a) 지면모델 입력, (b) slot_roi export의 이중 역할로 잔존하되, **slot ROI/preset PTZ의 정본은 DB**로 전환한다(부분 정본화, §8 리스크에 명시).
 
 ---
 
-## 4. 모듈 구조 · 공개 API (논점 6 결정)
+## 2. CaptureJob 메모리 누적 전환 설계
 
-**신규 `web/occupancyRegion.js` (+ `occupancyRegion.d.ts`) — 브라우저 순수 ESM 단일 소스.**
-근거: 소비처가 뷰어 오버레이뿐(서버 미사용) → `src/domain` 원본+파리티 포트는 이중 소스 유지비만 발생(규칙 2·3). `OccupancyJudge`(web 단일 소스 + .d.ts 짝) 선례를 따름. 기하 프리미티브는 **재사용**: `./occupancy.js` 의 `clipByHalfPlane/convexIntersectionArea/polygonArea`(export 확인됨), `./core.js` 의 `quadCentroid`. 서버가 쓰게 되는 시점에 src 이관+파리티 테스트로 승격(그때 결정).
+### 2.1 현재 구조(제거 대상)
+현재 캡처 루프는 관측·검출·집계·floor·occupancy·checkpoint를 **전부 run_id 키로 DB에 기록**한다:
+- `insertObservation`/`insertDetections` (`CaptureJob.ts:333,372`)
+- `getDetectionsForRun`/`getPresetRounds`→`aggregate`→`replaceAggregatedSlots` (`CaptureJob.ts:484-487`)
+- `CheckpointReviewer.updateAggregatedStatus` (`CheckpointReviewer.ts:89,94`)
+- `FloorRoiReviewer.upsertFloorRoi` (`FloorRoiReviewer.ts:94`)
+- `OccupancyReviewer.insertOccupancy` (`OccupancyReviewer.ts:63`)
+- `Finalizer`가 finalize 시 위 DB를 재조회(`Finalizer.ts:96-101,138,178`).
 
-```ts
-// web/occupancyRegion.d.ts (신규)
-import type { NormalizedPoint } from './core.js';
+### 2.2 목표 구조(인메모리 누적)
+`CaptureJob`이 런 상태를 **필드로 보유**하고 finalize에서만 `slot_setup`을 트랜잭션 교체:
+- `private dets: DetectionRow[] = []` — `insertDetections` 대체(메모리 push).
+- `private roundsByPreset = new Map<string, Set<number>>()` — `getPresetRounds` 대체(distinct round 카운트).
+- 집계는 매 체크포인트 `aggregate(this.dets, presetRoundsMap, opts)` 호출(Aggregator 시그니처 **불변** — `CaptureJob.ts:486`가 이미 배열+맵을 받음). 결과는 `private aggregated: AggregatedSlot[]`.
+- floor 발자국은 finalize 조립 시 결정형(`buildPlateAnchoredQuad`)으로 계산(§2.3) → floor 전용 인메모리 저장 불필요.
+- occupancy(축소 보조)는 `private occByPreset = new Map<string, OccupancySpace[]>()` (인메모리, §6).
+- observation 원본(pan/tilt/zoom/imgName)은 finalize에서 불필요하므로 **미보유**(진행률·프레임은 기존 `lastFrameByPreset`로 충분, `CaptureJob.ts:99`).
 
-export interface RegionConfig {
-  widthScaleMin?: number;   // 3.5
-  widthScaleMax?: number;   // 4.0
-  topWidthRatio?: number;   // 0.85
-  upRatio?: number;         // 0.55
-  downRatio?: number;       // 0.30
-  scaleQuantum?: number;    // 0.05
-  areaEps?: number;         // 1e-6
-  shrinkFactor?: number;    // 0.9
-  maxShrinkIters?: number;  // 20
-  minScale?: number;        // 1.0
-}
+`start()`에서 전부 clear(`CaptureJob.ts:220-221` 패턴 재사용). run_id는 `createRun/endRun` 호출 제거 후 **인메모리 카운터**(`this.runSeq++`)로만 표시(로그·status용, DB 무접촉).
 
-export interface PlateAxes {
-  c: NormalizedPoint;   // 번호판 중심(quadCentroid)
-  u: NormalizedPoint;   // û 단위 가로축
-  v: NormalizedPoint;   // v̂ 단위 세로축(화면 아래 방향 보장)
-  width: number;        // W (대변 평균 폭)
-}
+### 2.3 Finalizer 전환
+- 입력을 `finalize(runId)`(`Finalizer.ts:94`) → `finalize(snapshot)`로 변경. `snapshot`은 `CaptureJob`이 노출하는 `{ dets, roundsByPreset, aggregated, occByPreset }`.
+- `getDetectionsForRun/getPresetRounds/getAggregatedSlots`(DB) 호출 3곳(`Finalizer.ts:96-101`) → snapshot 필드 참조로 대체.
+- `getCheckpoints`(`Finalizer.ts:116`)는 LLM finalize 보조용 — LLM 최소화로 **삭제**(§6).
+- `getLatestOccupancy`(`Finalizer.ts:138`)는 snapshot.occByPreset 참조로 대체(occupancyAgreement 비교 로직은 **유지**, 소스만 인메모리 — 마스터 "응답 소비 로직 최소 변경" 충족).
+- `replaceParkingSlots`(`Finalizer.ts:256`) → `replaceSlotSetup(rows)`(§2.5). `insertArtifactSnapshot`(`Finalizer.ts:209`)은 artifact_snapshot 폐기로 **삭제**(setup_artifact.json 저장은 `repo.saveArtifact` `Finalizer.ts:208`로 유지).
 
-export interface OccupancyRegion {
-  idx: number;                      // 입력 items[i].idx 그대로
-  scale: number;                    // 적용 배율(전역 or 개별)
-  polygon: NormalizedPoint[];       // 클램프 후 볼록 3~8각형(퇴화 시 미포함)
-}
+### 2.4 재시작 복구 · 동시성 검증
+- **동시성:** `CaptureJob`은 이미 단일 인메모리 잡·중복 시작 거부(`CaptureJob.ts:202-204`). `PtzCalibrator`도 단일(`PtzCalibrator.ts:93`). → 인메모리 단일 소유자 전제 **성립**. 병렬 런 없음.
+- **재시작 복구:** 크래시 시 진행 중 런의 인메모리 누적은 소실된다. **이는 수용 가능**하다 — 마스터 결정 A.3: "이전 확정본 보호는 finalize 성공 시 slot_setup 전량 교체(실패 롤백)". 즉 **확정본(slot_setup)은 항상 온전**하고, 진행 중(미확정) 수집은 애초에 휘발성으로 설계한다. 크래시 = 재수집. 규모도 문제없다(단일 런 검출 수는 수백~수천, 과거 117런 누적 17072건 `detection` 기준 런당 ≈150건).
+- **성립 조건 불성립 시 대안(불필요 판정):** 만약 "런 중 크래시에도 부분 복구"가 요구되면 append-only WAL 스냅샷이 필요하나, 마스터 결정이 명시적으로 이를 배제하므로 **대안 미채택**. (이 판단을 리더에게 확인 요청 — §8.)
 
-export interface RegionResult {
-  regions: OccupancyRegion[];       // 퇴화/전부클립 인스턴스는 제외
-  globalScale: number | null;       // 1단계 성공 시 값, 2단계 진입 시 null
-  overlapPairs: Array<[number, number]>; // 최종 잔존 겹침(idx 쌍) — 정상 시 []
-}
+### 2.5 신규 SqliteStore 표면(메서드 재설계)
+**삭제**(구 10테이블 전용): createRun/updateRunProgress/endRun/getRun/listRuns/insertObservation/insertDetections/getDetectionsForRun/getPresetRounds/replaceAggregatedSlots/getAggregatedSlots/updateAggregatedStatus/insertCheckpoint/getLatestCheckpoint/getCheckpoints/insertArtifactSnapshot/upsertFloorRoi/getFloorRois/insertOccupancy/getLatestOccupancy/replaceParkingSlots/getParkingSlots/upsertCenteringSlots/getCenteringSlots (`SqliteStore.ts:145-521` 전량).
 
-export function plateAxes(quad: NormalizedPoint[] | null | undefined): PlateAxes | null;
-export function buildTrapezoid(axes: PlateAxes, scale: number, cfg?: RegionConfig): NormalizedPoint[]; // [TL,TR,BR,BL] 미클램프
-export function clampToUnit(poly: NormalizedPoint[]): NormalizedPoint[];
-export function computeOccupancyRegions(
-  items: Array<{ idx: number; quad: NormalizedPoint[] }>,
-  cfg?: RegionConfig,
-): RegionResult;
-```
-
-### 데이터 흐름(배선)
-
-```
-judge(floorPolys, detect)                        // plate 행에 plateQuad 신규 탑재(§5)
-  → app.js updateLogicOccupancy:
-      plateItems = rows.filter(r => r.source==='plate' && r.plateQuad)
-                       .map(r => ({ idx: r.idx, quad: r.plateQuad }))
-      result = computeOccupancyRegions(plateItems)
-      spaces[i].region = result.regions.find(g => g.idx === …)?.polygon   // 없으면 undefined
-      result.overlapPairs.length → 프리셋당 1회 console.warn (floorRoiFileWarned 패턴)
-  → drawOccupancyOverlay: sp.region 있으면 다각형(반투명 채움 + 윤곽) 먼저 → 기존 원/라벨 그 위에 유지
-```
+**신규:**
+- `replaceSlotSetup(rows: SlotSetupRow[]): void` — `DELETE FROM slot_setup; INSERT …` 를 **단일 `this.db.transaction`**으로(현행 `replaceParkingSlots` `SqliteStore.ts:472-490` 패턴 재사용, run_id 제거). 예외 시 better-sqlite3 transaction이 자동 롤백 → 이전 확정본 보존.
+- `getSlotSetup(): SlotSetupView[]` — 뷰어/`/capture/slots` 소스(`ORDER BY cam_id, preset_id, preset_slotidx`).
+- `upsertCameraInfo/upsertPresetPos/upsertPlaceInfo` — 마이그레이션·export 역경로.
+- `upsertSlotCentering(rows)` — `PtzCalibrator`가 pan/tilt/zoom/centered/img1만 갱신(slot_id 키 UPDATE. 부분 캘리브레이션이 타 슬롯 전멸 안 하도록 키 단위 — 현행 `upsertCenteringSlots` `SqliteStore.ts:497-510` 철학 계승).
+- (parking_evnt/parking_slot 소비 코드는 ActionAgent 단계 — 이번엔 스키마 생성만, writer/reader 미작성.)
 
 ---
 
-## 5. 변경 파일 목록
+## 3. REST 계약 파괴 대응
 
-| 파일 | 변경 요지 |
-|------|-----------|
-| `web/occupancyRegion.js` **신규** | §2~§3 전체(plateAxes/buildTrapezoid/clampToUnit/computeOccupancyRegions). 기하는 occupancy.js·core.js 재사용 |
-| `web/occupancyRegion.d.ts` **신규** | 상기 타입 선언(occupancy.d.ts 짝 관례) |
-| `web/core.js` | `computeOccupancy` 내부 `centers` → `{center, quad}` 레코드 유지, occupied 행에 `plateQuad` 필드 **추가**(기존 필드 불변, additive) |
-| `web/core.d.ts` | `computeOccupancy` 반환 행에 `plateQuad?: NormalizedPoint[]` 추가 |
-| `web/occupancy.js` | `judge` 1단계 매핑에 `plateQuad: r.plateQuad` 한 줄 추가(plate 행만) |
-| `web/occupancy.d.ts` | `OccupancyJudgement.plateQuad?: NormalizedPoint[]` 추가 |
-| `web/app.js` | `updateLogicOccupancy` region 계산·저장(+overlapPairs 경고 1회 가드), `drawOccupancyOverlay` region 다각형 렌더(기존 원·배지 유지, `#roi-occupancy` 토글 하위 — **신규 UI 없음**) |
-| `test/occupancyJudge.test.ts` | **:53-54 한 곳**: T1 동치 비교에서 base 도 `{idx,occupied,center}` 로 투영(plateQuad additive 로 인한 toEqual 보정). 그 외 무변경 |
-| `test/occupancyRegion.test.ts` **신규** | §6 T1~T14 |
+run_id 소멸로 다음 라우트가 깨진다(`captureRoutes.ts`). 대체안:
 
-서버(src/)·DB·라우트·UI(html) 변경 없음.
+| 기존 라우트 | 파괴 원인 | 대체안 | 응답 shape 변화 |
+|---|---|---|---|
+| `GET /capture/runs` (`:270`, `listRuns`) | capture_run 폐기 | **삭제** 또는 `GET /capture/status` 단일화. 뷰어 폴백(app.js:2213 `runs[0].id`) 제거 | 배열 → (라우트 제거) |
+| `GET /capture/runs/:id/aggregate` (`:272`) | run_id·aggregated_slot 폐기 | `GET /capture/aggregate` (id 없음) → `job.getAggregated()`(인메모리 현재/최근 런) | 동일 `AggregatedSlot[]`, URL만 변경 |
+| `GET /capture/runs/:id/occupancy` (`:287`) | occupancy 테이블 폐기 | `GET /capture/occupancy` → `job.getOccupancy()`(인메모리, 축소 보조). LLM off 시 `[]` | rows shape 유지(camIdx/presetIdx/spaces), URL 변경 |
+| `GET /capture/runs/:id/slots` (`:301`) | parking_slots 폐기 | `GET /capture/slots` → `store.getSlotSetup()`(정본 직접) | 필드명 `slotIdx→slotId`, `roi/vpd/lpd` 유지 |
+| `POST /capture/finalize` (`:240`) | `runId` 인자 | 바디 `runId` 제거, 현재 잡 snapshot으로 finalize | `{ok,slots,globalCount}` 유지 |
 
----
+### 3.1 진행률
+진행률은 이미 `GET /capture/status`(`captureRoutes.ts:183` → `CaptureJob.getStatus()` `CaptureJob.ts:163`)가 인메모리 상태를 준다. run_id 필드만 제거(또는 인메모리 seq 유지). **추가 라우트 불필요**.
 
-## 6. 유닛테스트 설계 (`test/occupancyRegion.test.ts`, vitest — web/*.js 직접 import 관례)
+### 3.2 결과 조회
+finalize 후 결과는 `slot_setup` 직접 조회(`GET /capture/slots`). 뷰어의 "최종화 후 표시"(app.js:1969 `loadParkingSlots`)는 새 라우트로 fetch, 키는 `presetKey`(`cam:preset`) 유지하려면 응답 행에 `presetKey`를 계산해 포함하거나, 뷰어가 `${cam_id}:${preset_id}`로 조립(app.js:1979 `r.presetKey` 의존 → 응답에 `presetKey` 파생필드 포함 권장).
 
-| # | 케이스 | 입력 | 기대 | 의도 |
-|---|--------|------|------|------|
-| T1 | 축: 축정렬 plate | 정렬 quad(폭 0.04, 높이 0.02) | `u≈(1,0)`, `v≈(0,1)`, `width≈0.04`, `c`=quadCentroid | 축 정의 기본 |
-| T2 | 축: 회전 plate | T1 을 30° 회전 | û·v̂ 도 30° 회전, 사다리꼴 위/아래 변 방향과 û 의 외적 ≈ 0 | R3 가로 수평 |
-| T3 | 위가 길다 | 기본 cfg | \|Ct−C\| / \|Cb−C\| = upRatio/downRatio (0.55/0.30) | R2 |
-| T4 | 사다리꼴 폭비 | 기본 cfg | \|TR'−TL'\| = 0.85 × \|BR'−BL'\|, 반환 순서 [TL,TR,BR,BL] 볼록 | topWidthRatio·규약 |
-| T5 | 중심축 세로 평행 | 회전 plate | (Ct−Cb) ∥ v̂ (외적 ≈ 0) | R3 세로 수평 |
-| T6 | 단독 1개 | 이미지 중앙 plate 1개 | `globalScale=4.0`, regions 1개, overlapPairs=[] | 상한 채택 |
-| T7 | 이격 2개 | 4.0 에서도 비겹침 배치 | `globalScale=4.0`, 전 쌍 교차면적 ≤ areaEps | 탐색 조기 종료 |
-| T8 | 근접 2개(중간) | 4.0 겹침·3.5 비겹침 배치 | `3.5 ≤ globalScale < 4.0`, `globalScale`이 0.05 그리드 위, 결과 비겹침 | 이진탐색+스냅 |
-| T9 | 극근접 2개 | 3.5 에서도 겹침 배치 | `globalScale=null`, 해당 쌍 scale < 3.5, 최종 비겹침(또는 20회 후 overlapPairs 보고) | 2단계 폴백 |
-| T10 | 결정성 | T9 입력 2회 호출 | 결과 딥이퀄 | 결정성 |
-| T11 | 경계 클램프 | plate 를 이미지 모서리(0.02, 0.02) 근처 | polygon 전 정점 ∈ [0,1]², 면적 > 0, 정점수 3~8 | 논점 4 |
-| T12 | 퇴화 | 비4점 quad / 0-길이 엣지 quad 혼입 | 해당 인스턴스만 regions 제외, throw 없음, 나머지 정상 | 강등 철학 |
-| T13 | computeOccupancy 확장 | 기존 plateAt 픽스처 | occupied 행에 `plateQuad`=입력 quad(참조 or 딥이퀄), 비점유 행 무변화(`{idx,occupied:false}` 그대로) | §5 하위호환 |
-| T14 | judge 전달 | plate 점유 + bbox 점유 혼합 | plate 행만 `plateQuad` 보유, bbox 행 미보유, 기존 필드 전부 회귀 무 | 논점 7 |
-| T15 | v̂ 방향 정규화 | 점 순서 180° 반전 quad | v̂.y > 0 로 보정, '위'(−v̂) 일관 → T3 성립 | §2-1 안전장치 |
-
-성공 게이트: `npx tsc -p tsconfig.json --noEmit` exit 0 + `npx vitest run` 전량 통과(기존 ~150 파일 포함).
+### 3.3 뷰어(web) 변경 목록(응답 shape 변화)
+| 파일:줄 | 현재 | 변경 |
+|---|---|---|
+| `app.js:1839,2225` `fetchOccupancy` | `GET /capture/runs/${runId}/occupancy` | `GET /capture/occupancy`(id 제거). LLM off면 빈 배열 → 프론트 `occupancy.js` 결정형 판정으로 폴백(이미 순수 컴포넌트 `occupancy.js:14`) |
+| `app.js:1974` `loadParkingSlots` | `GET /capture/runs/${runId}/slots`, `r.presetKey` | `GET /capture/slots`. 응답에 `presetKey`(`cam_id:preset_id`) 파생 포함, `slotIdx→slotId` |
+| `app.js:2213` 분석탭 폴백 | `GET /capture/runs`→`runs[0].id` | runId 개념 제거, 폴백 삭제 |
+| `app.js:2568-2610` DB탭 | `GET /db/tables`, `/db/table/:name` | 테이블 목록이 신 6테이블로 자동 변경(화이트리스트 sqlite_master 기반이라 코드 무변경, §4 마스킹만 추가) |
+| `state.lastRunId` 사용부 | 여러 곳 | 인메모리 단일 런 전제로 제거 또는 상수화 |
 
 ---
 
-## 7. 경험적 검증 계획 (개발 goal/loop — B모드)
+## 4. dbRoutes 보안 (password 평문 노출 차단)
 
-**Goal(명문화)**: 실프레임(`data/refframes` 또는 라이브 뷰어)에서 plate 점유 슬롯마다 사다리꼴이 그려지고, ① 어떤 두 사다리꼴도 겹치지 않으며(`overlapPairs=[]` 로그 확인), ② 각 사다리꼴 위/아래 변이 해당 번호판 가로 기울기와 평행하게 보이고, ③ 중심 기준 위쪽이 길며, ④ 폭이 차량 폭을 근사(≈3.5~4×번호판)한다 — 를 스샷 육안 + 수치 로그로 동시 만족.
-
-**이터레이션 절차**:
-1. 구현 → 유닛테스트 통과(§6 게이트).
-2. 오프라인 스샷: `data/refframes` 프레임 + 저장된 detect(있으면)로 `computeOccupancyRegions` 실행 → **sharp SVG→PNG 합성**(사다리꼴+번호판 quad+중심 오버레이) — `_workspace/_qa_*` 스크립트 관례(`_qa_live_roi_overlay.mjs` 참조) 재사용.
-3. 라이브 확인: `SettingAgent> npm start` → `http://localhost:13020/viewer/` 프리셋 순회, `#roi-occupancy` 토글 상태에서 관찰.
-4. 관찰 판정: 겹침(콘솔 overlapPairs)·수평·위길이·폭. 틀어지면 `topWidthRatio → upRatio/downRatio` 순으로 보정(§2-3 튜닝 대상 표기) 후 2로 복귀.
-5. 프레임 떨림 관찰: 라이브 3fps 에서 사다리꼴 크기 요동 여부 — 요동 시 scaleQuantum 0.05→0.1 상향 검토.
-
-**성공 판정 기준**: 전 프리셋 스샷에서 겹침 0건 + 시각 항목 3개 충족 + 유닛테스트 전량 통과 → qa/documenter 단계로 이관. 시각 판단이 애매한 프레임은 스샷을 증거로 마스터 보고.
-
----
-
-## 8. 영향도 분석
-
-| 영역 | 영향 | 판단 |
-|------|------|------|
-| `test/computeOccupancy.test.ts` | occupied 행 단언은 `toMatchObject`+`toBeCloseTo`, 비점유 행 `toEqual` 은 무변화 → **수정 불요, 통과 유지** | 확인됨(파일 직접 검토) |
-| `test/occupancyJudge.test.ts` | **T1(:53-54)만** base 투영 보정 필요(§5). T2~T9·config 는 bbox/비점유 행 단언 → plateQuad 미부착이라 무영향 | 확인됨 |
-| `test/lpdFilterRegression.test.ts` 등 | `computeOccupancy` 결과를 `{idx, occupied}` 로 투영해 사용 → 무영향 | 확인됨(:79-80, :236) |
-| `web/core.js buildFlatSlotRows(:606)` | `occupied` 만 소비 → 무영향 | 확인됨 |
-| `web/app.js` 최종화 스냅샷(:1929) | `{idx, occupied}` 만 추출 → 서버/DB 계약 무변경 | 확인됨 |
-| `state.occComputeByKey` 소비처 | `spaces[i].region` 은 additive — 기존 렌더·뱃지 로직 무영향 | updateLogicOccupancy/draw 만 접점 |
-| 성능 | 프레임당 O(N²·12) 미세 기하 연산(N≤~30) — 3fps 렌더 루프에서 무시 가능 | §3-3 |
-| 서버(src/)·DB·라우트 | 변경 없음 | — |
+- **문제:** `GET /db/table/camera_info`가 `SELECT *`(`dbRoutes.ts:111`)로 `camera_info.password` 평문을 그대로 반환한다.
+- **설계(컬럼 마스킹):** `registerDbRoutes`에 민감 컬럼 맵을 둔다.
+  ```
+  const SENSITIVE: Record<string, Set<string>> = {
+    camera_info: new Set(['password']),   // 필요 시 rtsp_url/user_id 추가 검토
+  };
+  ```
+  조회 후 rows 후처리(`dbRoutes.ts:110-114` 사이): `name`이 키면 해당 컬럼값을 `row[col] != null ? '****' : null`로 치환.
+- **검색 정합:** 검색(`dbRoutes.ts:100-105`)이 `password` 컬럼에 매칭되면 값은 마스킹되나 매칭은 발생 → 정보 유출(존재 여부). **민감 컬럼을 검색 대상에서 제외**(clauses 생성 시 `SENSITIVE[name]`에 든 컬럼 skip).
+- **범위 최소:** read-only 뷰어 전용이므로 마스킹은 응답 계층 1곳. write 라우트 없음(`dbRoutes.ts:38` "write 라우트 없음").
+- **검증:** vitest — `camera_info`에 password 있는 fixture DB → `/db/table/camera_info` 응답 rows[].password === '****', 다른 테이블 무영향, 검색어가 password 값과 일치해도 행 비노출.
 
 ---
 
-## 9. 리스크와 대응
+## 5. 마이그레이션 설계 (1회성 이관 스크립트)
 
-| 리스크 | 대응 |
-|--------|------|
-| OBB 점 순서 반전(180°) 입력 → 사다리꼴이 아래로 김 | §2-1 v̂.y 부호 정규화(T15 로 봉인) |
-| 번호판이 ~90° 회전 검출(v̂.y≈0) | 드묾. 정규화 미적용(있는 그대로) — goal/loop 관찰에서 문제 시 후속 |
-| topWidthRatio 방향(위가 좁음)이 마스터 의도와 다를 가능성 | 파라미터 1개 전환(1.0 초과도 허용되는 통합 모델) — goal/loop 스샷으로 마스터 확인, 기본 0.85 의 근거는 원근(§0 R2) |
-| 프레임간 배율 떨림 | scaleQuantum 스냅(무상태). 잔존 시 후속: quantum 상향 → 그래도면 hysteresis(상태 도입) 별도 과제 |
-| 2단계 폴백 20회 후에도 겹침(중심 밀착 오검출) | 표시는 유지 + `overlapPairs` 보고·console.warn 1회 — R1 위반을 숨기지 않고 드러냄 |
-| 밀집 주차장에서 이웃 slot 차량과 시각적 침범(비겹침이어도 남의 차 위) | 사다리꼴은 "점유 표시"이지 정밀 세그먼트가 아님 — 요구 범위. 정밀화는 VPD seg 마스크(기존 기능)와의 결합 후속 |
+**스크립트 위치 제안:** `src/tools/migrateToSettingDb.ts` (기존 `src/tools/exportCamerapos.ts` 패턴). 입력 파일 → 신 DB(`data/setting.sqlite`).
+
+### 5.1 이관 소스 → 테이블
+| 소스 | → 테이블 | 매핑 | 근거 |
+|---|---|---|---|
+| (상수) | place_info | `{place_id:1, place_name:'Place01'}` | my_db_table §4 "현재 무조건 1" |
+| PtzCamRoi.json `cameras[].camera` | camera_info | cam_id, img_w=imageWidth, img_h=imageHeight. name/url/user/pw/rtsp/company=NULL(자동탐색 미보유), cam_type='ptz', place_id=1 | `PtzCamRoi.json:5-19` |
+| camerapos.json `datas[].datas[]` | preset_pos | cam_id, preset_id, sname, pan, tilt, zoom | `camerapos.json:8-30` |
+| PtzCamRoi.json `presets[].parking_spaces[]` | slot_setup | slot_id=`normalizeGlobalIdx`, cam_id, preset_id, preset_slotidx=배열순 1-based, slot_roi=정규화 4점 | `placeRoi.ts:75,92` |
+| slot_ptz.json(`data/slot_ptz.json`) + `centering_slot`(구 DB 1행) | slot_setup(UPDATE) | 매칭키 `(cam_id,preset_id,preset_slotidx)` 또는 slotId 문자열 → pan/tilt/zoom/centered=1/img1 | `slotPtzWriter.ts`, `PtzCalibrator.ts:207` |
+
+### 5.2 구 DB(observations.BACKUP_20260718.sqlite) 재활용 검토 — 실측 결과
+- **parking_slots 561행:** 33개 서로 다른 run_id에 걸친 스냅샷(런당 ≈17행), `slot_idx`는 **0-based per-preset**(0..17), `pan/tilt/zoom`은 **전부 NULL**, `occupied`는 런별 관측값. → **정본 기하로 부적합**. 이유: (a) run 스코프라 "슬롯당 1행" 불변식 위반, (b) slot_idx가 전역번호가 아님, (c) occupied는 셋업 기하가 아니라 시점 점유(→ parking_evnt 도메인, ActionAgent). **slot_setup으로 이관하지 않는다.** slot_roi 기하는 PtzCamRoi.json이 정본이므로 손실 없음.
+- **centering_slot 1행(`c1p2s1`, cam1/preset2/slot1, pan≈51.54/tilt≈9.37/zoom≈14.40):** 유효한 센터라이징 PTZ → **slot_setup으로 살린다**. 매칭: cam_id=1, preset_id=2, preset_slotidx=1 → 해당 slot_setup 행 UPDATE(pan/tilt/zoom, centered=1). (`data/slot_ptz.json`이 있으면 그쪽이 더 풍부하니 우선, 없으면 이 1행.)
+
+### 5.3 slot_id 전역 체계 도출 (재확인)
+- `normalizeGlobalIdx(normalizePtzCamRoi(PtzCamRoi.json).byPreset)` → cam→preset→배열순 1..N. 현재 PtzCamRoi.json은 **cam1만** 존재하므로 slot_setup은 cam1 프리셋들의 슬롯만 채워진다(§8 불일치 참조).
+
+### 5.4 검증
+- vitest: 소형 PtzCamRoi/camerapos fixture → 마이그레이션 → slot_setup 행수 = Σ parking_spaces, slot_id 1..N 유일, preset_pos 행수 = camerapos 프리셋 수, FK 무결성(PRAGMA foreign_key_check 빈 결과).
+- 리더 경험적: 실제 파일로 스크립트 실행 → `SELECT COUNT(*)` 및 `PRAGMA foreign_key_check` 무결.
 
 ---
 
-## 10. 미해결/가정 사항 (마스터 확인 항목 — 권장 기본값으로 진행)
+## 6. LLM 정리 설계
 
-1. **"위가 길다"** = 세로 연장(해석 a) 채택, 위 변 폭은 원근상 좁게(0.85). 두 값 모두 파라미터라 스샷 확인 후 즉시 반영 가능. → **권장 기본값으로 진행, goal/loop 스샷에서 확정.**
-2. **bbox 폴백은 사다리꼴 미표시**(번호판 없음 = 축 없음). → 필요 시 후속 요구로.
-3. **UI 파라미터 노출 없음**(코드 기본값만). → 요구 시 후속.
+### 6.1 occupancy.yaml 축소 (points_2d 제거, occupied bool만)
+- **코드 사실:** 파싱은 이미 좌표 optional이다 — `OccupancyRawSpaceSchema`(`SetupBrain.ts:133-138`)의 `points_2d/bbox_2d`가 `.optional()`, `AgentRuntime.judgeOccupancy`(`AgentRuntime.ts:310-316`)가 폴리곤 부재를 graceful 처리. → **스키마·파싱 코드 변경 0**, 프롬프트만 축소하면 된다.
+- **Finalizer 소비:** `occupancyAgreement`는 `id/occupied`만 대조(`Finalizer.ts:156-160`) → occupied만 있어도 동작. 소스만 인메모리(§2.3).
+- **축소 프롬프트 초안(`config/prompts/occupancy.yaml` 교체):**
+  ```yaml
+  # 점유 여부만 판정(좌표 미요구). judgeOccupancy 가 system+user 로 사용.
+  # {{camIdx}} {{presetIdx}} {{imgW}} {{imgH}} {{expected}} 치환.
+  system: |
+    You judge parking occupancy in a downward-tilted CCTV view ({{imgW}}x{{imgH}}).
+    For EACH visible painted parking slot, decide ONLY whether a vehicle occupies it.
+    Do NOT output coordinates. Do NOT compute percentages. occupied flag only.
+    Number slots left->right, top row first, 1-based id. If none visible, spaces=[].
+    Output STRICT JSON only (no prose/fence):
+    {"spaces":[{"id":1,"occupied":true}],"confidence":0.0}
+  user: |
+    camera={{camIdx}} preset={{presetIdx}} image={{imgW}}x{{imgH}}px expected(hint)={{expected}}
+    Return every visible slot's id and occupied flag per the JSON schema. No coordinates.
+  ```
+
+### 6.2 프롬프트 아카이브 이동 (`config/prompts/_archive/`, 물리 삭제 아님)
+| 파일 | 사유 |
+|---|---|
+| `stage1_preset_judge.system.md` / `.user.md` | stage1 off |
+| `stage2_dedupe_label.system.md` / `.user.md` | stage2 off |
+| `stage3_final_report.system.md` / `.user.md` | stage3 off |
+| `floor_roi.yaml` | floorRoi off(결정형 폴백만) |
+| `floor_roi_origin_01.yaml` / `floor_roi_origin_02.yaml` / `floor_roi.en_box.draft.yaml` | floor_roi 실험본(미사용) |
+| `ptz_centering.yaml` | adviseCentering 死코드 |
+| **유지:** `occupancy.yaml`(축소본) | 보조 점유(잔존) |
+
+### 6.3 llm.config.json 토글 변경
+| 키 | 현재(`llm.config.json`) | 변경 |
+|---|---|---|
+| `setupPrompts.stage1Enabled` | true(`:88`) | **false** |
+| `setupPrompts.stage2Enabled` | true(`:89`) | **false** |
+| `setupPrompts.stage3Enabled` | true(`:90`) | **false** |
+| `floorRoi.enabled` | true(`:96`) | **false** |
+| `occupancy.enabled` | true(`:102`) | **true 유지**(축소 보조) |
+| `centering` 블록 | 존재(`:106-108`) | **제거**(adviseCentering 死코드 삭제와 동반) |
+| (경로) stage1/2/3·floorRoi.prompt | 활성 경로 | `_archive/` 경로로 갱신(또는 enabled=false라 무해하지만 정합 위해 갱신) |
+
+### 6.4 死코드 처리 (adviseCentering)
+- **확인:** `adviseCentering`는 `AgentRuntime.ts:331`에만 구현, `SetupBrain.ts:214`에 optional 선언, **호출자 0**(grep: PtzCalibrator/platePtz는 미참조 — 센터라이징은 `platePtz.ts:188` 순수 P제어, LLM import 0). → 死코드 확정.
+- **처리:** `AgentRuntime.adviseCentering`(`:331-343`), `SetupBrain.ts`의 `CenteringAdviceInput/CenteringAdviceSchema/CenteringAdvice/adviseCentering?`(`:178-214`), `calibrate/types.ts:54` `CenteringAdvice`, `llmConfig.ts:91-95` `CenteringSchema` + `LlmConfigSchema.centering`(`:123`) 삭제. `ptz_centering.yaml` 아카이브.
+- **주의:** 삭제 전 `import` 고아 정리(`AgentRuntime.ts:19,25,26`의 CenteringAdvice* import). CLAUDE.md 규칙 3(고아 import 제거) 적용.
+
+### 6.5 캡처 루프 LLM 제거에 따른 컴포넌트 정리
+- `CheckpointReviewer`(status merged/rejected): LLM off면 전부 candidate 유지(무효과) → 캡처 루프에서 **제거**(`CaptureJob.ts:489-499`, index.ts:52,65). `judgePreset/dedupeAndLabel/finalReport/reviewCheckpoint/finalizeCapture`는 AgentRuntime에 남기되(공유 계약 오염 회피) 캡처 배선에서 분리 — 삭제 여부는 리더 판단(§8). **최소안: 배선만 제거, 메서드 잔존**(단순함 vs 死코드 트레이드오프 명시).
+- `FloorRoiReviewer`: floor 발자국은 Finalizer가 `buildPlateAnchoredQuad` 결정형으로 항상 생성(`Finalizer.ts:320,344`) → 캡처 루프 floor 계산 **제거**(`CaptureJob.ts:502-511`, index.ts:53-55,65).
+- `OccupancyReviewer`: 축소 보조로 **인메모리 저장 버전으로 축소**(insertOccupancy→occByPreset.set). LLM off면 no-op. finalize agreement 소스로만 사용(§2.3).
 
 ---
 
-## 다음 단계(구현자 인계)
+## 7. 작업 순서와 검증 게이트 (파괴적 — 단계별 롤백 지점)
 
-```
-1. web/occupancyRegion.js/.d.ts 작성(§2~§4)            → 검증: T1~T12, T15
-2. core.js/occupancy.js plateQuad additive 확장(§5)    → 검증: T13~T14 + 기존 테스트 전량(occupancyJudge T1 투영 보정 포함)
-3. app.js 배선(updateLogicOccupancy/drawOccupancyOverlay) → 검증: tsc+vitest 게이트 → §7 goal/loop 스샷 이터레이션
-```
+> 롤백 안전판: 신 DB 파일(`data/setting.sqlite`)을 쓰므로 구 `data/observations.sqlite`는 마지막까지 무손상. `capture.dbFile` 한 줄 원복으로 전체 롤백.
+
+| 단계 | 작업 | 검증(게이트) | 롤백 지점 |
+|---|---|---|---|
+| P0 | 신 6테이블 DDL + `SqliteStore` 전면 재작성(구 메서드 삭제, 신 메서드) | **vitest**: 스키마 생성, `foreign_keys=ON` 확인, FK 위반 INSERT 거부, `replaceSlotSetup` 트랜잭션 원자성(중간 throw 시 이전 행 보존) | 신 파일 미사용 시 무영향 |
+| P1 | 마이그레이션 스크립트 | **vitest**(fixture) + **리더 경험적**: 실파일 실행 → 행수·`foreign_key_check` 무결 | 스크립트 재실행(멱등: DELETE후 INSERT) |
+| P2 | `CaptureJob` 인메모리 누적 + `Finalizer` snapshot 입력 + reviewer 배선 정리 | **vitest**: 인메모리 aggregate 결과가 구 DB경로와 동일(파리티), finalize가 `slot_setup` 전량 교체·실패 롤백 | P2 코드 revert |
+| P3 | REST 라우트 재편(runs/occupancy/slots/aggregate/finalize) + 뷰어 fetch 경로 | **vitest**(라우트) + **리더 경험적**: `npm run dev`→ `curl /capture/status`,`/capture/slots`,`/db/tables`; 뷰어 DB탭·최종화 표시 확인 | 라우트 파일 revert |
+| P4 | dbRoutes password 마스킹 | **vitest**: camera_info password '****', 검색 제외 | 독립 — revert 용이 |
+| P5 | LLM 정리(occupancy.yaml 축소, 프롬프트 아카이브, 토글, adviseCentering 삭제) | **vitest**: 축소 프롬프트로 judgeOccupancy 파싱 성공, config 로드 OK, adviseCentering 참조 0(grep) + **리더**: 캡처 1런에 LLM 호출 로그 없음 | config·프롬프트 원복 |
+
+**리더 경험적 검증이 필수인 지점:** P1(실데이터 이관), P3(서버 기동·curl·뷰어), P5(캡처 중 LLM 미호출 확인). 나머지는 vitest로 성공 확정.
+
+---
+
+## 8. 미해결 · 리스크 (은닉 금지 — 리더 확인 요청)
+
+1. **cam2 데이터 부재(정합 불가):** `preset.json`은 `{camIdx:2, idx:1, faceCount:1}`(`preset.json:6`)로 cam2를 기대하나, `camerapos.json`엔 cam1 preset1~3만(`camerapos.json:8-30`), `PtzCamRoi.json`엔 cam1만 존재. → cam2는 preset_pos·slot_setup을 **채울 수 없다**. 마이그레이션은 cam1만 생성. **질문:** cam2를 이번 범위에서 제외(권장)할지, 별도 데이터 확보 후 진행할지?
+2. **slot_id 전역 정렬 규칙 불일치 가능성:** `setup_artifact.globalIndex.globalIdx`는 `buildGlobalIndex`(cam→preset→**orderByPosition 위치**→slotId, `GlobalIndexer.ts:17-23`)로, `slot_setup.slot_id`는 `normalizeGlobalIdx`(cam→preset→**parking_spaces 배열순**, `placeRoi.ts:92`)로 부여된다. 두 순서가 다르면 **동일 슬롯의 globalIdx ≠ slot_id**가 될 수 있다. 현재 `setup_artifact.json`은 비어 있어(presets/slots/globalIndex 전부 `[]`) 즉시 충돌은 없으나, 재-finalize 시 두 체계가 어긋날 위험. **설계 제안:** 정본을 `normalizeGlobalIdx`(PtzCamRoi 배열순)로 단일화하고 `buildGlobalIndex`도 동일 순서를 쓰도록 정렬키를 맞춘다. **질문:** 이 단일화를 이번 범위에 포함할지?
+3. **PtzCamRoi.json 부분 정본화:** slot ROI/preset PTZ의 정본은 DB로 전환하되, ground-model이 읽는 카메라 기하(position/euler/fov)는 PtzCamRoi.json에 잔존(§1.7). "DB 정본" 완결은 ground-model 읽기 경로 이관까지 필요 → **후속 과제**로 분리 제안.
+4. **occupancy 축소 보조의 존치 가치:** 캡처 루프 LLM을 전부 끄면 occupancy도 사실상 유일 잔존 LLM인데, finalize의 `occupancyAgreement`는 best-effort 지표일 뿐이다(`Finalizer.ts:133`). **질문:** occupancy도 완전 off(occupancy.yaml까지 아카이브)할지, 축소 보조로 남길지? 마스터 배경 B.1은 "보조로 남김"으로 읽었으나 확인 요망.
+5. **reviewer 메서드 잔존 vs 삭제:** §6.5에서 AgentRuntime의 stage/checkpoint/finalizeCapture/recognizeFloorRoi 메서드는 배선만 끊고 코드는 남기는 최소안을 제안했다. CLAUDE.md 규칙 2(단순함)·3(死코드 미삭제 원칙 — 요청 없으면 남김)이 상충 → **배선 제거만 하고 메서드는 유지**(요청 범위 밖 삭제 금지)를 기본안으로 함. 전면 삭제 원하면 지시 요망.
+6. **뷰어 runId 의존 잔재:** `state.lastRunId`가 app.js 다수 지점에서 쓰인다. run_id 제거 시 뷰어 상태모델을 "단일 현재 셋업"으로 축소해야 하며, 회귀 위험(오버레이/분석탭). P3에서 리더 경험적 검증 필수.
+7. **parking_evnt/parking_slot 무소비:** 스키마만 생성(배경 A.5). FK가 slot_setup에 걸리므로 slot_setup이 먼저 채워져야 이후 ActionAgent가 이벤트를 넣을 수 있다(생성 순서는 DDL 순서로 보장).
+8. **`img1` 실경로 정책 미정:** slot_setup.img1(센터라이징 스샷)·parking_evnt.img1/img2의 저장 루트·명명 규칙 미정의. 이번엔 컬럼만 두고 writer는 후속(스키마 생성만).
+
+---
+
+## 부록 A. 영향 받는 파일/모듈 (구현자·문서화 전달용)
+
+**핵심 재작성:**
+- `src/capture/SqliteStore.ts` — 전면 재작성(구 10테이블·메서드 삭제, 신 6테이블·메서드).
+- `src/capture/types.ts` — Run/Observation/Detection/AggregatedSlot(유지)·ParkingSlotRow/CenteringSlotRow → SlotSetupRow/SlotSetupView 로 교체.
+- `src/capture/CaptureJob.ts` — 인메모리 누적, DB 중간기록 제거, reviewer 배선 정리.
+- `src/capture/Finalizer.ts` — snapshot 입력, `replaceSlotSetup`, artifact_snapshot·checkpoints 제거.
+- `src/index.ts` — 조립부(reviewer 3종 배선, dbFile) 갱신(`index.ts:50-93`).
+
+**REST/뷰어:**
+- `src/api/captureRoutes.ts` — runs/aggregate/occupancy/slots/finalize 재편.
+- `src/api/dbRoutes.ts` — password 마스킹 + 검색 제외.
+- `web/app.js`, `web/core.js` — fetch 경로·응답 shape 정합(§3.3).
+
+**캘리브레이션:**
+- `src/calibrate/PtzCalibrator.ts` — `upsertCenteringSlots`→`upsertSlotCentering`(slot_id 키), cam_id/preset_id 명명.
+
+**LLM:**
+- `config/llm.config.json` — 토글·centering 블록.
+- `config/prompts/occupancy.yaml`(축소) + `config/prompts/_archive/`(이동 8종).
+- `src/brain/AgentRuntime.ts`, `src/brain/SetupBrain.ts`, `src/calibrate/types.ts`, `src/config/llmConfig.ts` — adviseCentering/CenteringAdvice 삭제.
+
+**마이그레이션(신규):**
+- `src/tools/migrateToSettingDb.ts` — 1회성 이관.
+
+**설정:**
+- `config/tools.config.json`(또는 기본값 `toolsConfig.ts:274`) — `capture.dbFile = data/setting.sqlite`.
+
+## 부록 B. MCP 도구 vs LLM 두뇌 경계 판단
+- **결정형(도구):** DDL/CRUD, 마이그레이션, `slot_setup` 트랜잭션 교체, 집계(`aggregate`), floor 발자국(`buildPlateAnchoredQuad`), 센터라이징(`platePtz.centerOnPlate` 순수 P제어), 점유 기하판정(`pointInPolygon`, `Finalizer.ts:237`). → **전부 결정형 유지·강화**.
+- **LLM 두뇌:** occupancy occupied 판정만 축소 보조로 잔존(모호·시각 맥락). floor/checkpoint/stage/centering 자문은 **결정형이 정본이므로 LLM 불필요** → off/아카이브.
+- 본 개편의 방향성은 "경계를 LLM에서 결정형으로 이동"으로, MCP 경계 규약(실시간·수치반복 루프=도구)에 부합.

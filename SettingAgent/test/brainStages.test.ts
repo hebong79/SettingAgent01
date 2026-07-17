@@ -48,9 +48,9 @@ function cfg(over?: Partial<LlmConfig['setupPrompts']>): LlmConfig {
       stage1Enabled: true,
       stage2Enabled: true,
       stage3Enabled: true,
-      stage1: pair('config/prompts/stage1_preset_judge.system.md'),
-      stage2: pair('config/prompts/stage2_dedupe_label.system.md'),
-      stage3: pair('config/prompts/stage3_final_report.system.md'),
+      stage1: pair('config/prompts/_archive/stage1_preset_judge.system.md'),
+      stage2: pair('config/prompts/_archive/stage2_dedupe_label.system.md'),
+      stage3: pair('config/prompts/_archive/stage3_final_report.system.md'),
       ...over,
     },
   };

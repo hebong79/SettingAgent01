@@ -8,16 +8,17 @@ import type { LpdClient, PlateBox } from '../src/clients/LpdClient.js';
 import type { Repository } from '../src/store/Repository.js';
 import type { ToolsConfig } from '../src/config/toolsConfig.js';
 import type { SetupArtifact } from '../src/domain/types.js';
+import type { SlotSetupRow } from '../src/capture/types.js';
 import { rectToQuad, quadBoundingRect } from '../src/domain/geometry.js';
 import type { SlotPtzArtifact, Ptz } from '../src/calibrate/types.js';
 import type { PlatePtzOpts, PlatePtzResult } from '../src/calibrate/platePtz.js';
 
 /**
- * 검증자(qa-tester): 센터라이징(PtzCalibrator→PlatePtz 위임 + centering_slot 이중 저장).
- * 설계서 `_workspace/centering/01_architect_plan.md` §9 테스트 명세 T1~T13.
- *
- * 기존 `ptzCalibrator.test.ts`(수렴·순서·미검출·다수판·중복시작)는 회귀 스위트로 별도 유지 —
- * 이 파일은 **이번 변경분 고유 계약**(체이닝·prior 갱신·시작PTZ·reason 매핑·DB 미러)만 다룬다.
+ * 검증자(qa-tester): 센터라이징(PtzCalibrator→PlatePtz 위임 + slot_setup 센터라이징 미러).
+ * ★ DB 개편: 구 upsertCenteringSlots/getCenteringSlots(문자열 slotId + pos JSON) → 신 upsertSlotCentering
+ *   (정수 slot_id=globalIdx + 분해 pan/tilt/zoom, 부분 UPDATE). slot_setup 이 **먼저 존재**해야 UPDATE 반영.
+ * 비-DB 계약(T1~T6·T9·체이닝·prior·reason 매핑)은 변경 없음 — 회귀 유지.
+ * upsertSlotCentering 단위(구 T12)는 sqliteStore.test.ts 로 이관(중복 제거).
  */
 
 const cfg: ToolsConfig['calibrate'] = {
@@ -26,7 +27,7 @@ const cfg: ToolsConfig['calibrate'] = {
   settleMs: 0, outFile: 'data/slot_ptz.json',
 };
 
-/** plateRoiByPreset 1슬롯 fixture(prior 0.62/0.62 — T1 의 "센터링 前 prior" 대조군). */
+/** plateRoiByPreset 1슬롯 fixture(globalIdx=7). */
 function artifact(): SetupArtifact {
   return {
     createdAt: 'T', presets: [],
@@ -39,7 +40,7 @@ function artifact(): SetupArtifact {
   };
 }
 
-/** 2슬롯 fixture(T10 부분 캘리브레이션용). */
+/** 2슬롯 fixture(globalIdx 1,2 — 부분 캘리브레이션·zip 정렬용). */
 function artifact2(): SetupArtifact {
   return {
     createdAt: 'T',
@@ -57,6 +58,23 @@ function artifact2(): SetupArtifact {
 
 function repoWith(a: SetupArtifact | null): Repository {
   return { loadArtifact: () => a } as unknown as Repository;
+}
+
+const roi = [{ x: 0.6, y: 0.6 }, { x: 0.7, y: 0.6 }, { x: 0.7, y: 0.65 }, { x: 0.6, y: 0.65 }];
+const slotRow = (slotId: number, presetSlotIdx: number, updatedAt = 'T-seed'): SlotSetupRow => ({
+  slotId, camId: 1, presetId: 1, presetSlotIdx, slotRoi: JSON.stringify(roi),
+  vpdBbox: null, lpdObb: null, occupyRange: null, pan: null, tilt: null, zoom: null,
+  centered: 0, img1: null, updatedAt,
+});
+
+/** slot_setup(+FK 부모) 를 시드한 :memory: 스토어 — upsertSlotCentering 은 기존 행만 UPDATE 하므로 필수 선행. */
+function seededStore(slots: SlotSetupRow[]): SqliteStore {
+  const s = new SqliteStore(':memory:');
+  s.upsertPlaceInfo([{ placeId: 1, placeName: 'P' }]);
+  s.upsertCameraInfo([{ camId: 1, camName: null, camUuid: null, url: null, userId: null, password: null, rtspUrl: null, camType: 'ptz', camCompany: null, placeId: 1, imgW: 1000, imgH: 1000, updatedAt: 'T' }]);
+  s.upsertPresetPos([{ camId: 1, presetId: 1, sname: null, pan: 0, tilt: 0, zoom: 1, updatedAt: 'T' }]);
+  s.replaceSlotSetup(slots);
+  return s;
 }
 
 /** ptzCalibrator.test.ts 와 동일한 모킹 물리(명령 PTZ → 번호판 위치/폭). */
@@ -140,22 +158,16 @@ describe('T1 gain 체이닝 · zoom 단계 prior 갱신', () => {
     await waitDone(cal);
 
     expect(f.opts).toHaveLength(2);
-    // 1번째(center) 인스턴스: prior = 타깃의 plateRoi(센터링 前 0.62/0.62)
-    // (quad 왕복 부동소수 오차가 있어 값 근사 비교 — 요점은 "센터링 前 위치"라는 것)
     expect(f.opts[0].plateRoi!.x).toBeCloseTo(0.62, 6);
     expect(f.opts[0].plateRoi!.y).toBeCloseTo(0.62, 6);
-    expect(f.opts[0].gain).toBeUndefined(); // center 는 probe 로 자가 측정 — gain 주입 없음
+    expect(f.opts[0].gain).toBeUndefined();
 
-    // ★ 2번째(zoom) 인스턴스: 실측 게인 체이닝(동일 참조)
     expect(f.opts[1].gain).toBe(okCenter.gain);
-    // ★ 설계서 §7 함정: prior 는 center 결과 boundingRect(0.47/0.48) — t.plateRoi(0.62/0.62) 아님
     expect(f.opts[1].plateRoi).toEqual(quadBoundingRect(CENTERED_PLATE.quad));
     expect(f.opts[1].plateRoi!.x).toBeCloseTo(0.47, 3);
     expect(f.opts[1].plateRoi!.y).toBeCloseTo(0.48, 3);
-    // 두 prior 가 실제로 다른 위치여야 함(갱신되지 않으면 이 단언이 깨진다)
     expect(f.opts[1].plateRoi!.x).not.toBeCloseTo(f.opts[0].plateRoi!.x, 3);
 
-    // zoom 시작 PTZ = center 결과 ptz(동일 참조 — 명령 PTZ 연속성)
     expect(f.zoomCalls).toHaveLength(1);
     expect(f.zoomCalls[0].startPtz).toBe(okCenter.ptz);
     expect(f.zoomCalls[0].camIdx).toBe(1);
@@ -190,7 +202,6 @@ describe('T3 시작 PTZ = 프리셋 정본(resolvePresetPtz)', () => {
       requestImage: m.camera.requestImage.bind(m.camera),
     } as unknown as CameraClient;
     const { cal, moves } = makeCalibrator({ camera, lpd: m.lpd });
-    // moves 는 m.moves 를 공유해야 하므로 직접 참조
     cal.start();
     await waitDone(cal);
     expect(m.moves[0]).toEqual({ pan: 22, tilt: 6.8, zoom: 1.69341 });
@@ -250,7 +261,6 @@ describe('T5 reason 매핑 4종', () => {
   });
 
   it('zoom_saturated — 중심은 맞았으나 zoom 상한에서 폭 미달', async () => {
-    // 항상 화면 중앙·극소폭 → center 즉시 성공(iterations 0), zoom 은 clamp 상한(=1)이라 상승 불가.
     const camera = {
       clampZoom: () => 1,
       requestImage: async () => ({ camIdx: 1, presetIdx: 1, pan: 0, tilt: 0, zoom: 1, imgName: 'x', jpg: Buffer.from('i') }),
@@ -263,13 +273,11 @@ describe('T5 reason 매핑 4종', () => {
     await waitDone(cal);
     const it0 = getSaved()!.items[0];
     expect(it0.reason).toBe('zoom_saturated');
-    expect(it0.centered).toBe(true);   // §5-4: centered = c.ok
-    expect(it0.converged).toBe(false); // zoom 실패
+    expect(it0.centered).toBe(true);
+    expect(it0.converged).toBe(false);
   });
 
   it('max_iterations — center 가 상한 소진(보정 무반응)', async () => {
-    // 명령에 무반응하고 항상 같은 위치를 반환하면 예측 prior 가 어긋나 plate_lost 로 빠질 수 있으므로,
-    // "게인은 맞으나 절대 수렴하지 않는" 물리 대신 maxIterations 를 1 로 조여 상한 소진을 강제한다.
     const tightCfg = { ...cfg, maxIterations: 1 };
     const { cal, getSaved } = makeCalibrator({ cfg: tightCfg });
     cal.start();
@@ -281,12 +289,9 @@ describe('T5 reason 매핑 4종', () => {
   });
 });
 
-// ── T6: center 실패 시 zoom 미시도(설계서 §3 의미 변화) ──
+// ── T6: center 실패 시 zoom 미시도 ──
 describe('T6 center 실패 → zoom 미시도', () => {
   it('centerOnPlate ok:false 면 zoomToPlateWidth 호출 0회', async () => {
-    // ★ plate 는 **non-null** 이어야 한다 — 실제 PlatePtz 의 max_iterations/plate_lost 반환은
-    //   마지막 관측 plate 를 싣는다(platePtz.ts:228·250). plate:null 로 두면 가드의 `!c.plate`
-    //   절만 타서 `!c.ok`(설계서 §3 의 의미 변화 본체)가 검증되지 않는다 — 뮤테이션 M3 로 실증됨.
     const failCenter: PlatePtzResult = {
       ok: false, ptz: { pan: 1, tilt: 2, zoom: 3 }, plate: CENTERED_PLATE, err: { errX: 0.2, errY: 0.2 },
       plateWidth: null, gain: GAIN, iterations: 15, reason: 'max_iterations',
@@ -295,14 +300,14 @@ describe('T6 center 실패 → zoom 미시도', () => {
     const { cal, getSaved } = makeCalibrator({ makePlatePtz: f.make });
     cal.start();
     await waitDone(cal);
-    expect(f.zoomCalls).toHaveLength(0);   // ★ zoom 미시도
-    expect(f.opts).toHaveLength(1);        // zoom 인스턴스 자체가 생성되지 않음
+    expect(f.zoomCalls).toHaveLength(0);
+    expect(f.opts).toHaveLength(1);
     const it0 = getSaved()!.items[0];
     expect(it0.converged).toBe(false);
     expect(it0.centered).toBe(false);
     expect(it0.reason).toBe('max_iterations');
-    expect(it0.ptz).toEqual({ pan: 1, tilt: 2, zoom: 3 }); // 실패 지점의 명령 PTZ(복구 재료)
-    expect(it0.plateWidth).toBe(0);        // §5-4: null → 0
+    expect(it0.ptz).toEqual({ pan: 1, tilt: 2, zoom: 3 });
+    expect(it0.plateWidth).toBe(0);
   });
 
   it('no_plate(plate:null) 도 zoom 미시도', async () => {
@@ -319,30 +324,30 @@ describe('T6 center 실패 → zoom 미시도', () => {
   });
 });
 
-// ── T7: DB 멱등(2회 실행) ──
-describe('T7 DB 멱등', () => {
-  it('동일 잡 2회 실행 → 행수 불변, pos JSON 이 item.ptz 와 일치', async () => {
-    const store = new SqliteStore(':memory:');
+// ── T7: slot_setup 센터라이징 미러 멱등(2회 실행) ──
+describe('T7 slot_setup 센터라이징 미러 멱등 + 경계면 교차', () => {
+  it('동일 잡 2회 → 행수 불변, slot_setup pan/tilt/zoom == item.ptz(정수 slot_id 매핑)', async () => {
+    const store = seededStore([slotRow(1, 1), slotRow(2, 2)]);
     const { cal, getSaved } = makeCalibrator({ store }, artifact2());
     cal.start();
     await waitDone(cal);
-    const first = store.getCenteringSlots();
+    const first = store.getSlotSetup();
     expect(first).toHaveLength(2);
+    expect(first.filter((r) => r.centered)).toHaveLength(2); // 두 슬롯 모두 센터라이징 반영
 
     const { cal: cal2 } = makeCalibrator({ store }, artifact2());
     cal2.start();
     await waitDone(cal2);
-    const second = store.getCenteringSlots();
-    expect(second).toHaveLength(2); // 중복 0
+    const second = store.getSlotSetup();
+    expect(second).toHaveLength(2); // 중복 0(replaceSlotSetup 아닌 UPDATE — 행수 불변)
 
-    // 경계면: DB pos ↔ JSON item.ptz shape 교차 비교
-    const item = getSaved()!.items.find((i) => i.slotId === 'c1p1s1')!;
-    const row = second.find((r) => r.slotId === 'c1p1s1')!;
-    expect(JSON.parse(row.pos)).toEqual(item.ptz);
-    expect(Object.keys(JSON.parse(row.pos)).sort()).toEqual(['pan', 'tilt', 'zoom']);
-    // 1-based 규약
-    expect(row.camIdx).toBe(1);
-    expect(row.presetIdx).toBe(1);
+    // 경계면: slot_setup 분해 PTZ ↔ JSON item.ptz shape 교차 비교(정수 slot_id=globalIdx 매핑).
+    const item = getSaved()!.items.find((i) => i.globalIdx === 1)!;
+    const row = second.find((r) => r.slotId === 1)!;
+    expect({ pan: row.pan, tilt: row.tilt, zoom: row.zoom }).toEqual(item.ptz);
+    // 1-based 규약 유지.
+    expect(row.camId).toBe(1);
+    expect(row.presetId).toBe(1);
     expect(row.presetSlotIdx).toBe(1);
   });
 });
@@ -371,110 +376,77 @@ describe('T9 presetSlotIdx 도출', () => {
       ],
     };
     const targets = expandPlateTargets(a);
-    expect(targets.find((t) => t.slotId === 'b')!.presetSlotIdx).toBe(2); // 1-based
+    expect(targets.find((t) => t.slotId === 'b')!.presetSlotIdx).toBe(2);
     expect(targets.find((t) => t.slotId === 'zz')!.presetSlotIdx).toBeNull();
   });
 
   it('프리셋 자체가 없으면 null(0/−1 발명 금지)', () => {
-    const targets = expandPlateTargets(artifact()); // presets: []
+    const targets = expandPlateTargets(artifact());
     expect(targets[0].presetSlotIdx).toBeNull();
   });
 });
 
-// ── T10: 부분 캘리브레이션 — 타깃 외 행 보존 ──
-describe('T10 부분 캘리브레이션 delete 범위', () => {
-  it('2슬롯 전량 → 2행. 슬롯1만 재실행 → 여전히 2행, 타 행 updated_at 불변', async () => {
-    const store = new SqliteStore(':memory:');
+// ── T10: 부분 캘리브레이션 — 타깃 외 슬롯 불변 ──
+describe('T10 부분 캘리브레이션 UPDATE 범위', () => {
+  it('2슬롯 전량 → 2행 갱신. 슬롯1만 재실행 → 여전히 2행, 타 슬롯 updated_at·centered 불변', async () => {
+    const store = seededStore([slotRow(1, 1), slotRow(2, 2)]);
     const { cal } = makeCalibrator({ store, now: () => 'T-first' }, artifact2());
     cal.start();
     await waitDone(cal);
-    const before = store.getCenteringSlots();
-    expect(before).toHaveLength(2);
-    expect(before.every((r) => r.updatedAt === 'T-first')).toBe(true);
+    const before = store.getSlotSetup();
+    expect(before.every((r) => r.centered && r.updatedAt === 'T-first')).toBe(true);
 
-    // 슬롯1만 부분 재실행(now 를 바꿔 갱신 여부 식별)
+    // 슬롯1(globalIdx=1)만 부분 재실행.
     const { cal: cal2 } = makeCalibrator({ store, now: () => 'T-second' }, artifact2());
     cal2.start(['c1p1s1']);
     await waitDone(cal2);
 
-    const after = store.getCenteringSlots();
-    expect(after).toHaveLength(2); // ★ 타깃 외 행 전멸 금지
-    expect(after.find((r) => r.slotId === 'c1p1s1')!.updatedAt).toBe('T-second'); // 대상만 갱신
-    expect(after.find((r) => r.slotId === 'c1p1s2')!.updatedAt).toBe('T-first');  // ★ 타 행 불변
+    const after = store.getSlotSetup();
+    expect(after).toHaveLength(2); // ★ 타 슬롯 전멸 금지
+    expect(after.find((r) => r.slotId === 1)!.updatedAt).toBe('T-second'); // 대상만 갱신
+    expect(after.find((r) => r.slotId === 2)!.updatedAt).toBe('T-first');  // ★ 타 슬롯 불변
+    expect(after.find((r) => r.slotId === 2)!.centered).toBe(true);        // 1회차 값 유지
   });
 });
 
 // ── T11: 실패 슬롯 DB 미저장 + last-known-good 보존 ──
-describe('T11 실패 슬롯 DB 미저장', () => {
-  it('1회차 성공 → 2회차 no_plate: JSON 엔 reason, DB 는 1회차 pos 유지', async () => {
-    const store = new SqliteStore(':memory:');
+describe('T11 실패 슬롯 slot_setup 미갱신', () => {
+  it('1회차 성공 → 2회차 no_plate: JSON 엔 reason, slot_setup 은 1회차 PTZ 유지', async () => {
+    const store = seededStore([slotRow(7, 1)]); // artifact() globalIdx=7
     const { cal } = makeCalibrator({ store, now: () => 'T-ok' });
     cal.start();
     await waitDone(cal);
-    const good = store.getCenteringSlots();
+    const good = store.getSlotSetup();
     expect(good).toHaveLength(1);
-    const goodPos = good[0].pos;
+    expect(good[0].centered).toBe(true);
+    const goodPtz = { pan: good[0].pan, tilt: good[0].tilt, zoom: good[0].zoom };
+    expect(goodPtz.pan).not.toBeNull();
 
-    // 2회차: 같은 슬롯이 no_plate
+    // 2회차: 같은 슬롯이 no_plate → converged=false → 미갱신(빈 rows → upsert 미호출).
     const lpd = { detect: async () => [] } as unknown as LpdClient;
     const { cal: cal2, getSaved } = makeCalibrator({ store, lpd, now: () => 'T-fail' });
     cal2.start();
     await waitDone(cal2);
 
-    expect(getSaved()!.items[0].reason).toBe('no_plate'); // JSON 은 실패를 정직하게 기록
-    const after = store.getCenteringSlots();
+    expect(getSaved()!.items[0].reason).toBe('no_plate'); // JSON 은 실패 정직 기록
+    const after = store.getSlotSetup();
     expect(after).toHaveLength(1);
-    expect(after[0].pos).toBe(goodPos);          // ★ 덮어쓰기 없음(last-known-good)
-    expect(after[0].updatedAt).toBe('T-ok');     // ★ 실패가 updated_at 도 건드리지 않음
+    expect({ pan: after[0].pan, tilt: after[0].tilt, zoom: after[0].zoom }).toEqual(goodPtz); // ★ 덮어쓰기 없음
+    expect(after[0].updatedAt).toBe('T-ok'); // ★ 실패가 updated_at 도 건드리지 않음
+    expect(after[0].centered).toBe(true);
   });
 });
 
-// ── T12: upsertCenteringSlots 단위 ──
-describe('T12 upsertCenteringSlots 단위', () => {
-  it('insert / 동일 PK 갱신 / AS 매핑 / NULL presetSlotIdx 왕복', () => {
-    const store = new SqliteStore(':memory:');
-    store.upsertCenteringSlots([
-      { slotId: 'c1p1s1', camIdx: 1, presetIdx: 1, presetSlotIdx: 1, pos: '{"pan":1,"tilt":2,"zoom":3}', updatedAt: 'T1' },
-      { slotId: 'c1p1s2', camIdx: 1, presetIdx: 1, presetSlotIdx: null, pos: '{"pan":4,"tilt":5,"zoom":6}', updatedAt: 'T1' },
-    ]);
-    let rows = store.getCenteringSlots();
-    expect(rows).toHaveLength(2);
-    expect(rows.find((r) => r.slotId === 'c1p1s2')!.presetSlotIdx).toBeNull(); // NULL 왕복
-
-    // 동일 PK 재-upsert → 갱신(행 증가 없음)
-    store.upsertCenteringSlots([
-      { slotId: 'c1p1s1', camIdx: 1, presetIdx: 1, presetSlotIdx: 9, pos: '{"pan":9,"tilt":9,"zoom":9}', updatedAt: 'T2' },
-    ]);
-    rows = store.getCenteringSlots();
-    expect(rows).toHaveLength(2);
-    const r1 = rows.find((r) => r.slotId === 'c1p1s1')!;
-    expect(r1.pos).toBe('{"pan":9,"tilt":9,"zoom":9}');
-    expect(r1.presetSlotIdx).toBe(9);
-    expect(r1.updatedAt).toBe('T2');
-
-    // 같은 slot_id 라도 preset 이 다르면 별도 행(PK 3키) — 복수 프리셋 관측
-    store.upsertCenteringSlots([
-      { slotId: 'c1p1s1', camIdx: 1, presetIdx: 2, presetSlotIdx: 1, pos: '{"pan":0,"tilt":0,"zoom":1}', updatedAt: 'T3' },
-    ]);
-    expect(store.getCenteringSlots()).toHaveLength(3);
-
-    // AS 매핑 shape(스네이크 → 카멜)
-    expect(Object.keys(r1).sort()).toEqual(['camIdx', 'pos', 'presetIdx', 'presetSlotIdx', 'slotId', 'updatedAt']);
-  });
-});
-
-// ── T14(가산): items↔targets zip 정렬 — 슬롯 예외로 어긋나지 않는가 ──
-describe('T14 items↔targets 인덱스 정렬(슬롯 예외 혼재)', () => {
-  it('앞 슬롯이 예외로 실패해도 뒤 슬롯의 presetSlotIdx 가 밀리지 않는다', async () => {
-    const store = new SqliteStore(':memory:');
+// ── T14(가산): items↔globalIdx 매핑 — 슬롯 예외로 어긋나지 않는가 ──
+describe('T14 items↔slot_id 매핑(슬롯 예외 혼재)', () => {
+  it('앞 슬롯이 예외로 실패해도 뒤 슬롯 PTZ 가 자기 slot_id 에 매핑된다(밀림 없음)', async () => {
+    const store = seededStore([slotRow(1, 1), slotRow(2, 2)]);
     const m = makeMockModel();
-    // 슬롯1(c1p1s1) 처리 중 예외 → items[0]=error, 슬롯2(c1p1s2)는 정상 성공.
-    // saveCenteringSlots 가 targets[i] 로 zip 하므로, 정렬이 깨지면 slotIdx 가 1(슬롯1 값)로 오염된다.
     let calls = 0;
     const camera = {
       clampZoom: (z: number) => Math.min(36, Math.max(1, z)),
       requestImage: async (c: number, p: number, ptz?: Partial<Ptz>) => {
-        if (calls++ === 0) throw new Error('transport boom'); // 첫 슬롯 첫 캡처에서 폭발
+        if (calls++ === 0) throw new Error('transport boom'); // 첫 슬롯 첫 캡처 폭발
         return m.camera.requestImage(c, p, ptz);
       },
     } as unknown as CameraClient;
@@ -486,23 +458,22 @@ describe('T14 items↔targets 인덱스 정렬(슬롯 예외 혼재)', () => {
 
     const items = getSaved()!.items;
     expect(items).toHaveLength(2);
-    expect(items[0].reason).toBe('error');   // 예외 흡수
-    expect(items[1].converged).toBe(true);
+    expect(items[0].reason).toBe('error'); // 예외 흡수(globalIdx=1)
+    expect(items[1].converged).toBe(true); // 성공(globalIdx=2)
 
-    // DB 엔 성공한 슬롯2 만, 그리고 presetSlotIdx 는 **2**(자기 순서)여야 한다.
-    const rows = store.getCenteringSlots();
-    expect(rows).toHaveLength(1);
-    expect(rows[0].slotId).toBe('c1p1s2');
-    expect(rows[0].presetSlotIdx).toBe(2); // ★ 1 이면 zip 이 밀린 것
+    // slot_setup: 성공한 슬롯2(slot_id=2)만 센터라이징, 슬롯1(slot_id=1)은 미갱신.
+    const rows = store.getSlotSetup();
+    expect(rows.find((r) => r.slotId === 2)!.centered).toBe(true);
+    expect(rows.find((r) => r.slotId === 1)!.centered).toBe(false); // ★ 밀림 없음(item.globalIdx 매핑)
   });
 });
 
 // ── T13: DB 예외 격리(best-effort) ──
 describe('T13 DB 예외 격리', () => {
-  it('upsertCenteringSlots throw → 잡 done 유지 + JSON 정상', async () => {
+  it('upsertSlotCentering throw → 잡 done 유지 + JSON 정상', async () => {
     const store = {
-      upsertCenteringSlots: () => { throw new Error('db down'); },
-    } as unknown as Pick<SqliteStore, 'upsertCenteringSlots'>;
+      upsertSlotCentering: () => { throw new Error('db down'); },
+    } as unknown as Pick<SqliteStore, 'upsertSlotCentering'>;
     const { cal, getSaved } = makeCalibrator({ store });
     cal.start();
     await waitDone(cal);

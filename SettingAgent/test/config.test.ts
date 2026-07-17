@@ -48,15 +48,25 @@ describe('config 분리', () => {
     expect(real.calibrate.maxIterations).toBe(15);
   });
 
-  it('floorRoi: 기본값은 비활성(하위호환), 실제 config 는 활성', () => {
+  it('floorRoi: 캡처 루프 LLM off — 기본값·실제 config 모두 비활성(설계서 §6.3)', () => {
     // 미설정 경로 → DEFAULT 의 floorRoi(enabled=false).
     const def = loadLlmConfig('config/__nope__.json');
     expect(def.floorRoi?.enabled).toBe(false);
     expect(def.floorRoi?.maxPerCheckpoint).toBe(12);
-    // 실제 config/llm.config.json → enabled=true(gemma 사용).
+    // 실제 config/llm.config.json → LLM 최소화로 floorRoi 도 off(결정형 폴백만). 프롬프트는 _archive/ 로 이동.
     const real = loadLlmConfig();
-    expect(real.floorRoi?.enabled).toBe(true);
-    expect(real.floorRoi?.prompt).toMatch(/floor_roi\.yaml/);
+    expect(real.floorRoi?.enabled).toBe(false);
+    expect(real.floorRoi?.prompt).toMatch(/_archive\/floor_roi\.yaml/);
+  });
+
+  it('occupancy: 축소 보조로 잔존 — 실제 config 는 활성(유일 잔존 LLM, 설계서 §6.1)', () => {
+    const real = loadLlmConfig();
+    expect(real.occupancy?.enabled).toBe(true);
+    expect(real.occupancy?.prompt).toMatch(/occupancy\.yaml/);
+    // stage1/2/3 는 전면 off(캡처 루프 LLM 제거).
+    expect(real.setupPrompts?.stage1Enabled).toBe(false);
+    expect(real.setupPrompts?.stage2Enabled).toBe(false);
+    expect(real.setupPrompts?.stage3Enabled).toBe(false);
   });
 
   // 6.4 store.reportsDir default 계약(정밀수집 결과 reports/ 미러).

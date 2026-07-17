@@ -49,8 +49,7 @@ const StartBodySchema = z.object({
 
 const FinalizeBodySchema = z
   .object({
-    runId: z.number().int().positive().optional(),
-    /** 프론트 로직 점유 스냅샷(옵셔널, R4) — Finalizer 가 LLM 저장분과 1회 비교(best-effort). */
+    /** 프론트 로직 점유 스냅샷(옵셔널, R4) — Finalizer 가 LLM 인메모리 저장분과 1회 비교(best-effort). */
     occupancy: z
       .array(
         z.object({
@@ -248,13 +247,9 @@ export function registerCaptureRoutes(app: FastifyInstance, deps: CaptureRouteDe
       reply.code(409);
       return { error: 'capture still running', state: st.state };
     }
-    const runId = parsed.data.runId ?? deps.job.getRunId() ?? deps.store.listRuns(1)[0]?.id;
-    if (runId === undefined) {
-      reply.code(404);
-      return { error: 'no run to finalize' };
-    }
+    // run_id 폐기(설계서 §3) — 현재 잡의 인메모리 스냅샷으로 finalize(단일 현재 셋업 전제).
     try {
-      const r = await deps.finalizer.finalize(runId, { logicOccupancy: parsed.data.occupancy });
+      const r = await deps.finalizer.finalize(deps.job.getSnapshot(), { logicOccupancy: parsed.data.occupancy });
       return {
         ok: true,
         slots: r.slots,
@@ -267,49 +262,14 @@ export function registerCaptureRoutes(app: FastifyInstance, deps: CaptureRouteDe
     }
   });
 
-  app.get('/capture/runs', async () => deps.store.listRuns());
+  // 현재 잡 인메모리 집계(구 /capture/runs/:id/aggregate — run_id 폐기, 설계서 §3). AggregatedSlot[] 동일 shape.
+  app.get('/capture/aggregate', async () => deps.job.getAggregated());
 
-  app.get('/capture/runs/:id/aggregate', async (req, reply) => {
-    const id = Number((req.params as { id: string }).id);
-    if (!Number.isInteger(id) || id <= 0) {
-      reply.code(400);
-      return { error: 'invalid run id' };
-    }
-    const run = deps.store.getRun(id);
-    if (!run) {
-      reply.code(404);
-      return { error: 'run not found' };
-    }
-    return deps.store.getAggregatedSlots(id);
-  });
+  // 차량 점유율(축소 보조·인메모리) 프리셋별 조회(구 /capture/runs/:id/occupancy). LLM off 시 []. rows shape 유지.
+  app.get('/capture/occupancy', async () => deps.job.getOccupancy());
 
-  // 차량 점유율(LLM 판정) 프리셋별 최신 조회. /aggregate 미러(시각화는 이번 범위 밖 — 조회만).
-  app.get('/capture/runs/:id/occupancy', async (req, reply) => {
-    const id = Number((req.params as { id: string }).id);
-    if (!Number.isInteger(id) || id <= 0) {
-      reply.code(400);
-      return { error: 'invalid run id' };
-    }
-    if (!deps.store.getRun(id)) {
-      reply.code(404);
-      return { error: 'run not found' };
-    }
-    return deps.store.getLatestOccupancy(id);
-  });
-
-  // 파일 바닥ROI 기준 주차면(finalize 저장분, §06) 프리셋별 조회. /occupancy 패턴 미러(id 검증 400 / run 없음 404).
-  app.get('/capture/runs/:id/slots', async (req, reply) => {
-    const id = Number((req.params as { id: string }).id);
-    if (!Number.isInteger(id) || id <= 0) {
-      reply.code(400);
-      return { error: 'invalid run id' };
-    }
-    if (!deps.store.getRun(id)) {
-      reply.code(404);
-      return { error: 'run not found' };
-    }
-    return deps.store.getParkingSlots(id);
-  });
+  // 슬롯 셋업(slot_setup) 정본 직접 조회(구 /capture/runs/:id/slots). presetKey 파생·slotId 포함(SlotSetupView).
+  app.get('/capture/slots', async () => deps.store.getSlotSetup());
 
   // 정밀수집 결과 저장/열기(save/*). saveStore 주입 시에만 등록(가산). 라우트는 위임만.
   if (deps.saveStore) {

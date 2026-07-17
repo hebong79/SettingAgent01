@@ -139,7 +139,7 @@ function makeServer(o: {
   const cam = o.camera ?? fakeCamera();
   const vpd = o.vpd ?? fakeVpd();
   const job = new CaptureJob({
-    camera: cam, vpd, store, cfg: captureCfg, lpdEnabled: false,
+    camera: cam, vpd, cfg: captureCfg, lpdEnabled: false,
     setTimer: (fn) => { void fn; return [] as unknown as NodeJS.Timeout; },
     clearTimer: () => {}, sleep: async () => {}, now: () => 'T',
   });

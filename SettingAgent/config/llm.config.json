@@ -85,26 +85,23 @@
     ]
   },
   "setupPrompts": {
-    "stage1Enabled": true,
-    "stage2Enabled": true,
-    "stage3Enabled": true,
-    "stage1": { "system": "config/prompts/stage1_preset_judge.system.md", "user": "config/prompts/stage1_preset_judge.user.md" },
-    "stage2": { "system": "config/prompts/stage2_dedupe_label.system.md", "user": "config/prompts/stage2_dedupe_label.user.md" },
-    "stage3": { "system": "config/prompts/stage3_final_report.system.md", "user": "config/prompts/stage3_final_report.user.md" }
+    "stage1Enabled": false,
+    "stage2Enabled": false,
+    "stage3Enabled": false,
+    "stage1": { "system": "config/prompts/_archive/stage1_preset_judge.system.md", "user": "config/prompts/_archive/stage1_preset_judge.user.md" },
+    "stage2": { "system": "config/prompts/_archive/stage2_dedupe_label.system.md", "user": "config/prompts/_archive/stage2_dedupe_label.user.md" },
+    "stage3": { "system": "config/prompts/_archive/stage3_final_report.system.md", "user": "config/prompts/_archive/stage3_final_report.user.md" }
   },
   "floorRoi": {
-    "enabled": true,
+    "enabled": false,
     "maxPerCheckpoint": 12,
-    "prompt": "config/prompts/floor_roi.yaml",
+    "prompt": "config/prompts/_archive/floor_roi.yaml",
     "timeoutMs": 300000
   },
   "occupancy": {
     "enabled": true,
     "prompt": "config/prompts/occupancy.yaml",
     "timeoutMs": 300000
-  },
-  "centering": {
-    "prompt": "config/prompts/ptz_centering.yaml"
   },
   "warmup": {
     "enabled": false,

@@ -1,36 +1,14 @@
 // capture 모듈 내부 타입 (장기 관측·반복 수집 → SQLite 누적 → LLM 정밀 주차면).
 // @parkagent/types(공유 계약: SetupArtifact/ParkingSlot/...)와 분리한다 — 공유 계약 오염 금지.
 // 좌표는 모두 정규화(0~1), cam/preset/round 인덱스는 1-based.
+//
+// ★ DB 스키마 전면 개편(설계서 §1): 구 10테이블 → 신 6테이블(place_info/camera_info/
+//   preset_pos/slot_setup/parking_evnt/parking_slot). 아래 Row/View 는 신 스키마 표면.
+//   컬럼명은 md 기준 cam_id/preset_id(camIdx/presetIdx 아님).
 
 import type { NormalizedPoint, NormalizedQuad } from '../domain/types.js';
 
-/** 캡처 잡 1회(런)의 메타 행. */
-export interface CaptureRunRow {
-  id: number;
-  startedAt: string;
-  endedAt: string | null;
-  plannedCount: number;
-  doneCount: number;
-  intervalMs: number;
-  status: 'running' | 'stopped' | 'done' | 'error';
-  stopReason: 'count' | 'manual' | 'error' | null;
-}
-
-/** 라운드·프리셋 단위 관측(프레임 1장). */
-export interface ObservationRow {
-  id: number;
-  runId: number;
-  roundIdx: number;
-  camIdx: number;
-  presetIdx: number;
-  capturedAt: string;
-  pan: number;
-  tilt: number;
-  zoom: number;
-  imgName: string;
-}
-
-/** 검출 박스 1건(정규화 좌표). Aggregator 입력의 평면 행. */
+/** 검출 박스 1건(정규화 좌표). Aggregator 입력의 평면 행(인메모리 누적 — DB 미저장). */
 export interface DetectionRow {
   observationId: number;
   roundIdx: number;
@@ -46,7 +24,7 @@ export interface DetectionRow {
   quad?: NormalizedQuad;
 }
 
-/** 집계 결과 슬롯(결정형 산출). 좌표는 검출 멤버 중앙값. */
+/** 집계 결과 슬롯(결정형 산출). 좌표는 검출 멤버 중앙값(인메모리 — DB 미저장). */
 export interface AggregatedSlot {
   presetKey: string; // `${camIdx}:${presetIdx}`
   clusterId: number; // 프리셋 내 1-based 클러스터 식별
@@ -73,76 +51,103 @@ export interface AggregatedSlot {
   status: 'candidate' | 'accepted' | 'rejected' | 'merged';
 }
 
-/**
- * 파일 바닥ROI(PtzCamRoi.json) 기준 주차면 저장 행(finalize 조립 산출, §06 H1/H4).
- * *_json 은 SQLite TEXT 컬럼에 문자열로 저장(nullable). occupied 는 0/1.
- */
-export interface ParkingSlotRow {
-  camIdx: number;
-  presetIdx: number;
-  presetKey: string; // `${camIdx}:${presetIdx}`
-  slotIdx: number; // 파일 ROI idx(원본 값)
-  roiJson: string; // 파일 폴리곤 정규화 점 [{x,y}...]
-  vpdJson: string | null; // 차량 bbox {x,y,w,h}
-  lpdJson: string | null; // 번호판 quad [{x,y}×4]
-  occupied: number; // 0/1
-  occupancyRate: number | null;
-  /** 프리셋 실 PTZ(GET /cameras 조회). 미조회/미보유 시 null. */
-  pan: number | null;
-  tilt: number | null;
-  zoom: number | null;
-  updatedAt: string;
-}
+// ── 신 6테이블 Row/View (설계서 §1 DDL) ─────────────────────────────
 
-/** parking_slots 조회 결과(파싱 shape, §06 H1 getParkingSlots). */
-export interface ParkingSlotView {
-  camIdx: number;
-  presetIdx: number;
-  presetKey: string;
-  slotIdx: number;
-  roi: NormalizedPoint[];
-  vpd: { x: number; y: number; w: number; h: number } | null;
-  lpd: NormalizedQuad | null;
-  occupied: boolean;
-  occupancyRate: number | null;
-  /** 프리셋 실 PTZ(GET /cameras 조회). 미조회/미보유 시 null. */
-  pan: number | null;
-  tilt: number | null;
-  zoom: number | null;
+/** place_info 행. 현재 place_id=1 고정(my_db_table §4). */
+export interface PlaceInfoRow {
+  placeId: number;
+  placeName: string;
 }
 
 /**
- * 센터라이징 성공 슬롯의 PTZ 저장 행(centering_slot, /calibrate/ptz 산출).
- * ★ 컬럼명 cam_id/preset_id 는 마스터 지정 — 기존 관례(cam_idx/preset_idx)와 다르다(JOIN 시 유의).
+ * camera_info 행(my_db_table §3 + 정규화 역변환 기준 img_w/img_h).
+ * img_w/img_h 는 PtzCamRoi 픽셀↔정규화 0~1 역변환 기준(PtzCamRoi.json export 재생성에 필수).
+ * password 는 평문 저장 — 노출 마스킹은 조회계층(dbRoutes) 담당.
  */
-export interface CenteringSlotRow {
-  slotId: string;
-  camIdx: number; // → cam_id (1-based)
-  presetIdx: number; // → preset_id (1-based)
-  /** 프리셋 내 슬롯 순서(1-based). 도출 불가 시 null. */
-  presetSlotIdx: number | null;
-  /** 직렬화 완료 PTZ JSON: {"pan":..,"tilt":..,"zoom":..}. */
-  pos: string;
-  updatedAt: string;
-}
-
-/** centering_slot 조회 결과(AS 매핑 shape). pos 는 미파싱 문자열(소비측 파싱). */
-export interface CenteringSlotView {
-  slotId: string;
-  camIdx: number;
-  presetIdx: number;
-  presetSlotIdx: number | null;
-  pos: string;
+export interface CameraInfoRow {
+  camId: number;
+  camName: string | null;
+  camUuid: string | null;
+  url: string | null;
+  userId: string | null;
+  password: string | null;
+  rtspUrl: string | null;
+  camType: 'ptz' | 'static';
+  camCompany: string | null;
+  placeId: number;
+  imgW: number | null;
+  imgH: number | null;
   updatedAt: string | null;
 }
 
-/** LLM 체크포인트 기록 행. */
-export interface CheckpointRow {
-  id: number;
-  runId: number;
-  atRound: number;
-  createdAt: string;
-  summaryJson: string;
+/** preset_pos 행(프리셋 위치 PTZ = P1 존, camerapos.json datas). PTZ 는 REAL 3필드. */
+export interface PresetPosRow {
+  camId: number;
+  presetId: number;
+  sname: string | null;
+  pan: number;
+  tilt: number;
+  zoom: number;
+  updatedAt: string | null;
+}
+
+/**
+ * slot_setup 저장 행 = floor_ROI + centering 병합(my_db_table §1+§5, 설계서 §1.1).
+ * "전체 주차면 개수만큼, 슬롯당 1행"이 불변식(run_id 없음).
+ * 가변정점(slotRoi/vpdBbox/lpdObb/occupyRange)은 **정규화 0~1** JSON TEXT 문자열.
+ * pan/tilt/zoom 은 번호판중심 센터라이징 PTZ(REAL). centered 는 0/1. img1 은 상대경로.
+ */
+export interface SlotSetupRow {
+  slotId: number; // 전역 슬롯번호 1..N (normalizeGlobalIdx 결과, PK)
+  camId: number;
+  presetId: number;
+  presetSlotIdx: number | null; // 프리셋 내 순서(1-based). 미도출 시 null
+  slotRoi: string; // 정규화 4점 폴리곤 JSON: [{x,y}×4] (NormalizedPoint[])
+  vpdBbox: string | null; // 정규화 차량 bbox JSON: {x,y,w,h}. 미점유 null
+  lpdObb: string | null; // 정규화 번호판 OBB JSON: [{x,y}×4]. 부재 null
+  occupyRange: string | null; // 정규화 점유영역(발자국) 폴리곤 JSON. 부재 null
+  pan: number | null;
+  tilt: number | null;
+  zoom: number | null;
+  centered: number; // 0/1
+  img1: string | null; // 센터라이징 후 차량 스샷 상대경로. 부재 null
+  updatedAt: string | null;
+}
+
+/**
+ * slot_setup 조회 결과(소비측 파싱 shape — 뷰어/REST). *_json → 객체/배열 복원.
+ * presetKey(`${camId}:${presetId}`)는 파생필드(뷰어 오버레이 키 정합).
+ */
+export interface SlotSetupView {
+  slotId: number;
+  camId: number;
+  presetId: number;
+  presetSlotIdx: number | null;
+  presetKey: string; // `${camId}:${presetId}`
+  roi: NormalizedPoint[];
+  vpd: { x: number; y: number; w: number; h: number } | null;
+  lpd: NormalizedQuad | null;
+  occupyRange: NormalizedPoint[] | null;
+  pan: number | null;
+  tilt: number | null;
+  zoom: number | null;
+  centered: boolean;
+  img1: string | null;
+  updatedAt: string | null;
+}
+
+/**
+ * upsertSlotCentering 입력(부분 갱신 — slot_id 키 UPDATE).
+ * 센터라이징(PtzCalibrator)이 pan/tilt/zoom/centered/img1 만 갱신 — 타 슬롯 기하 불변.
+ */
+export interface SlotCenteringRow {
+  slotId: number;
+  pan: number | null;
+  tilt: number | null;
+  zoom: number | null;
+  centered: number; // 0/1
+  img1: string | null;
+  updatedAt: string;
 }
 
 /** 캡처 잡 상태머신 상태. */

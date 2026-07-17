@@ -95,7 +95,7 @@ const state = {
   detectByKey: {}, // cam:preset → 라이브 VPD/LPD 검출({vehicles,plates}). 프리셋별 보존(전환 시 유지, POST /capture/detect). drawDetectOverlay 근거.
   selectedDetect: null, // [기능2] 선택된 검출 박스 { kind:'vehicle'|'plate', index } | null(임시 편집·메모리만).
   placeRoiBackup: null, // [기능3] 자동보정 직전 스냅샷 { key, spaces }(되돌리기용).
-  parkingSlotsByKey: null, // 최종화 후 DB parking_slots(cam:preset → 행배열, GET /capture/runs/:id/slots). renderSlotList 소스(§06 H7).
+  parkingSlotsByKey: null, // 최종화 후 slot_setup(cam:preset → 행배열, GET /capture/slots). renderSlotList 소스(§06 H7).
   dbTablesLoaded: false, // DB 탭 콤보 1회 채움 가드.
   dbTable: '', // 현재 선택된 DB 테이블명.
   dbSearch: '', // DB 뷰어 검색어(전 컬럼 LIKE).
@@ -1832,11 +1832,10 @@ let occLlmWarnShown = false;
 // 점유율 fetch 과호출 회피: status.round 변화 게이트(직전 라운드).
 let prevCapRound = null;
 
-/** 점유율 조회 → state.occByKey 갱신 → 오버레이 재그림. runId 없으면 no-op. */
-async function fetchOccupancy(runId) {
-  if (runId == null) return;
+/** 점유율 조회 → state.occByKey 갱신 → 오버레이 재그림. run_id 폐기(설계서 §3) — 현재 잡 인메모리 축소 occupancy. LLM off 시 []. */
+async function fetchOccupancy() {
   try {
-    const res = await fetch(`/capture/runs/${runId}/occupancy`, { cache: 'no-store' });
+    const res = await fetch('/capture/occupancy', { cache: 'no-store' });
     if (!res.ok) return;
     const rows = await res.json();
     state.occByKey = occupancyByKey(rows);
@@ -1895,7 +1894,7 @@ async function capPoll() {
     const round = status?.round ?? null;
     if (round != null && round !== prevCapRound) {
       prevCapRound = round;
-      fetchOccupancy(state.lastRunId);
+      fetchOccupancy();
     }
   } else {
     stopCapFramePolling();
@@ -1906,7 +1905,7 @@ async function capPoll() {
   // 활성 → 종료 전환 시 결과 메시지 박스를 1회 띄운다(최신 점유율 확보 후 → 요약 라인 포함).
   const wasActive = prevCapState === 'running' || prevCapState === 'stopping' || prevCapState === 'finalizing';
   if (wasActive && (st === 'done' || st === 'stopped' || st === 'error')) {
-    await fetchOccupancy(state.lastRunId);
+    await fetchOccupancy();
     showCaptureResult(status);
   }
   prevCapState = st;
@@ -1966,12 +1965,11 @@ function buildFinalizeOccupancy() {
   }));
 }
 
-/** 최종화 후 DB parking_slots 조회 → state.parkingSlotsByKey(cam:preset → 행배열) 구성(§06 H7). 실패 시 조용히 미표시. */
+/** 최종화 후 slot_setup 조회 → state.parkingSlotsByKey(cam:preset → 행배열) 구성(§06 H7). 실패 시 조용히 미표시. */
 async function loadParkingSlots() {
-  const runId = state.lastRunId;
-  if (!runId) return;
   try {
-    const res = await fetch(`/capture/runs/${runId}/slots`, { cache: 'no-store' });
+    // run_id 폐기(설계서 §3) — slot_setup 정본 직접 조회. 응답은 presetKey 파생 포함(SlotSetupView).
+    const res = await fetch('/capture/slots', { cache: 'no-store' });
     if (!res.ok) return;
     const rows = await res.json();
     const byKey = {};
@@ -2200,29 +2198,15 @@ async function renderAnalysis() {
 }
 
 /**
- * 분석 탭 점유율 표(#an-occupancy) 렌더. runId 는 state.lastRunId 우선, 없으면 GET /capture/runs[0].id 폴백.
+ * 분석 탭 점유율 표(#an-occupancy) 렌더. run_id 폐기(설계서 §3) — 현재 잡 인메모리 축소 occupancy 직접 조회.
  * 데이터 없으면 안내 문구. showAvgCard=true 면 an-summary 에 평균 점유율 카드 1장 append.
  */
 async function renderOccupancyAnalysis(showAvgCard) {
   const box = $('an-occupancy');
   if (!box) return;
   box.innerHTML = '';
-  let runId = state.lastRunId;
-  if (runId == null) {
-    try {
-      const res = await fetch('/capture/runs', { cache: 'no-store' });
-      const runs = res.ok ? await res.json() : [];
-      runId = runs[0]?.id ?? null;
-    } catch {
-      runId = null;
-    }
-  }
-  if (runId == null) {
-    box.textContent = '점유율 데이터 없음 (정밀 수집 후 생성)';
-    return;
-  }
   try {
-    const res = await fetch(`/capture/runs/${runId}/occupancy`, { cache: 'no-store' });
+    const res = await fetch('/capture/occupancy', { cache: 'no-store' });
     const rows = res.ok ? await res.json() : [];
     state.occByKey = occupancyByKey(rows);
   } catch {

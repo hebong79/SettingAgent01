@@ -1,6 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
 import { CaptureJob, type CaptureJobDeps } from '../src/capture/CaptureJob.js';
-import { SqliteStore } from '../src/capture/SqliteStore.js';
 import type { CameraClient } from '../src/clients/CameraClient.js';
 import type { VpdClient } from '../src/clients/VpdClient.js';
 import type { CapturedImage, VehicleBox } from '../src/domain/types.js';
@@ -10,7 +9,7 @@ import type { SetupTarget } from '../src/setup/SetupOrchestrator.js';
 /**
  * 검증자(qa-tester): CaptureJob 체크포인트 트리거 모드(rounds/time) — 설계서 §3.5·§6, 성공기준 1·2.
  * rounds 회귀(done%K==0) + time 모드(monotonic 경과 ≥ intervalMs) 결정적 검증.
- * checkpoint 발화 감지는 floorReviewer.review 스파이로 관찰(주입 시 checkpoint 말미 호출).
+ * checkpoint 발화 감지는 occupancyReviewer.review 스파이로 관찰(주입 시 checkpoint 말미 호출).
  */
 
 const captureCfg: ToolsConfig['capture'] = {
@@ -56,20 +55,18 @@ function makeManualTimers() {
   return { setTimer, clearTimer, fireNext, queueLen: () => queue.length };
 }
 
-/** clock 을 외부에서 제어하는 잡. reviewSpy = floorReviewer.review(=checkpoint 발화 감지). */
+/** clock 을 외부에서 제어하는 잡. reviewSpy = occupancyReviewer.review(=checkpoint 발화 감지). */
 function makeJob(cfg: ToolsConfig['capture']) {
-  const store = new SqliteStore(':memory:');
   const timers = makeManualTimers();
   let clock = 0;
   const reviewSpy = vi.fn(async () => ({ llmUnavailable: false }));
-  const floorReviewer = { review: reviewSpy } as unknown as CaptureJobDeps['floorReviewer'];
+  const occupancyReviewer = { review: reviewSpy } as unknown as CaptureJobDeps['occupancyReviewer'];
   const deps: CaptureJobDeps = {
     camera: fakeCamera(),
     vpd: fakeVpd(),
-    store,
     cfg,
     lpdEnabled: false,
-    floorReviewer,
+    occupancyReviewer,
     setTimer: timers.setTimer,
     clearTimer: timers.clearTimer,
     sleep: async () => {},
@@ -77,135 +74,110 @@ function makeJob(cfg: ToolsConfig['capture']) {
     monotonic: () => clock,
   };
   const job = new CaptureJob(deps);
-  return { job, store, timers, reviewSpy, setClock: (v: number) => { clock = v; } };
+  return { job, timers, reviewSpy, setClock: (v: number) => { clock = v; } };
 }
 
 describe('CaptureJob rounds 모드 회귀 (성공기준 1)', () => {
   it('done % checkpointEvery === 0 라운드에서만 checkpoint 발화(K=2 → 라운드 2,4)', async () => {
-    const { job, store, timers, reviewSpy } = makeJob({ ...captureCfg, checkpointTriggerMode: 'rounds', checkpointEvery: 2 });
-    try {
-      job.start({ count: 4, intervalMs: 1000, checkpointEvery: 2, checkpointTriggerMode: 'rounds', checkpointIntervalMs: 60000, targets });
-      await timers.fireNext(); // 라운드1: done=1, 1%2!=0 → 미발화
-      expect(reviewSpy).toHaveBeenCalledTimes(0);
-      await timers.fireNext(); // 라운드2: done=2, 2%2==0 → 발화
-      expect(reviewSpy).toHaveBeenCalledTimes(1);
-      await timers.fireNext(); // 라운드3: 미발화
-      expect(reviewSpy).toHaveBeenCalledTimes(1);
-      await timers.fireNext(); // 라운드4: done=4 → 발화 + count 도달 done
-      expect(reviewSpy).toHaveBeenCalledTimes(2);
-      expect(job.getStatus().state).toBe('done');
-    } finally {
-      store.close();
-    }
+    const { job, timers, reviewSpy } = makeJob({ ...captureCfg, checkpointTriggerMode: 'rounds', checkpointEvery: 2 });
+    job.start({ count: 4, intervalMs: 1000, checkpointEvery: 2, checkpointTriggerMode: 'rounds', checkpointIntervalMs: 60000, targets });
+    await timers.fireNext(); // 라운드1: done=1, 1%2!=0 → 미발화
+    expect(reviewSpy).toHaveBeenCalledTimes(0);
+    await timers.fireNext(); // 라운드2: done=2, 2%2==0 → 발화
+    expect(reviewSpy).toHaveBeenCalledTimes(1);
+    await timers.fireNext(); // 라운드3: 미발화
+    expect(reviewSpy).toHaveBeenCalledTimes(1);
+    await timers.fireNext(); // 라운드4: done=4 → 발화 + count 도달 done
+    expect(reviewSpy).toHaveBeenCalledTimes(2);
+    expect(job.getStatus().state).toBe('done');
   });
 });
 
 describe('CaptureJob time 모드 (성공기준 2)', () => {
   it('경과 ≥ intervalMs 라운드에서만 발화, 발화 후 기준점 리셋(과다 발화 없음)', async () => {
     // intervalMs=5000. start 시 clock=0 → lastCheckpointMs=0.
-    const { job, store, timers, reviewSpy, setClock } = makeJob({
+    const { job, timers, reviewSpy, setClock } = makeJob({
       ...captureCfg, checkpointTriggerMode: 'time', checkpointIntervalMs: 5000, checkpointEvery: 99,
     });
-    try {
-      setClock(0);
-      job.start({ count: 10, intervalMs: 1000, checkpointEvery: 99, checkpointTriggerMode: 'time', checkpointIntervalMs: 5000, targets });
+    setClock(0);
+    job.start({ count: 10, intervalMs: 1000, checkpointEvery: 99, checkpointTriggerMode: 'time', checkpointIntervalMs: 5000, targets });
 
-      setClock(2000);
-      await timers.fireNext(); // 라운드1: 2000-0=2000 < 5000 → 미발화(시작 직후 미발화)
-      expect(reviewSpy).toHaveBeenCalledTimes(0);
+    setClock(2000);
+    await timers.fireNext(); // 라운드1: 2000-0=2000 < 5000 → 미발화(시작 직후 미발화)
+    expect(reviewSpy).toHaveBeenCalledTimes(0);
 
-      setClock(6000);
-      await timers.fireNext(); // 라운드2: 6000-0=6000 ≥ 5000 → 발화, lastCheckpointMs=6000
-      expect(reviewSpy).toHaveBeenCalledTimes(1);
+    setClock(6000);
+    await timers.fireNext(); // 라운드2: 6000-0=6000 ≥ 5000 → 발화, lastCheckpointMs=6000
+    expect(reviewSpy).toHaveBeenCalledTimes(1);
 
-      setClock(8000);
-      await timers.fireNext(); // 라운드3: 8000-6000=2000 < 5000 → 미발화(리셋 확인)
-      expect(reviewSpy).toHaveBeenCalledTimes(1);
+    setClock(8000);
+    await timers.fireNext(); // 라운드3: 8000-6000=2000 < 5000 → 미발화(리셋 확인)
+    expect(reviewSpy).toHaveBeenCalledTimes(1);
 
-      setClock(12000);
-      await timers.fireNext(); // 라운드4: 12000-6000=6000 ≥ 5000 → 발화
-      expect(reviewSpy).toHaveBeenCalledTimes(2);
+    setClock(12000);
+    await timers.fireNext(); // 라운드4: 12000-6000=6000 ≥ 5000 → 발화
+    expect(reviewSpy).toHaveBeenCalledTimes(2);
 
-      expect(job.getStatus().state).toBe('running');
-    } finally {
-      job.stop();
-      store.close();
-    }
+    expect(job.getStatus().state).toBe('running');
+    job.stop();
   });
 
   it('occupancyReviewer 결선: 체크포인트 도달 → review 1회(runId·round·frames·shouldStop·expected 전달)', async () => {
     // rounds K=1 → 라운드1 완료 후 checkpoint 진입 → occupancyReviewer.review 1회 호출.
-    const store = new SqliteStore(':memory:');
     const timers = makeManualTimers();
     const occSpy = vi.fn(async () => ({ llmUnavailable: false }));
     const occupancyReviewer = { review: occSpy } as unknown as CaptureJobDeps['occupancyReviewer'];
     const job = new CaptureJob({
-      camera: fakeCamera(), vpd: fakeVpd(), store,
+      camera: fakeCamera(), vpd: fakeVpd(),
       cfg: { ...captureCfg, checkpointTriggerMode: 'rounds', checkpointEvery: 1 },
       lpdEnabled: false, occupancyReviewer,
       setTimer: timers.setTimer, clearTimer: timers.clearTimer, sleep: async () => {}, now: () => 'T',
       expectedByPreset: { '1:1': 5 },
     });
-    try {
-      job.start({ count: 1, intervalMs: 1000, checkpointEvery: 1, checkpointTriggerMode: 'rounds', checkpointIntervalMs: 60000, targets });
-      await timers.fireNext();
-      expect(occSpy).toHaveBeenCalledTimes(1);
-      const call = occSpy.mock.calls[0] as unknown[];
-      expect(call[0]).toBe(job.getRunId()); // runId
-      expect(call[1]).toBe(1); // atRound
-      expect(call[2]).toBeInstanceOf(Map); // framesByPreset
-      expect(typeof call[3]).toBe('function'); // shouldStop 콜백
-      expect(call[4]).toEqual({ '1:1': 5 }); // expectedByPreset
-    } finally {
-      store.close();
-    }
+    job.start({ count: 1, intervalMs: 1000, checkpointEvery: 1, checkpointTriggerMode: 'rounds', checkpointIntervalMs: 60000, targets });
+    await timers.fireNext();
+    expect(occSpy).toHaveBeenCalledTimes(1);
+    // OccupancyReviewer.review(atRound, framesByPreset, occByPreset, shouldStop, expectedByPreset) — CaptureJob.ts checkpoint() 호출 인자 순서.
+    const call = occSpy.mock.calls[0] as unknown[];
+    expect(call[0]).toBe(1); // atRound
+    expect(call[1]).toBeInstanceOf(Map); // framesByPreset
+    expect(call[2]).toBeInstanceOf(Map); // occByPreset(인메모리 축소 occupancy 누적 대상)
+    expect(typeof call[3]).toBe('function'); // shouldStop 콜백
+    expect(call[4]).toEqual({ '1:1': 5 }); // expectedByPreset
   });
 
   it('occupancyReviewer.review llmUnavailable:true → status.llmOccupancyUnavailable 노출', async () => {
-    const store = new SqliteStore(':memory:');
     const timers = makeManualTimers();
     const occupancyReviewer = { review: vi.fn(async () => ({ llmUnavailable: true })) } as unknown as CaptureJobDeps['occupancyReviewer'];
     const job = new CaptureJob({
-      camera: fakeCamera(), vpd: fakeVpd(), store,
+      camera: fakeCamera(), vpd: fakeVpd(),
       cfg: { ...captureCfg, checkpointTriggerMode: 'rounds', checkpointEvery: 1 },
       lpdEnabled: false, occupancyReviewer,
       setTimer: timers.setTimer, clearTimer: timers.clearTimer, sleep: async () => {}, now: () => 'T',
     });
-    try {
-      job.start({ count: 1, intervalMs: 1000, checkpointEvery: 1, checkpointTriggerMode: 'rounds', checkpointIntervalMs: 60000, targets });
-      await timers.fireNext();
-      expect(job.getStatus().llmOccupancyUnavailable).toBe(true);
-    } finally {
-      store.close();
-    }
+    job.start({ count: 1, intervalMs: 1000, checkpointEvery: 1, checkpointTriggerMode: 'rounds', checkpointIntervalMs: 60000, targets });
+    await timers.fireNext();
+    expect(job.getStatus().llmOccupancyUnavailable).toBe(true);
   });
 
   it('occupancyReviewer 미주입 → no-op(정상 완료, 크래시 없음)', async () => {
-    const { job, store, timers } = makeJob({ ...captureCfg, checkpointTriggerMode: 'rounds', checkpointEvery: 1 });
-    try {
-      job.start({ count: 1, intervalMs: 1000, checkpointEvery: 1, checkpointTriggerMode: 'rounds', checkpointIntervalMs: 60000, targets });
-      await timers.fireNext();
-      expect(job.getStatus().state).toBe('done');
-      expect(job.getStatus().llmOccupancyUnavailable).toBeUndefined();
-    } finally {
-      store.close();
-    }
+    const { job, timers } = makeJob({ ...captureCfg, checkpointTriggerMode: 'rounds', checkpointEvery: 1 });
+    job.start({ count: 1, intervalMs: 1000, checkpointEvery: 1, checkpointTriggerMode: 'rounds', checkpointIntervalMs: 60000, targets });
+    await timers.fireNext();
+    expect(job.getStatus().state).toBe('done');
+    expect(job.getStatus().llmOccupancyUnavailable).toBeUndefined();
   });
 
   it('time 모드: 경과가 계속 미달이면 count 종료까지 한 번도 발화 안 함', async () => {
-    const { job, store, timers, reviewSpy, setClock } = makeJob({
+    const { job, timers, reviewSpy, setClock } = makeJob({
       ...captureCfg, checkpointTriggerMode: 'time', checkpointIntervalMs: 100000, checkpointEvery: 1,
     });
-    try {
-      setClock(0);
-      job.start({ count: 3, intervalMs: 1000, checkpointEvery: 1, checkpointTriggerMode: 'time', checkpointIntervalMs: 100000, targets });
-      setClock(1000); await timers.fireNext();
-      setClock(2000); await timers.fireNext();
-      setClock(3000); await timers.fireNext(); // count=3 도달 done
-      expect(reviewSpy).toHaveBeenCalledTimes(0); // 경과 100s 미달 → 발화 없음(K=1 이어도 time 모드는 시간 기준)
-      expect(job.getStatus().state).toBe('done');
-    } finally {
-      store.close();
-    }
+    setClock(0);
+    job.start({ count: 3, intervalMs: 1000, checkpointEvery: 1, checkpointTriggerMode: 'time', checkpointIntervalMs: 100000, targets });
+    setClock(1000); await timers.fireNext();
+    setClock(2000); await timers.fireNext();
+    setClock(3000); await timers.fireNext(); // count=3 도달 done
+    expect(reviewSpy).toHaveBeenCalledTimes(0); // 경과 100s 미달 → 발화 없음(K=1 이어도 time 모드는 시간 기준)
+    expect(job.getStatus().state).toBe('done');
   });
 });

@@ -1,7 +1,6 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { CaptureJob, type CaptureJobDeps } from '../src/capture/CaptureJob.js';
-import { SqliteStore } from '../src/capture/SqliteStore.js';
 import { normalizePtzCamRoi } from '../src/capture/placeRoi.js';
 import { polygonCentroid, pointInPolygon } from '../src/domain/polygon.js';
 import { isVehicleOnPlace } from '../src/capture/onPlaceFilter.js';
@@ -104,21 +103,12 @@ async function waitDone(job: CaptureJob, timeoutMs = 3000): Promise<void> {
   throw new Error(`라운드가 ${timeoutMs}ms 내 종료되지 않음(state=${job.getStatus().state})`);
 }
 
-let openStores: SqliteStore[] = [];
-afterEach(() => {
-  for (const s of openStores) { try { s.close(); } catch { /* noop */ } }
-  openStores = [];
-});
-
 /** 1라운드 수집 실행 → 적재된 검출 행 반환. */
 async function runOneRound(over: Partial<CaptureJobDeps>, vpdOnParkingOnly?: boolean) {
-  const store = new SqliteStore(':memory:');
-  openStores.push(store);
   const timers = makeManualTimers();
   const deps: CaptureJobDeps = {
     camera: fakeCamera(),
     vpd: fakeVpd([PARKED, PASSING]),
-    store,
     cfg: captureCfg,
     lpdEnabled: false,
     setTimer: timers.setTimer,
@@ -128,15 +118,15 @@ async function runOneRound(over: Partial<CaptureJobDeps>, vpdOnParkingOnly?: boo
     ...over,
   };
   const job = new CaptureJob(deps);
-  const { runId } = job.start({
+  job.start({
     count: 1, intervalMs: 1000, checkpointEvery: 99, checkpointTriggerMode: 'rounds',
     checkpointIntervalMs: 60000, targets,
     ...(vpdOnParkingOnly !== undefined ? { vpdOnParkingOnly } : {}),
   });
   timers.fireNext();
   await waitDone(job);
-  const dets = store.getDetectionsForRun(runId);
-  return { job, store, dets, vehicles: dets.filter((d) => d.kind === 'vehicle'), plates: dets.filter((d) => d.kind === 'plate') };
+  const dets = job.getSnapshot().dets;
+  return { job, dets, vehicles: dets.filter((d) => d.kind === 'vehicle'), plates: dets.filter((d) => d.kind === 'plate') };
 }
 
 describe('전제 확인 — 픽스처 파생 좌표가 의도한 성질을 갖는다', () => {
@@ -187,21 +177,19 @@ describe('★ CaptureJob §6-10 — 강등(placeRoiFile 미주입): 전량 통�
 
   it('파일은 있으나 **해당 프리셋** 주차면 0개 → 그 프리셋만 강등(사유가 프리셋을 지목)', async () => {
     // 픽스처에 preset 9 는 없다 → byPreset 키 부재 = "이 프리셋엔 ROI 없음"(파일 부재와 구별).
-    const store = new SqliteStore(':memory:');
-    openStores.push(store);
     const timers = makeManualTimers();
     const job = new CaptureJob({
-      camera: fakeCamera(), vpd: fakeVpd([PARKED, PASSING]), store, cfg: captureCfg, lpdEnabled: false,
+      camera: fakeCamera(), vpd: fakeVpd([PARKED, PASSING]), cfg: captureCfg, lpdEnabled: false,
       setTimer: timers.setTimer, clearTimer: timers.clearTimer, sleep: async () => {}, now: () => 'T',
       placeRoiFile: FIXTURE,
     });
-    const { runId } = job.start({
+    job.start({
       count: 1, intervalMs: 1000, checkpointEvery: 99, checkpointTriggerMode: 'rounds',
       checkpointIntervalMs: 60000, targets: [{ camIdx: CAM, presetIdx: 9 }],
     });
     timers.fireNext();
     await waitDone(job);
-    const vehicles = store.getDetectionsForRun(runId).filter((d) => d.kind === 'vehicle');
+    const vehicles = job.getSnapshot().dets.filter((d) => d.kind === 'vehicle');
     expect(vehicles).toHaveLength(2); // 전량 통과(강등).
     expect(job.getStatus().vpdOnPlaceDegraded).toBe(`프리셋 ${CAM}:9 주차면 0개`); // 파일 부재와 **다른** 사유.
   });

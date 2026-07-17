@@ -59,14 +59,14 @@ function cfg(floorEnabled: boolean): LlmConfig {
     mcp: { enabled: false, transport: 'stdio', servers: [] },
     setupPrompts: {
       stage1Enabled: true, stage2Enabled: true, stage3Enabled: true,
-      stage1: pair('config/prompts/stage1_preset_judge.system.md'),
-      stage2: pair('config/prompts/stage2_dedupe_label.system.md'),
-      stage3: pair('config/prompts/stage3_final_report.system.md'),
+      stage1: pair('config/prompts/_archive/stage1_preset_judge.system.md'),
+      stage2: pair('config/prompts/_archive/stage2_dedupe_label.system.md'),
+      stage3: pair('config/prompts/_archive/stage3_final_report.system.md'),
     },
     floorRoi: {
       enabled: floorEnabled,
       maxPerCheckpoint: 12,
-      prompt: 'config/prompts/floor_roi.yaml',
+      prompt: 'config/prompts/_archive/floor_roi.yaml',
       timeoutMs: 120000,
     },
   };

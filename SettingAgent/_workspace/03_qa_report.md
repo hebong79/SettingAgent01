@@ -1,382 +1,95 @@
-# 03. 검증 — 점유영역 사다리꼴 goal/loop 1차 이터레이션 (스샷 증거)
+# 03. QA 검증 리포트 — SettingAgent DB 개편 후 test/** 전면 재검증
 
-> 검증자(qa-tester) 산출물. 2026-07-16. 입력: `01_architect_plan.md` §7 · `02_developer_changes.md`.
-> **파라미터 튜닝 미수행** — 스샷·수치 증거만 생성. 판단은 오케스트레이터 몫.
+> 검증자(qa-tester). 입력: `01_architect_plan.md` + `02a/02b/02c_developer_*.md` + 신 소스.
+> 신 계약(6테이블/인메모리 스냅샷/REST 재편/LLM 최소화)에 맞춰 27개 깨진 테스트 처리 + 신규 테스트 작성.
 
----
+## 0. 최종 결과 (숫자 그대로)
 
-## 1. 데이터 출처 — **실검출(라이브)**. 합성 아님.
+| 게이트 | 결과 |
+|---|---|
+| `npx tsc --noEmit` (src+test 전체) | **error 0** (착수 시 472, 27파일) |
+| `npx vitest run` (전량) | **Test Files 153 passed / Tests 1700 passed / 0 failed** |
+| 외부 서비스(VPD/LPD/LLM/카메라/시뮬레이터) | 전부 모킹(유닛). 실연동 스모크는 미수행(§6 한계) |
 
-| 항목 | 내용 |
-|------|------|
-| 검출 | **라이브 `POST http://localhost:13020/capture/detect` (cam=1, preset=1/2/3)** — 실 VPD/LPD 파이프라인, HTTP 200 ×3 |
-| 주차면 | 라이브 `GET /capture/place-roi` → `normalizePtzCamRoi`(뷰어와 동일 경로) |
-| 배경 | `data/refframes/cam1_p{1,2,3}.jpg` (1920×1080, 원본 해상도) |
-| 캐시 | `_workspace/_qa_data/{place_roi,detect_cam1_p1..3}.json` — 재실행은 오프라인. `--refetch` 로 재검출 |
+착수 시 27파일 472 tsc 에러 → 0. 전 스위트 그린.
 
-**배경↔검출 정합 확인됨**: 스샷에서 노란 plate quad 가 실제 차량 번호판 위에 정확히 얹힘 → refframes jpg 와 라이브 씬이 동일(시뮬 정적). 합성 픽스처 경로 (c) 는 **불필요해 미사용**.
+## 1. 처리한 파일
 
-구현 함수는 `web/occupancyRegion.js` 의 `computeOccupancyRegions`/`plateAxes`/`buildTrapezoid` 를 **그대로 import**. 판정도 실제 `OccupancyJudge.judge` + `selectFloorRoi` — `app.js updateLogicOccupancy` 와 동일 순서. **기하 재구현 없음.**
+### (A) 삭제 테이블·구 스토어 전용 → **삭제**(신 계약에 기능 자체 소멸)
+| 파일 | 사유 |
+|---|---|
+| `test/parkingSlotsStore.test.ts` | `parking_slots` 테이블 + `replaceParkingSlots/getParkingSlots` 폐기. slot_setup 이 대체 → 신 `sqliteStore.test.ts` 로 흡수. |
+| `test/occupancyStore.test.ts` | `occupancy` 테이블 + `insertOccupancy/getLatestOccupancy` 폐기(인메모리 occByPreset 로 이동). |
+| `test/floorRoiStore.test.ts` | `floor_roi` 테이블 + `upsertFloorRoi/getFloorRois` 폐기(폴리곤 미영속 — Finalizer 결정형). |
+| `test/floorRoiStoreCompat.test.ts` | 구 floor_roi 마이그레이션 하위호환 — 테이블 자체 소멸로 무의미. |
 
-**게이트 독립 재실행**: `npx vitest run` → 151 files / 1657 tests 전량 통과, `npx tsc --noEmit` → exit 0. 구현자 보고와 일치.
+(`test/agentRuntimeCentering.test.ts` 는 devB 가 adviseCentering 死코드 삭제와 함께 `git rm` — QA 범위 밖.)
 
----
+### (A) 재작성 (구 스토어 전용 → 신 6테이블 계약)
+- `test/sqliteStore.test.ts` — **전면 재작성**. 신 6테이블 계약 검증(§2 신규 목록).
+- `test/centeringSlot.test.ts` — 비-DB 계약(T1~T6·T9)은 유지, DB 미러(T7·T10·T11·T13·T14)를 `upsertSlotCentering`(정수 slot_id 부분 UPDATE, 사전 slot_setup 시드)로 재작성. 구 T12(`upsertCenteringSlots` 단위)는 `sqliteStore.test.ts` 로 이관(중복 제거).
 
-## 2. 프레임별 수치
+### (B) 시그니처/계약 추종 (재작성·갱신)
+| 파일 | 변경 |
+|---|---|
+| `captureJob.test.ts`(+cuboid/onPlace/occupancyGate/liveRefresh) | CaptureJobDeps 에서 `store`/`reviewer`/`floorReviewer` 제거, DB 조회 → `getSnapshot()/getAggregated()/getOccupancy()` 인메모리 게터. 상태는 `getStatus().state/done`. |
+| `captureCheckpointTrigger.test.ts` | `floorReviewer` → `occupancyReviewer`(신 시그니처 `review(atRound, frames, occByPreset, shouldStop?, expected?)`). |
+| `finalizerParkingSlots/checkpointFinalizer/finalizerOccupancy/finalizerFloor.test.ts` | `finalize(runId)` → `finalize(snapshot)`, `getParkingSlots`→`getSlotSetup`(SlotSetupView), 필드 `slotIdx→slotId`, `occupied`→`vpd!=null` 파생. |
+| `occupancyReviewer.test.ts` | 신 시그니처 + `occByPreset` Map 어서션(구 `insertOccupancy` 캡처 폐기). |
+| `floorRoiReviewer.test.ts` | 미영속 — 반환값 `{llmUnavailable}` + brain 호출만 검증(구 `getFloorRois` 폐기). |
+| `floorRoiUseLlmWiring.test.ts` | 유지 — 제거된 `floorReviewer` 게이트 → 잔존 `floorRoiUseLlm` 플래그가 `occupancyReviewer` 게이트하는 것으로 재작성. |
+| `captureRoutes.test.ts`/`parkingSlotsRoutes.test.ts` | 신 경로 `/capture/aggregate·occupancy·slots`, finalize 바디 runId 제거. `/capture/slots` = `getSlotSetup()`. |
+| `floorRoiNormalizeEdge.test.ts` | 구 store 왕복 → 순수 `resolveFloorPolygon`/`FloorRoiReviewer.review` 경로. |
+| `estimatePlateNeighborsIntegration.test.ts` | snapshot 기반 finalize 로 이관. |
 
-| 프레임 | 주차면 | plate점유 | globalScale | region수 | **최대 교차면적** | overlapPairs | region scale |
-|--------|--------|-----------|-------------|----------|------------------|--------------|--------------|
-| cam1_p1 | 7 | 6 | **4.0** (상한 채택) | 6 (idx 1,2,3,4,6,7) | **0.000e+0** | `[]` | 전부 4.000 |
-| cam1_p2 | 6 | 5 | **4.0** (상한 채택) | 5 (idx 8,9,11,12,13) | **0.000e+0** | `[]` | 전부 4.000 |
-| cam1_p3 | 4 | 3 | **4.0** (상한 채택) | 3 (idx 14,15,16) | **0.000e+0** | `[]` | 전부 4.000 |
-| STRESS(합성) | — | 3 | **null** (2단계 폴백) | 3 | 4.652e-3 → **0.000e+0** | `[]` | 1.674 / 1.000 / 1.674 |
+### (B) 계약 파급(구 테이블 아닌데 신 계약으로 깨진 것) — 신규로 잡음
+| 파일 | 변경 | 비고 |
+|---|---|---|
+| `config.test.ts` | `floorRoi.enabled` 실제 config = **false**(LLM 최소화, 구 테스트는 true 기대) + occupancy 잔존/stage off 검증 추가 | tsc 통과했으나 **동작 실패**였음 |
+| `placeGlobalIdx.test.ts` | `buildFlatSlotRows` 소비 shape `slotIdx→slotId`, occupied=`!!vpd` 파생 정합(9개 픽스처) | 0-based 기각 테스트가 이제 slot_id 값 기준으로 **진짜** 검증됨 |
+| `centeringBoundary.test.ts` | 구 `centering_slot`(문자열 slotId+pos JSON) → `slot_setup`(정수 slot_id+분해 PTZ) 경계 재작성, 사전 시드 | 아래 §3 경계 결과 |
 
-`areaEps = 1e-6`. 실 3프레임 모두 교차면적이 **정확히 0** — 겹침 근처도 아니다.
+### (C) 공유 픽스처 파급 → 신 스키마
+`vehicleCuboidRoutes/placeRoiRoutes/jobCuboidRoutes/groundModelRoutes/assocQaFindings.test.ts` — `new CaptureJob({...})` 리터럴에서 `store` 키 제거(1줄). SqliteStore 인스턴스는 Finalizer/서버 배선에 잔존.
 
-### 기하 성질 실측 (실검출 13개 region 전수)
+## 2. 신규 테스트 (신 계약 커버리지)
 
-| 성질 | 실측 | 판정 |
-|------|------|------|
-| 위/아래 변 ∥ û (외적) | 0.0e+0 ~ 1.2e-15 (머신 엡실론) | û 기준으로는 **정확히 평행** |
-| up/down 거리비 | **1.8333** 전수 일치 (= 0.55/0.30) | 위가 아래보다 김 ✔ |
-| topW/botW | **0.8500** 전수 일치 | topWidthRatio 규격대로 ✔ |
-| 픽셀공간 실측 배율 (아래변/판폭) | **4.00** 전수, 오차 0.0% | 정규화 이방성(1920≠1080) 왜곡 **없음** — 우려는 기각 |
+| 파일 | 검증 항목 |
+|---|---|
+| `sqliteStore.test.ts`(재작성, 14) | 신 6테이블 생성·구 테이블 부재 / `foreign_keys=ON` 실효(FK 위반 INSERT 거부·PRAGMA=1) / `replaceSlotSetup` 트랜잭션 원자성(중간 throw 롤백→이전 확정본 보존) / `slot_setup` UNIQUE(cam,preset,preset_slotidx) / `getSlotSetup` presetKey 파생·roi/vpd/lpd/occupyRange JSON 파싱·centered boolean·ORDER BY / `upsertSlotCentering` 부분 UPDATE(타 슬롯 불변·미존재 slot_id 무시) / upsert 멱등 |
+| `migrateToSettingDb.test.ts`(신규, 7) | 실 CLI(tsx child process) × 소형 fixture 트리 종단. 행수(place1/camera1/preset2/slot3) / slot_id 1..N 유일·연속(0-based 재부여) / FK 무결(`foreign_key_check`=[]) / img_w·img_h 보존·자동탐색 NULL / preset_slotidx 1-based·slot_roi 정규화 / 센터라이징 UPDATE(globalIdx→slot_id) / **멱등 재실행** |
+| `dbRoutesMasking.test.ts`(신규, 3) | `camera_info.password` → `****`(NULL 유지) / 검색에서 민감 컬럼 제외(password 값 검색 시 행 비노출) / 타 테이블(place_info) 무영향. (devB 는 미작성 — 기존 dbRoutes.test.ts 16개는 마스킹 무관, 본 파일이 신규.) |
+| `boundaryCrossCheck.test.ts`(신규, 4) | §3 경계면 교차. |
 
-### 폭 ↔ 차량 대비 (차량 bbox = VPD `vehicles[].rect`, 번호판으로 매칭)
+## 3. 경계면 교차 검증 결과 (핵심)
 
-| 프레임 | idx | 판폭(px) | region bbox(px) | 차량 bbox(px) | regionW/vehW | 차량 덮음률 |
-|--------|-----|----------|-----------------|---------------|--------------|-------------|
-| p1 | 1 | 71.1 | 284×149 | 297×284 | 0.96 | 41.6% |
-| p1 | 2 | 61.6 | 246×133 | 263×251 | 0.93 | 35.5% |
-| p1 | 3 | 51.4 | 205×115 | 320×203 | 0.64 | 26.2% |
-| p1 | 4 | 53.9 | 215×115 | 281×199 | 0.77 | 29.4% |
-| p1 | 6 | 51.6 | 206×114 | 340×218 | 0.61 | 21.3% |
-| p2 | 9 | 17.7 | 112×76 | 510×269 | **0.22** | **5.0%** |
-| p2 | 11 | 16.9 | 106×72 | 407×217 | **0.26** | **7.1%** |
-| p2 | 12 | 17.8 | 112×76 | 398×234 | **0.28** | **7.5%** |
-| p2 | 13 | 19.3 | 122×83 | 455×266 | **0.27** | **6.8%** |
-| p3 | 14 | 92.7 | 394×316 | 751×473 | 0.53 | 15.5% |
-| p3 | 15 | 73.0 | 308×240 | 723×389 | 0.43 | 11.6% |
-| p3 | 16 | 59.1 | 251×198 | 583×338 | 0.43 | 10.6% |
+1. **slot_id(정수) ↔ setup_artifact.globalIndex.globalIdx** — `boundaryCrossCheck.test.ts`: 파일 전 주차면이 검출로 점유되는 통제 시나리오에서 `getSlotSetup().slotId` 집합 == `artifact.globalIndex.globalIdx` 집합 == `[1,2]`(1-based 단일 정수 넘버링). 문자열 `c{c}p{p}s{n}` 미저장(정수형) 확인.
+2. **PtzCalibrator `SlotCenteringRow`(정수 slot_id + 분해 PTZ) ↔ slot_setup 행** — `centeringSlot.test.ts` T7 + `centeringBoundary.test.ts`: `it.globalIdx`(정수) → `slot_setup.slot_id`, `it.ptz{pan,tilt,zoom}` == `slot_setup{pan,tilt,zoom}`. REST `/calibrate/result` item.slotId 는 문자열, item.globalIdx 는 정수 = DB slot_id. 1-based(cam_id/preset_id/preset_slotidx) 재확인. 실패 슬롯은 slot_setup 미갱신(centered 행수 == 성공 항목수).
+3. **`/capture/slots`(SlotSetupView) ↔ 뷰어 소비(web/core.js `buildFlatSlotRows`)** — `boundaryCrossCheck.test.ts` + `placeGlobalIdx.test.ts`: 응답 필드 `slotId`(정수)·`presetKey`(파생)·`vpd`(객체|null)·`lpd`(quad|null)·`roi`(4점). 뷰어는 `occupied = !!db.vpd`(slot_setup 은 점유상태 미저장 → 배정 차량 bbox 유무로 표시), `vpd/lpd` boolean 파생. globalIdx 1-based 오름차순. 구 필드 `slotIdx`/`occupied` 부재 확인.
 
-(p1 idx 7 · p2 idx 8 은 대응 차량 bbox 미검출 — plate 만 존재. region 코드와 무관한 기존 검출/연계 사안.)
+## 4. FK 부모 선행성 (경계 발견 — devC §7-1 확인)
 
----
+`slot_setup.(cam_id,preset_id) → preset_pos` FK(`foreign_keys=ON`)가 **실효**함을 양방향 검증:
+- 부모(place/camera/preset_pos) 시드 시 `replaceSlotSetup`/`getSlotSetup` 정상.
+- 부모 미시드 시 `replaceSlotSetup` INSERT 가 FK 위반 → 트랜잭션 롤백. Finalizer 는 이를 warn 후 흡수(artifact 는 정상 반환, slot_setup 만 빈 채로). → **finalize/센터라이징 전에 마이그레이션(preset_pos 채움) 선행 필수**. 이 신 불변식에 맞춰 Finalizer/PtzCalibrator/경계 테스트 모두 부모 시드 후 검증하도록 작성.
 
-## 3. 관찰 소견
+## 5. 발견 사항 (구현 버그 아님 — 아키텍처 관찰, 리더/devC 참고)
 
-### 3-1. 【확정 버그】 p2 의 번호판 quad 점 순서가 90° 순환 회전 → û 가 번호판 **단축**을 잡는다
+버그로 판정된 **구현 결함은 없음**. 아래는 리팩토링에 따른 정당한 거동 변화(테스트 재작성으로 반영):
 
-설계 §2-1 은 `NormalizedQuad = [TL,TR,BR,BL]` 이고 `TL→TR` 이 번호판 **가로**라고 전제한다. **실 LPD 출력은 이 전제를 지키지 않는다.**
+1. **체크포인트 정지 게이트 이동**(qa-capturejob 관찰): 구 `CheckpointReviewer`/`FloorRoiReviewer` 는 "정지 중이면 review 호출 자체 스킵"의 외곽 게이트가 있었다. 신 `occupancyReviewer.review` 는 checkpoint 진입 시 항상 호출되고, 정지 반응성은 주입된 `shouldStop` 콜백(프리셋별 조기 break)로 **내부 위임**된다. 구 B1 테스트("정지 중 review 미호출") 2건은 더 이상 존재하지 않는 거동이라 삭제(사유 주석). 잔존 불변식(집계 수행·정지 반응)은 유지·검증됨. → 의도된 설계로 보이나 아키텍트 1회 확인 권장.
+2. **`web/core.d.ts` 스테일 선언 정정**(qa-finalizer): `buildFlatSlotRows` 앰비언트 타입이 구 `ParkingSlotView`(slotIdx/occupied) 를 참조했으나 실제 `web/core.js` 는 이미 신 `SlotSetupView`(slotId/vpd) 로 마이그레이션됨. `.d.ts` 만 스테일 → 실제 구현에 맞게 선언 갱신(런타임 거동 변화 0, `src/**` 아님). **테스트 외 유일한 비-소스 파일 수정** — 별도 리뷰 대상으로 명시.
 
-번호판 quad 네 변의 픽셀 길이 실측:
+## 6. 미검증 한계 (은닉 금지)
 
-| 프레임 | TL→TR (û 채택변) | TR→BR (직교변) | 장축이 어디인가 |
-|--------|------------------|----------------|-----------------|
-| p1 idx1 | **71.1** | 19.0 | TL→TR ✔ 전제대로 |
-| p3 idx14 | **92.7** | 28.0 | TL→TR ✔ 전제대로 |
-| **p2 idx9** | 17.7 | **56.5** | **TR→BR ✘ 순환 회전됨** |
-| **p2 idx13** | 19.3 | **72.7** | **TR→BR ✘** |
-
-p2 5개 전부 동일. 종횡비는 p1 3.7:1 / p2 3.2:1 로 **둘 다 정상 번호판 형상** — 즉 p2 의 판이 비스듬해 납작해진 게 아니라 **모서리 라벨이 한 칸 돌아간 것**이다(ultralytics OBB 는 박스 자체 회전 순서로 4점을 내므로 라벨의 순환 회전이 자연 발생). `src/domain/geometry.ts:92 normalizeQuad` 는 LPD 폴리곤 순서를 **정규화 없이 그대로 통과**시킨다 — 규약은 문서상 존재하나 **강제하는 코드가 없다**.
-
-결과: p2 에서 `plateAxes` 가 `W` = 번호판 **높이**(≈17px, 실폭 ≈57px 아님)를 잡고, û 는 번호판 **세로축**이 된다. 사다리꼴이 **90° 돌아가서** 생성되고(그 "위" 방향이 화면상 옆으로 뻗는다) 크기는 약 **3.3× 과소**. p2 스샷에서 사다리꼴이 번호판 옆으로 납작하게 뻗는 모습이 이것이다.
-
-→ **Goal ② (위/아래 변 ∥ 번호판 가로 기울기) 는 p2 에서 위반**. §2 의 "외적 ≈ 0" 은 û 기준 평행일 뿐, û 자체가 틀린 축이라 무의미하다. (경계면 교차 비교로만 드러나는 종류의 불일치 — 유닛테스트는 규약을 지키는 픽스처만 쓰므로 T2/T5 는 통과한다.)
-
-### 3-2. 【관찰】 실데이터에서 자동 배율 탐색 루프가 한 번도 작동하지 않았다
-
-3프레임 전부 `globalScale = 4.0`(상한 즉시 채택), 최대 교차면적 **정확히 0**. R1(겹침 금지)은 만족하지만 **영역이 작아서 자명하게 만족**된 것이지, 탐색 루프가 조정한 결과가 아니다. 2단계 shrink 폴백은 **합성 스트레스 케이스에서만** 실행됐다.
-
-### 3-3. 【관찰】 스트레스 케이스 — 2단계 폴백은 정상 동작
-
-합성 밀착 번호판 3개(중심간격 0.045, 판폭 0.030): 3.5 고정 시 최대 교차면적 4.652e-3 · `overlapPairs=[[100,101],[100,102],[101,102]]` → shrink 후 scale `[1.674, 1.000, 1.674]` · 최대 교차면적 **0.000e+0** · `overlapPairs=[]`. 겹침 해소 확인(시각+수치). 가운데 인스턴스는 `minScale=1.0` 하한에 도달 — 하한이 실제로 물렸다.
-
-### 3-4. 【관찰】 Goal ④(폭 ≈ 차량 폭)는 정면뷰에서만 성립
-
-- p1(거의 정면): regionW/vehW **0.61~0.96** — 폭은 그럴듯하나 덮음률 21~42%.
-- p3(사선뷰): **0.43~0.53**, 덮음률 10~16% — 차량 **앞코만** 덮는다.
-- p2: 3-1 버그 때문에 별도 판정 불가.
-
-두 원인이 겹친다. (a) 3-1 의 축 버그. (b) 설계 §2-3 상 사다리꼴 세로/가로 ≈ 0.85 로 **거의 정사각**인데, 실 프레임의 차량은 화면상 길쭉하다 — 특히 사선뷰(p3)에서 차체가 화면 위가 아니라 **위-왼쪽 대각으로** 뻗어 사다리꼴이 앞코만 덮는다. 설계 §0 R2 의 근거("차체는 화면 위쪽으로 뻗음")는 카메라가 차축을 따라 볼 때만 성립하며, p2/p3 는 그 조건이 아니다.
-단, 사선뷰의 차량 bbox 는 차 **폭**이 아니라 **길이**를 담으므로 `regionW/vehW` 는 사선뷰에서 공정한 척도가 아님을 함께 밝힌다 — 위 판정은 스샷 육안이 1차 근거다.
-
-### 3-5. Goal 대비 종합
-
-| Goal | 판정 | 근거 |
-|------|------|------|
-| ① 겹침 없음 (`overlapPairs=[]`) | **충족** (단, 3-2 단서) | 실 3프레임 전부 `[]`, 최대 교차면적 0.000e+0 |
-| ② 위/아래 변 ∥ 번호판 가로 | **p1·p3 충족 / p2 위반** | 3-1 — û 가 p2 에서 단축 |
-| ③ 번호판 중심 기준 위가 김 | **충족** | up/down = 1.8333 전수 |
-| ④ 폭 ≈ 차량 폭(3.5~4×), 옆차 미침범 | **미충족** | 3-4 — 옆차 침범은 없으나 자기 차도 못 덮음 |
-
----
-
-## 4. 산출물
-
-| 파일 | 내용 |
-|------|------|
-| `_workspace/_qa_shots/iter1_cam1_p1.png` | 실검출 · 정면뷰 · 6 region · globalScale 4.0 |
-| `_workspace/_qa_shots/iter1_cam1_p2.png` | 실검출 · **3-1 축 버그가 보이는 프레임** |
-| `_workspace/_qa_shots/iter1_cam1_p3.png` | 실검출 · 사선뷰 · 앞코만 덮음 |
-| `_workspace/_qa_shots/iter1_stress.png` | **합성** 밀착 번호판 · 2단계 shrink 폴백 |
-| `_workspace/_qa_regions.mjs` | 재실행 스크립트 (`node _workspace/_qa_regions.mjs [--refetch] [--top=] [--up=] [--down=] [--smin=] [--smax=]`) |
-| `_workspace/_qa_data/*.json` | 라이브 실검출 캐시(재현용) |
-
-범례: 흰 얇은 선 = 주차면 폴리곤 / 노란 굵은 선 + 점 = 번호판 quad·중심 / 인스턴스별 색상 반투명 = 사다리꼴 region(`idx`·`scale` 라벨) / 상단 = `globalScale`·`overlapPairs`·최대 교차면적.
-
----
-
-## 5. 구현자 인계 (수정 요청)
-
-**3-1 이 선결**이다. 파라미터 튜닝(`topWidthRatio`/`upRatio`)으로는 해결되지 않는다 — 축 자체가 틀렸다.
-
-재현: `node _workspace/_qa_regions.mjs` → `_qa_data/detect_cam1_p2.json` 의 plate quad 네 변 길이 확인(17.7 / 56.5 / 17.7 / 56.5).
-기대: û = 번호판 **장축**(가로). 실제: û = 단축(세로).
-방향(제안, 결정은 설계자/오케스트레이터): `plateAxes` 에서 두 대변 평균 벡터 중 **긴 쪽을 û 로 채택**(번호판은 항상 가로가 김 — 종횡비 3:1 이상 실측)하면 라벨 순환 회전에 불변이 된다. 이때 v̂ 부호 정규화(§2-1)와 핸디드니스 보존을 함께 재검토할 것. 유닛테스트에 **순환 회전된 quad 픽스처**(T15 의 180° 반전 외에 90°/270°) 추가 필요 — 현재 T1~T15 는 규약 준수 픽스처만 쓰므로 이 버그를 못 잡는다.
-
-3-4(사다리꼴이 차량을 못 덮음)는 3-1 수정 후 재측정해야 순수 파라미터 문제인지 분리된다.
-
----
-
-# 【3차 이터레이션】 축 수정 시각 확인 + 세로 길이(upRatio) 스윕
-
-> 검증자(qa-tester) 산출물. 2026-07-16. 입력: 본 보고서 1차분 · `02_developer_changes.md`(2차 수정).
-> **파라미터 결정 미수행** — 스샷·수치 증거만 생성. 결정은 오케스트레이터 몫.
-> 재실행: `node _workspace/_qa_regions_iter3.mjs [--refetch] [--live]`
-
-## 0. 데이터 출처와 공정 비교
-
-라이브 `POST http://localhost:13020/capture/detect` (cam=1, preset=1/2/3) **재검출 수행**(HTTP 200 ×3) → `_qa_data_iter3/` 에 캐시.
-
-**검출은 1차와 동일하지 않다 — 명시한다.** 다만 구조적 차이가 아니라 **추론 지터**다:
-
-| 프레임 | plates 수 | vehicles 수 | plate quad 최대 좌표차 | vehicle rect 최대차 |
-|--------|-----------|-------------|----------------------|--------------------|
-| p1 | 6 → 6 (동일) | 7 → 7 (동일) | 1.0e-3 (**1.96 px**) | 2.8e-3 (5.3 px) |
-| p2 | 6 → 6 (동일) | 6 → 6 (동일) | 2.0e-3 (**3.77 px**) | 1.2e-2 (22.0 px) |
-| p3 | 4 → 4 (동일) | 4 → 4 (동일) | 2.1e-3 (**4.00 px**) | 2.4e-2 (**46.2 px**) |
-
-`place-roi` 는 1차와 **완전 동일**. 검출 개수·대응 관계는 전 프레임 보존, 좌표만 미세 이동(신뢰도도 소수 3째자리 수준 변동. 단 p1 최저 plate 0.7846→0.8879).
-
-→ **본 보고서의 스샷·수치는 전부 `_qa_data/`(1차 검출 캐시)로 렌더**했다. 코드 변경만이 유일한 변수가 되도록 하는 공정 비교 우선 원칙. `--live`(3차 검출) 로도 전량 재실행해 **결론 불변**을 확인했다(스윕 덮음률 평균 차 ≤ 0.5%p, globalScale·overlapPairs 전 수준 동일).
-
-**게이트 독립 재실행**: `npx vitest run` → **151 files / 1660 tests 전량 통과**, `npx tsc --noEmit` → **exit 0**. 구현자 2차 보고와 일치.
-
-## 1. 할 일 A — 축 수정 시각 확인
-
-기본 cfg(구현 DEFAULTS: `up=0.55 down=0.30 top=0.85`), 1차와 동일 렌더 규약(+ 차량 bbox 회색 점선 추가 — 덮음률 분모의 실체를 눈으로 확인시키기 위함).
-
-| 프레임 | globalScale | regions | overlapPairs | 최대 교차면적 | 판폭 평균(정규화) 1차 → 3차 |
-|--------|-------------|---------|--------------|--------------|---------------------------|
-| p1 | 4.0 | 6 (1,2,3,4,6,7) | `[]` | 0.000e+0 | 0.0293 → **0.0293 (불변)** |
-| p2 | 4.0 | 5 (8,9,11,12,13) | `[]` | 0.000e+0 | 0.0159 → **0.0308 (1.94×)** |
-| p3 | 4.0 | 3 (14,15,16) | `[]` | 0.000e+0 | 0.0544… → **불변** |
-
-### 1-1. 【확인】 p2 사다리꼴은 더 이상 90° 돌지 않는다
-
-`iter3_cam1_p2.png` 육안: 사다리꼴의 위/아래 변이 **노란 번호판 quad 의 장축과 평행**하게 놓이고, 1차에서 번호판 옆으로 납작하게 뻗던 형상이 사라졌다. 크기도 판폭 기준 1.94× 회복(1차 §3-1 의 "과소" 해소). 1차 `iter1_cam1_p2.png` 와 나란히 보면 차이가 명확하다.
-
-p2 덮음률도 함께 회복: **5.0~7.5% → 15.2~26.8%**.
-
-### 1-2. 【확인】 p1·p3 은 1차와 동일
-
-덮음률이 1차 표와 **소수 첫째자리까지 완전 일치** — p1 `1:41.6% 2:35.5% 3:26.2% 4:29.4% 6:21.3%`, p3 `14:15.5% 15:11.6% 16:10.6%`. 동일 입력(1차 캐시)이므로 이 일치는 **p1·p3 무회귀의 독립 확인**이다(구현자 §5 의 딥 비교 주장과 부합).
-
-> 표기 차이 주의(모순 아님): 1차 보고서 §2 의 `판폭(px)`(예: p3 idx14 = 92.7)은 **실 픽셀 길이**(이방성 반영), 구현자 §5 의 `width(px-eq)`(= 104.4)와 본 표의 정규화 판폭×1920 은 **정규화폭 환산**이다. 정의가 다를 뿐 값은 각자 일관된다.
-
-## 2. 할 일 B — upRatio 스윕
-
-`downRatio=0.30`, `topWidthRatio=0.85` 고정. **구현 상수 미수정** — 전부 `computeOccupancyRegions(items, cfg)` 의 `cfg` 주입.
-
-### 2-1. 덮음률 측정 방법 (1차와 동일 정의 유지)
-
-```
-덮음률(idx) = area(region ∩ vehicleRect) / area(vehicleRect)
-```
-- `vehicleRect` = VPD `vehicles[].rect`(축정렬 bbox, 정규화). 교차면적은 구현과 동일한 `convexIntersectionArea`.
-- **매칭**: plate quad ↔ `vehicles[].plate.quad` 좌표 동일성. `judge` 의 plates 는 `detect.plates` ∪ `vehicles[].plate` 합집합이므로 vehicle 유래 plate 만 대응 차량을 가진다 → p1 idx7 · p2 idx8 은 `n/a`(1차와 동일 사유).
-- 1차 p1·p3 수치를 **소수 첫째자리까지 재현**해 방법 동일성을 실증했다.
-
-**이 지표의 한계(명시)**: bbox 는 **차량 실루엣이 아니다**. 축정렬 사각이라 사선뷰(p3)에서 차량 대각 길이를 담아 **빈 아스팔트를 다량 포함**한다 → p3 는 사다리꼴이 차체를 완벽히 덮어도 100%에 도달할 수 없다. **p1 과 p3 의 덮음률 절대값을 서로 비교하면 안 되고**, 같은 프레임 내 **수준 간 증가폭**만 유효하다.
-
-### 2-2. 스윕 수치표 (수준 × 프레임)
-
-| preset | upRatio | globalScale | overlapPairs | 최대 쌍 교차면적 | 덮음률 평균 | 덮음률 범위 | 이웃침범률* 평균 |
-|--------|---------|-------------|--------------|-----------------|------------|------------|-----------------|
-| p1 | 0.55 | **4.0** | `[]` | 0.00e+0 | 30.8% | 21.3~41.6% | 13.3% |
-| p1 | 0.90 | **4.0** | `[]` | 0.00e+0 | 43.8% | 30.4~58.8% | 19.0% |
-| p1 | 1.30 | **4.0** | `[]` | 0.00e+0 | 58.7% | 41.0~78.6% | 25.0% |
-| p1 | 1.70 | **4.0** | `[]` | 0.00e+0 | 62.9% | 45.6~84.1% | 26.9% |
-| p3 | 0.55 | **4.0** | `[]` | 0.00e+0 | 12.6% | 10.6~15.5% | 6.7% |
-| p3 | 0.90 | **4.0** | `[]` | 0.00e+0 | 18.9% | 15.9~23.4% | 14.6% |
-| p3 | 1.30 | **4.0** | `[]` | 0.00e+0 | 26.5% | 22.6~32.6% | 24.2% |
-| p3 | 1.70 | **4.0** | `[]` | 0.00e+0 | 33.3% | 29.2~39.8% | 33.6% |
-
-인스턴스별 덮음률(p1): up0.55 `1:41.6 2:35.5 3:26.2 4:29.4 6:21.3` → up0.90 `58.8/50.5/37.4/41.9/30.4` → up1.30 `78.6/67.9/50.4/55.5/41.0` → up1.70 `84.1/75.2/53.6/56.1/45.6`.
-인스턴스별 덮음률(p3): up0.55 `14:15.5 15:11.6 16:10.6` → up0.90 `23.4/17.4/15.9` → up1.30 `32.6/24.5/22.6` → up1.70 `39.8/30.9/29.2`.
-
-\* **이웃침범률은 보조 관측 — 덮음률의 대체 지표가 아니다.** 정의 `max_j area(region ∩ 타차량rect_j)/area(rect_j)`. 도입 사유: overlapPairs 는 region↔region 만 보므로 "**옆 차량**을 침범하는가"(Goal ④ 후반부)는 측정되지 않는데, 스샷에서 그 현상이 보였기 때문이다. 한계: 사선뷰는 **차량 bbox 끼리 이미 서로 겹쳐** upRatio 와 무관한 바닥값이 깔린다 → 절대값 무의미, **수준 간 증가폭만** 읽어야 한다.
-
-### 2-3. 【핵심 관찰】 겹침 충돌은 스윕 전 구간에서 **발생하지 않았다**
-
-오케스트레이터가 지정한 관찰 포인트(upRatio↑ → 좌우 이웃 겹침 → globalScale < 4.0 또는 2단계 폴백)는 **8수준 전부에서 미발생**. 전 수준 `globalScale=4.0`(상한 즉시 채택), `overlapPairs=[]`, 최대 쌍 교차면적 **정확히 0.000e+0**.
-
-기하적 이유(관찰 사실): 사다리꼴은 upRatio 를 키우면 **v̂ 방향(세로)으로만** 자란다 — 폭(`bw=s·W`)은 upRatio 와 무관하다. 이웃 region 들은 거의 평행한 띠라서 세로로 늘려도 서로 만나지 않는다. **R1(겹침 금지)과 R4(3.5~4배)는 스윕 범위 [0.55, 1.70] 에서 upRatio 와 충돌하지 않는다.**
-
-단, 이는 **1차 §3-2 관찰의 연장**이다 — 배율 탐색 루프는 여기서도 한 번도 작동하지 않았고, R1 은 "영역이 작아서 자명하게" 만족된다. 겹침이 upRatio 를 제약하지 않는다는 사실은 **[0.55, 1.70] 구간·본 3프레임에 한한 관측**이다.
-
-### 2-4. 【관찰】 클립은 어느 수준에서도 발생하지 않았다
-
-up=1.70 에서도 단위 정사각형(이미지 경계) 밖으로 나간 사다리꼴 정점은 **p1·p3 전 인스턴스에서 0개**. → 덮음률의 포화는 경계 절단 아티팩트가 아니라 **실제 기하**다.
-
-### 2-5. 【관찰】 스샷 육안 소견 (본 것만)
-
-- **p1 (정면뷰)**: `up=0.55` 는 차량 앞부분만. `up=0.90` 은 보닛~앞유리. **`up=1.30` 에서 사다리꼴이 차체를 대체로 덮는다**(덮음률 평균 58.7%). `up=1.70` 은 **다수 인스턴스의 사다리꼴 상단이 차량 지붕을 넘어 배경 아스팔트로 뻗는다** — 덮음률 증가폭도 1.30→1.70 구간에서 +4.2%p 로 급감(0.90→1.30 은 +14.9%p).
-- **p3 (사선뷰)**: 전 수준에서 사다리꼴이 **화면 세로(−v̂)로만** 뻗는데 **차체는 화면 위-왼쪽 대각으로** 뻗는다(1차 §3-4 와 동일 현상, 축 수정 후에도 남음 — 축 버그와 무관한 별개 사안). 그 결과 upRatio 를 키울수록 사다리꼴 상단이 자기 차 지붕이 아니라 **왼쪽/뒤쪽 이웃 차량 위로 올라탄다**: `up=1.70` 스샷에서 idx15·idx16 의 상단이 이웃 차량 차체를 덮는 모습이 보인다.
-- 이것이 수치에도 나타난다 — p3 는 up=1.70 에서 **이웃침범률 평균(33.6%)이 자기 차 덮음률 평균(33.3%)을 추월**한다. p1 은 같은 수준에서 62.9% vs 26.9% 로 자기 차 우위가 유지된다.
-
-## 3. Goal 대비 (3차 시점, 기본값 up=0.55 기준)
-
-| Goal | 판정 | 근거 |
-|------|------|------|
-| ① 겹침 없음 (`overlapPairs=[]`) | **충족** (1차 §3-2 단서 유지) | 실 3프레임 + 스윕 8수준 전부 `[]`, 교차면적 0.000e+0 |
-| ② 위/아래 변 ∥ 번호판 가로 | **p1·p2·p3 전부 충족** | **p2 위반 해소 확인**(§1-1) — 2차 수정 유효 |
-| ③ 번호판 중심 기준 위가 김 | **충족** | up/down = 1.8333 (기본값). 스윕 전 수준에서 up > down 유지 |
-| ④ 폭 ≈ 차량 폭, 옆차 미침범 | **기본값에선 미충족 / 상충 관측** | p1 은 up↑ 로 덮음 개선되나(§2-5), p3 는 up↑ 가 **이웃 차량 침범을 동반**(§2-5) |
-
-## 4. 산출물
-
-| 파일 | 내용 |
-|------|------|
-| `_workspace/_qa_shots/iter3_cam1_p1.png` | A · 실검출 · 정면뷰 · 1차와 동일 확인 |
-| `_workspace/_qa_shots/iter3_cam1_p2.png` | A · **축 수정 확인 — 90° 회전 해소** |
-| `_workspace/_qa_shots/iter3_cam1_p3.png` | A · 사선뷰 · 1차와 동일 확인 |
-| `_workspace/_qa_shots/iter3_sweep_p1_up{055,090,130,170}.png` | B · p1 스윕 4수준 |
-| `_workspace/_qa_shots/iter3_sweep_p3_up{055,090,130,170}.png` | B · p3 스윕 4수준 |
-| `_workspace/_qa_regions_iter3.mjs` | 재실행 스크립트(스윕 재실행 가능, `--refetch`/`--live`) |
-| `_workspace/_qa_data_iter3/*.json` | 3차 라이브 재검출 캐시 + `sweep_table.json`(수치 원본) |
-
-범례: 흰 얇은 선 = 주차면 폴리곤 / **회색 점선 = 차량 bbox(덮음률 분모)** / 노란 굵은 선 + 점 = 번호판 quad·중심 / 인스턴스별 색상 반투명 = 사다리꼴 region(`idx`·`scale`) / 상단 = `globalScale`·`overlapPairs`·최대 교차면적 + 덮음률.
-
-## 5. 판단 유보 사항 (오케스트레이터 결정 대기)
-
-- **upRatio 값 결정은 하지 않았다.** 위 수치·스샷이 증거의 전부다.
-- 결정 시 고려하도록 관측 사실만 재확인: (a) 겹침은 [0.55, 1.70] 에서 upRatio 를 제약하지 않는다 → R1 은 제약 조건이 아니다. (b) p1 과 p3 의 최적점이 **같은 값이 아닐 수 있다** — p1 은 1.30 부근에서 차체를 덮고 1.70 은 배경으로 넘치는 반면, p3 는 1.70 까지도 자기 차 덮음률이 39.8% 에 그치면서 이웃 침범이 동반된다. (c) p3 의 근본 원인은 **사다리꼴이 화면 세로로만 뻗는 것**(v̂ = 번호판 세로축)이며 upRatio 로는 해소되지 않는 축 방향 문제로 보인다 — 다만 이는 **관측이지 진단이 아니며**, 대안(차체 방향 추정·cuboid 활용 등)은 설계자 판단 영역이다.
-
----
-
-# 【5차 이터레이션】 최종 확정본 검증 — 수렴 확인
-
-> 검증자(qa-tester) 산출물. 2026-07-16. 입력: `02_developer_changes.md` 4차 섹션(`DEFAULTS.upRatio` 0.55→**0.90** 확정) + `web/occupancyRegion.js` L19 실물 확인.
-> **조건: `computeOccupancyRegions(items)` 를 cfg 인자 없이 호출** = 뷰어 런타임과 동일. 입력은 1차 캐시 검출(`_qa_data/`) 고정 — 3차와 동일한 공정 비교 원칙(코드 기본값만이 변수).
-> 스크립트: `_workspace/_qa_regions_final.mjs` (3차 파이프라인·렌더 규약 재사용, 기하 재구현 없음).
-
-## 0. 측정 방법 — 왜 픽셀에서 쟀나
-
-2차 개발자 보고(`02_developer_changes.md` §2 리스크 노트)가 지적한 정규화 이방성(1080/1920 = **0.5625**)을 반영해 ②③④ 전량을 **픽셀 공간(1920×1080)**에서 측정했다.
-
-- **번호판 장축은 `plateAxes` 로 재도출하지 않았다.** quad 에서 대변 두 쌍의 픽셀 평균 길이를 직접 비교해 긴 쪽을 장축으로 **독립 산출**한다. `plateAxes` 를 쓰면 순환 논증이 되고, **정규화 장축 ≠ 픽셀 장축**일 위험(2차 보고의 실효 마진 1.82 문제)을 놓친다.
-- region 다각형은 경계 클램프 결과라 변 길이·Ct/Cb 가 잘릴 수 있으므로, ③④ 는 `buildTrapezoid(axes, scale)` 로 **미클램프 사다리꼴을 재구성**해 측정했다(이 호출도 cfg 없음). 실측 결과 3프레임 전부 클립 미발생.
-
-## 1. 프레임별 실측 (cfg 주입 없음 · 인스턴스 14개 전수)
-
-| 프레임 | idx | ②위변각(°) | ②아래변각(°) | ③\|Ct−C\|(px) | \|Cb−C\|(px) | ③비 | ④아래폭(px) | 판장축(px) | ④배 | 판 픽셀종횡비 |
-|--------|-----|-----------|-------------|------------|-----------|-----|-----------|----------|-----|------------|
-| p1 | 1 | 0.00 | 0.00 | 144.5 | 48.2 | 3.00 | 284.5 | 71.1 | 4.00 | 3.73 |
-| p1 | 2 | 0.00 | 0.00 | 125.4 | 41.8 | 3.00 | 246.3 | 61.6 | 4.00 | 3.70 |
-| p1 | 3 | 0.00 | 0.00 | 105.1 | 35.0 | 3.00 | 205.6 | 51.4 | 4.00 | 3.46 |
-| p1 | 4 | 0.00 | 0.00 | 109.7 | 36.6 | 3.00 | 215.6 | 53.9 | 4.00 | 3.81 |
-| p1 | 6 | 0.00 | 0.00 | 105.5 | 35.2 | 3.00 | 206.6 | 51.6 | 4.00 | 3.30 |
-| p1 | 7 | 0.00 | 0.00 | 94.6 | 31.5 | 3.00 | 183.8 | 46.0 | 4.00 | 3.50 |
-| **p2** | 8 | **0.00** | **0.00** | 97.3 | 32.4 | 3.00 | 189.3 | 47.3 | 4.00 | 3.24 |
-| **p2** | 9 | **0.00** | **0.00** | 116.1 | 38.7 | 3.00 | 225.9 | 56.5 | 4.00 | 3.19 |
-| **p2** | 11 | **0.00** | **0.00** | 113.3 | 37.8 | 3.00 | 220.8 | 55.2 | 4.00 | 3.28 |
-| **p2** | 12 | **0.00** | **0.00** | 124.5 | 41.5 | 3.00 | 242.6 | 60.7 | 4.00 | 3.40 |
-| **p2** | 13 | **0.00** | **0.00** | 149.6 | 49.9 | 3.00 | 290.9 | 72.7 | 4.00 | 3.76 |
-| p3 | 14 | 0.00 | 0.00 | 221.0 | 73.7 | 3.00 | 370.7 | 92.7 | 4.00 | 3.31 |
-| p3 | 15 | 0.00 | 0.00 | 170.0 | 56.7 | 3.00 | 291.9 | 73.0 | 4.00 | 3.27 |
-| p3 | 16 | 0.00 | 0.00 | 139.6 | 46.5 | 3.00 | 236.5 | 59.1 | 4.00 | 2.94 |
-
-집계(각도 표본 28개): ② `min 0.000 / max 0.000`, ③ `min 3.000 / max 3.000`, ④ `min 4.000 / max 4.000`.
-3프레임 전부 `globalScale = 4`(상한 즉시 채택), `overlapPairs = []`, 최대 쌍 교차면적 **0.000e+0**(전 쌍 정확히 0).
-
-## 2. 【중요】 측정기 판별력 검증 — 0.00/3.00/4.00 은 항진명제가 아닌가
-
-전 인스턴스가 소수점까지 동일한 값이라 **측정 자체가 무의미한 항진명제(구현을 그대로 되읽는 것)일 가능성**을 먼저 배제했다. 결함/변형을 주입해 값이 움직이는지 확인(`_workspace/_qa_falsify_final.mjs`):
-
-| # | 주입 | 기대 | 실측 | 판정 |
-|---|------|------|------|------|
-| F1 | 2차 수정 **전** `plateAxes`(TL→TR 맹신) | p2 에서 ② 가 90° 로 튐 | p2 idx 8·9·11·12·13 **전 5개 90.00°** / p1·p3 전 9개 0.00° 불변 | ★ **결함 검출됨** |
-| F2 | `upRatio: 0.55`(4차 이전 값) | ③ 이 1.833 으로 이동 | 3.000 → **1.833** | ★ 측정 유효 |
-| F3 | `widthScaleMin/Max: 3.5` | ④ 가 3.50 으로 이동 | 4.000 → **3.500** | ★ 측정 유효 |
-
-→ 세 측정 모두 **살아 있다**. 특히 F1 은 4차 확정본에서 ②=0.00° 가 "p2 축 수정이 실제로 유지된다"는 **실증**임을 보인다(수정이 빠졌다면 같은 측정기가 90°를 냈을 것).
-
-**단, ② 의 한계를 명시한다**: `buildTrapezoid` 는 위·아래 변을 `û` 로 만들므로 "region 변 ∥ û" 자체는 **구성상 참**이다. ② 가 실제로 판별하는 것은 **`û` 가 장축을 잡았는가(정규화 장축 = 픽셀 장축인가)** 한 가지다 — F1 이 그 축이 바로 결함 축임을 확인해 준다. ② 는 사다리꼴 변이 **차량의 실제 수평**과 맞는지까지는 재지 않는다(그 판정은 §4 육안 소견).
-
-## 3. Goal 4항목 최종 판정표
-
-| # | 항목 | 기준 | 실측 | 판정 |
-|---|------|------|------|------|
-| ① | **겹침 0** | 3프레임 `overlapPairs=[]` | p1·p2·p3 전부 `[]`. 최대 쌍 교차면적 **0.000e+0**(전 14개 region, 전 쌍 정확히 0) | **달성** |
-| ② | **가로 수평 정합** | region 위/아래 변 ∥ 번호판 장축 | 전 14 인스턴스 · 28 표본 **0.00°**(max 0.000). p2 5개 포함 — 축 수정 유지 실증(F1) | **달성** |
-| ③ | **위가 김** | \|Ct−C\|/\|Cb−C\| = 3.00 | 전 14 인스턴스 **3.000**(min=max=3.000) = 0.90/0.30 | **달성** |
-| ④ | **폭 3.5~4배** | 아래변 폭/판 장축 폭(px) = 4.00 | 전 14 인스턴스 **4.000**(min=max=4.000, 픽셀 기준) | **달성** |
-
-**미달 항목 없음.** ④ 가 정규화가 아닌 픽셀에서도 정확히 4.00 인 이유: 두 길이가 **같은 방향(û)** 이라 이방성 계수가 분자·분모에서 상쇄된다(이방성은 *종횡비* 를 왜곡하지, *동일 방향 길이비* 는 왜곡하지 않는다). 2차 보고가 지적한 0.5625 문제는 ④ 가 아니라 **장축 채택 판정**에 걸리는 리스크였고, 그것은 §2 F1 로 별도 확인했다.
-
-## 4. 스샷 육안 소견 (본 것만)
-
-| 스샷 | 소견 |
-|------|------|
-| `_qa_shots/final_cam1_p1.png` | 6개 사다리꼴이 각 차량 위에 **똑바로** 서 있고 서로 닿지 않는다. 위쪽이 길어 보닛~앞유리를 덮는다. |
-| `_qa_shots/final_cam1_p2.png` | **5개 전부 90° 회전 없이 정립** — 4차 확정 기본값에서도 축 수정이 유지됨을 눈으로 확인. 겹침 없음. |
-| `_qa_shots/final_cam1_p3.png` | 3개 정립·비겹침. 사선뷰라 region 이 차량 실루엣 대비 작아 앞부분 위주로 덮는다(3차 §3-4 소견 유지 — goal 4항목 밖). |
-| `_qa_shots/final_stress.png` | 합성 밀착 3개에서 2단계 폴백 발화. |
-
-## 5. 스트레스 케이스 (최종 기본값 · cfg 없음)
-
-합성 밀착 입력(중심간격 0.045 · 판폭 0.030 — 1차와 동일, **실검출 아님**):
-
-```
-shrink 전(3.5 고정): maxPairArea=6.568e-3  overlapPairs=[[100,101],[100,102],[101,102]]
-shrink 후          : globalScale=null(2단계 폴백)  scales=[1.674, 1.000, 1.674]
-                     maxPairArea=0.000e+0  overlapPairs=[]
-```
-
-→ **2단계 shrink 폴백은 최종 기본값에서도 여전히 겹침을 해소한다**(3쌍 전부 → 0).
-
-**【명시】** 스트레스 케이스에서 ④(3.5~4배)는 **성립하지 않는다** — scales 가 1.674/1.000 으로 하한 3.5 를 크게 밑돌고, 가운데 인스턴스는 `minScale=1.0` 에 클램프됐다. 이는 설계가 의도한 **R1(겹침 금지) 우선 트레이드오프**이며, 합성 극단 입력에서만 발생한다(실검출 3프레임은 전부 4.00). 감추지 않고 기록한다.
-
-## 6. 게이트 실측 (5차 독립 재실행)
-
-```
-d:\Work\Parking3D\AgentVLA\ParkAgent\SettingAgent> npx vitest run
- Test Files  151 passed (151)
-      Tests  1660 passed (1660)
-   Duration  23.87s
-VITEST_EXIT=0
-
-d:\Work\Parking3D\AgentVLA\ParkAgent\SettingAgent> npx tsc -p tsconfig.json --noEmit
-TSC_EXIT=0        ← 출력 없음
-```
-
-4차 개발자 보고 수치(151/1660, exit 0)와 **일치** — 회귀 0. 테스트 무력화·skip 없음.
+- **실 외부 서비스 스모크 미수행**: VPD/LPD/LLM(Ollama)/실카메라/시뮬레이터 전부 모킹. 실연동(`npm run dev` → 실 REST 라운드트립, 캡처 1런 중 LLM 미호출 로그 확인, 뷰어 DB탭/최종화 표시)은 **리더 경험적 검증 몫**(설계서 §7 P3/P5).
+- **마이그레이션 실 데이터**: `migrateToSettingDb.test.ts` 는 소형 fixture(cam1/preset2/slot3) 종단. 실 `data/Place01/PtzCamRoi.json`(cam1/preset3/slot17) → `data/setting.sqlite` 생성은 devA 스모크(place1/camera1/preset3/slot17) 기확인, 리더 최종 실행 권장.
+- **센터라이징 실 산출 UPDATE**: `slot_ptz.json.items` 실공백 상태 → 실 캘리브레이션 산출본으로 slot_setup UPDATE 는 미검(코드/타입·모킹 검증 완료). devA §8 한계와 동일.
+- **cam2**: 데이터 부재로 cam1 만 검증(설계 §8-1 확정 범위).
 
 ## 7. 산출물
 
-| 파일 | 내용 |
-|------|------|
-| `_workspace/_qa_shots/final_cam1_p1.png` | p1 최종 — cfg 없음, 6 region |
-| `_workspace/_qa_shots/final_cam1_p2.png` | p2 최종 — cfg 없음, 5 region (축 수정 유지 확인) |
-| `_workspace/_qa_shots/final_cam1_p3.png` | p3 최종 — cfg 없음, 3 region |
-| `_workspace/_qa_shots/final_stress.png` | 스트레스 — 2단계 폴백 재확인 |
-| `_workspace/_qa_regions_final.mjs` | 최종 검증 스크립트(cfg 미주입 · 픽셀 실측) |
-| `_workspace/_qa_falsify_final.mjs` | 측정기 판별력 검증(F1~F3 · 항진명제 배제) |
-
-## 8. 결론
-
-**Goal 4항목 전부 달성 — 수렴 확정.** 코드 기본값 그대로(뷰어 런타임 동일 조건) 실검출 3프레임 14 인스턴스에서 겹침 0(교차면적 정확히 0) · 각도차 0.00° · 위/아래 3.000 · 폭 4.000×(px). 게이트 151 files/1660 tests·tsc 전부 통과. 4차 `upRatio=0.90` 확정이 ①④ 하드 제약을 침해하지 않음이 수치로 재확인됐다(3차 스윕 예측과 일치).
-
-**잔여 관찰(goal 밖, 차기 인계)**: (a) p3 사선뷰 덮음률 열세(3차 §3-4), (b) 판 픽셀 종횡비 최소 **2.94**(p3 idx16) — 장단축 역전 임계 1.0 대비 마진은 있으나 2차 보고의 관찰 대상이 유효하다, (c) 실검출에서 자동 배율 탐색은 여전히 상한 즉시 채택으로 미작동(3차 §3-2).
+- 재작성/갱신: §1 (B)(C) + `config.test.ts`/`placeGlobalIdx.test.ts`/`centeringBoundary.test.ts`.
+- 신규: `sqliteStore.test.ts`(재작성)·`migrateToSettingDb.test.ts`·`dbRoutesMasking.test.ts`·`boundaryCrossCheck.test.ts`.
+- 삭제: `parkingSlotsStore`/`occupancyStore`/`floorRoiStore`/`floorRoiStoreCompat`.test.ts (사유 §1-A).
+- 비-테스트: `web/core.d.ts`(스테일 선언 정정, §5-2).

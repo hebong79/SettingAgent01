@@ -40,7 +40,7 @@ function seedLlm() {
     },
     mcp: { enabled: true, transport: 'stdio', servers: [{ name: 'x', transport: 'stdio' }] },
     setupPrompts: { stage1Enabled: true, stage2Enabled: false, stage3Enabled: true },
-    floorRoi: { enabled: true, prompt: 'config/prompts/floor_roi.yaml', timeoutMs: 300000 },
+    floorRoi: { enabled: true, prompt: 'config/prompts/_archive/floor_roi.yaml', timeoutMs: 300000 },
   };
 }
 

@@ -18,10 +18,13 @@ import type { ToolsConfig } from '../src/config/toolsConfig.js';
 /**
  * 검증자(qa-tester): 센터라이징 **경계면 교차 비교**(ParkAgent 하네스 필수 항목).
  *
- *   REST `/calibrate/result` 응답  ↔  `slot_ptz.json` 스키마  ↔  DB `centering_slot` 행
+ *   REST `/calibrate/result`(slot_ptz.json items · 문자열 slotId + ptz JSON)
+ *     ↔  DB `slot_setup` 행(정수 slot_id=globalIdx + pan/tilt/zoom REAL 컬럼)  ↔  `/db/table/slot_setup`
  *
+ * ★ DB 개편: 구 `centering_slot`(문자열 slotId + pos JSON) 폐기 → `slot_setup` 부분 UPDATE(정수 slot_id).
+ *   upsertSlotCentering 은 **기존 slot_setup 행만** UPDATE 하므로 사전 시드(FK 부모 + slot_setup) 필수.
  * 모킹이 아니라 **실 파일 DB + 실 writer + 실 라우트**로 왕복시켜 shape 불일치를 찾는다.
- * 1-based 규약(cam_idx/preset_idx/preset_slotidx — 전체아키텍처 설계서 §211)을 각 경계에서 재확인한다.
+ * 1-based 규약(cam_id/preset_id/preset_slotidx)을 각 경계에서 재확인한다.
  */
 
 const setupCfg = {
@@ -95,7 +98,16 @@ function makeServer() {
   dir = mkdtempSync(join(tmpdir(), 'centering-'));
   const outFile = join(dir, 'slot_ptz.json');
   const dbFile = join(dir, 'test.db');
-  store = new SqliteStore(dbFile); // 실 파일 DB — centering_slot DDL 생성
+  store = new SqliteStore(dbFile); // 실 파일 DB — 신 6테이블 DDL 생성
+  // upsertSlotCentering 은 기존 slot_setup 행만 UPDATE → globalIdx(1,2) 에 대응하는 slot_setup 을 사전 시드.
+  store.upsertPlaceInfo([{ placeId: 1, placeName: 'P' }]);
+  store.upsertCameraInfo([{ camId: 1, camName: null, camUuid: null, url: null, userId: null, password: null, rtspUrl: null, camType: 'ptz', camCompany: null, placeId: 1, imgW: 1000, imgH: 1000, updatedAt: 'seed' }]);
+  store.upsertPresetPos([{ camId: 1, presetId: 1, sname: null, pan: 0, tilt: 0, zoom: 1, updatedAt: 'seed' }]);
+  const roi = JSON.stringify([{ x: 0.6, y: 0.6 }, { x: 0.7, y: 0.6 }, { x: 0.7, y: 0.65 }, { x: 0.6, y: 0.65 }]);
+  store.replaceSlotSetup([
+    { slotId: 1, camId: 1, presetId: 1, presetSlotIdx: 1, slotRoi: roi, vpdBbox: null, lpdObb: null, occupyRange: null, pan: null, tilt: null, zoom: null, centered: 0, img1: null, updatedAt: 'seed' },
+    { slotId: 2, camId: 1, presetId: 1, presetSlotIdx: 2, slotRoi: roi, vpdBbox: null, lpdObb: null, occupyRange: null, pan: null, tilt: null, zoom: null, centered: 0, img1: null, updatedAt: 'seed' },
+  ]);
   const repo = repoWith(artifact());
   const camera = fakeCamera();
   const cfg = calCfg(outFile);
@@ -139,37 +151,46 @@ describe('경계면: /calibrate/result ↔ slot_ptz.json ↔ centering_slot', ()
     expect(item.camIdx).toBe(1);    // 1-based
     expect(item.presetIdx).toBe(1); // 1-based
 
-    // ── 경계 2: DB 뷰어 라우트(구현자 "라우트 변경 없이 동작" 주장 검증) ──
+    // ── 경계 2: DB 뷰어 라우트(sqlite_master 동적 화이트리스트 → 신 테이블 자동 반영) ──
     const tables = await a.inject({ method: 'GET', url: '/db/tables' });
-    expect(JSON.parse(tables.body).tables).toContain('centering_slot');
+    expect(JSON.parse(tables.body).tables).toContain('slot_setup'); // 구 centering_slot → slot_setup
 
-    const db = await a.inject({ method: 'GET', url: '/db/table/centering_slot' });
-    expect(db.statusCode).toBe(200); // ★ sqlite_master 동적 화이트리스트 → 라우트 무변경 조회 가능
+    const db = await a.inject({ method: 'GET', url: '/db/table/slot_setup' });
+    expect(db.statusCode).toBe(200);
     const dbBody = JSON.parse(db.body);
-    expect(dbBody.total).toBe(2);
+    expect(dbBody.total).toBe(2); // 사전 시드한 2 슬롯
 
-    // 컬럼명 = 마스터 지정 스키마(스네이크). 관례 updated_at 포함.
-    expect(dbBody.columns.sort()).toEqual(['cam_id', 'pos', 'preset_id', 'preset_slotidx', 'slot_id', 'updated_at']);
+    // 신 스키마 컬럼(스네이크) — 센터라이징 분해 PTZ(pan/tilt/zoom) + centered.
+    for (const c of ['slot_id', 'cam_id', 'preset_id', 'preset_slotidx', 'pan', 'tilt', 'zoom', 'centered', 'updated_at']) {
+      expect(dbBody.columns).toContain(c);
+    }
+    // 구 centering_slot 의 pos(JSON) 컬럼은 존재하지 않는다(분해 REAL 로 대체).
+    expect(dbBody.columns).not.toContain('pos');
 
-    // ── 경계 3: DB 행 ↔ JSON item 값 교차 비교 ──
-    const row = dbBody.rows.find((r: { slot_id: string }) => r.slot_id === 'c1p1s1');
+    // ── 경계 3: DB 행(정수 slot_id) ↔ JSON item 값 교차 비교 ──
+    // slot_setup.slot_id 는 정수(=item.globalIdx). REST item.slotId 는 문자열 'c1p1s1'.
+    const row = dbBody.rows.find((r: { slot_id: number }) => r.slot_id === item.globalIdx);
+    expect(item.globalIdx).toBe(1); // 정수 전역 slot_id
     expect(row.cam_id).toBe(1);         // 1-based
     expect(row.preset_id).toBe(1);      // 1-based
-    expect(row.preset_slotidx).toBe(1); // ★ coveredSlotIds 순서 1-based(0 아님)
-    expect(JSON.parse(row.pos)).toEqual(item.ptz); // pos JSON ↔ item.ptz 완전 일치
+    expect(row.preset_slotidx).toBe(1); // ★ 1-based(0 아님)
+    expect(row.centered).toBe(1);       // 센터라이징 성공 반영
+    // 분해 PTZ ↔ item.ptz 완전 일치(구 pos JSON 왕복 대체).
+    expect({ pan: row.pan, tilt: row.tilt, zoom: row.zoom }).toEqual(item.ptz);
     expect(row.updated_at).toBe('2026-07-16T00:00:00Z');
 
-    // 2번째 슬롯은 preset_slotidx=2 (1-based 순서 규약)
-    const row2 = dbBody.rows.find((r: { slot_id: string }) => r.slot_id === 'c1p1s2');
+    // 2번째 슬롯(globalIdx=2)은 preset_slotidx=2 (1-based 순서 규약)
+    const item2 = body.items.find((i: { slotId: string }) => i.slotId === 'c1p1s2');
+    const row2 = dbBody.rows.find((r: { slot_id: number }) => r.slot_id === item2.globalIdx);
     expect(row2.preset_slotidx).toBe(2);
 
-    // pos 의 zoom 은 카메라 유효범위 [1,36]
-    const pos = JSON.parse(row.pos);
-    expect(pos.zoom).toBeGreaterThanOrEqual(1);
-    expect(pos.zoom).toBeLessThanOrEqual(36);
+    // zoom 은 카메라 유효범위 [1,36]
+    expect(row.zoom).toBeGreaterThanOrEqual(1);
+    expect(row.zoom).toBeLessThanOrEqual(36);
 
-    // ── 경계 4: 성공 항목 수 == DB 행 수(실패는 DB 미저장 — 설계서 §5-5-5) ──
+    // ── 경계 4: 성공 항목 수 == centered=1 행 수(실패는 slot_setup 미갱신 — 설계서 §2.5) ──
     const okCount = body.items.filter((i: { centered: boolean; converged: boolean }) => i.centered && i.converged).length;
-    expect(dbBody.total).toBe(okCount);
+    const centeredRows = dbBody.rows.filter((r: { centered: number }) => r.centered === 1).length;
+    expect(centeredRows).toBe(okCount);
   });
 });

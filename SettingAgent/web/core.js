@@ -320,7 +320,7 @@ export function formatRatePct(rate) {
 }
 
 /**
- * `GET /capture/runs/:id/occupancy` 결과 rows[] → cam:preset 키 맵.
+ * `GET /capture/occupancy` 결과 rows[] → cam:preset 키 맵.
  * rows 원소: { camIdx, presetIdx, occupiedCount, total, rate, spacesJson(string|null), ... }.
  * spacesJson 은 문자열 → JSON.parse(실패/null → 빈 배열로 graceful 강등, throw 안 함).
  * spaces 요소: { id, occupied, polygon? }(polygon optional — 미보유 요소도 그대로 통과, 오버레이가 skip).
@@ -611,18 +611,19 @@ export function buildFlatSlotRows({ placeRoi, detectByKey, parkingSlotsByKey, ju
         ]);
     const occById = new Map(occRows.map((o) => [o.idx, o.occupied]));
     const dbRows = parkingSlotsByKey?.[key] ?? [];
-    // DB 행 집합이 파일 전역번호 체계와 완전히 일치할 때만 태그 채택. 구 run(0-based {0..6})은
-    // 신 전역번호({1..7})와 부분만 겹쳐 한 칸 시프트된 값을 진짜처럼 표시하므로 통째 기각 → 파일 계산 점유로 폴백.
+    // slot_setup 정본(SlotSetupView): slotId=전역번호, vpd/lpd=객체|null(구 slotIdx/occupied 대체, 설계서 §3).
+    // DB 행 집합이 파일 전역번호 체계와 완전히 일치할 때만 태그 채택(구 0-based run 혼입 시 통째 기각 → 파일 계산 폴백).
     const fileIdx = new Set(spaces.map((sp) => sp.idx));
-    const usable = dbRows.length > 0 && dbRows.every((r) => fileIdx.has(r.slotIdx)) ? dbRows : [];
+    const usable = dbRows.length > 0 && dbRows.every((r) => fileIdx.has(r.slotId)) ? dbRows : [];
     for (const sp of spaces) {
-      const db = usable.find((r) => r.slotIdx === sp.idx);
+      const db = usable.find((r) => r.slotId === sp.idx);
       rows.push({
         globalIdx: sp.idx,
         cam,
         preset,
         key,
-        occupied: db ? !!db.occupied : occById.get(sp.idx) ?? false,
+        // slot_setup 은 점유상태(occupied)를 저장하지 않는다(→ parking_evnt/ActionAgent). 배정 차량 bbox(vpd) 유무로 점유 표시.
+        occupied: db ? !!db.vpd : occById.get(sp.idx) ?? false,
         vpd: !!db?.vpd,
         lpd: !!db?.lpd,
       });

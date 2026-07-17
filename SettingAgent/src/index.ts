@@ -12,8 +12,6 @@ import { AgentRuntime } from './brain/AgentRuntime.js';
 import { buildServer } from './api/server.js';
 import { buildSourceRegistry } from './viewer/sourceRegistry.js';
 import { SqliteStore } from './capture/SqliteStore.js';
-import { CheckpointReviewer } from './capture/CheckpointReviewer.js';
-import { FloorRoiReviewer } from './capture/FloorRoiReviewer.js';
 import { OccupancyReviewer } from './capture/OccupancyReviewer.js';
 import { CaptureJob } from './capture/CaptureJob.js';
 import { makeCuboidContextResolver } from './ground/cuboidContext.js';
@@ -49,11 +47,9 @@ async function main(): Promise<void> {
   // 장기 관측·반복 수집(/capture/*) 조립. 좌표는 검출+집계만, LLM 은 판정·자문만(좌표 불변).
   const sqlite = new SqliteStore(tools.capture.dbFile);
   const expectedByPreset = loadExpectedFaces(tools.map.presetFile);
-  const reviewer = new CheckpointReviewer({ store: sqlite, brain });
-  const floorReviewer = new FloorRoiReviewer({
-    store: sqlite, brain, maxPerCheckpoint: llm.floorRoi?.maxPerCheckpoint,
-  });
-  const occupancyReviewer = new OccupancyReviewer({ store: sqlite, brain });
+  // 캡처 루프 LLM off(설계서 §6.5): CheckpointReviewer/FloorRoiReviewer 배선 제거.
+  // OccupancyReviewer 만 축소 보조로 잔존(인메모리 occByPreset).
+  const occupancyReviewer = new OccupancyReviewer({ brain });
   // 차량 육면체 문맥 해결자 — 라우트(captureRoutes)와 **같은 팩토리**(단일 구현).
   // `ground.enabled=false` → 항상 null → **육면체 전 기능 off**(기존 킬스위치 재사용 — 신규 설정 플래그 0).
   const cuboidCtx = makeCuboidContextResolver({
@@ -62,7 +58,7 @@ async function main(): Promise<void> {
     ground: tools.ground,
   });
   const captureJob = new CaptureJob({
-    camera, vpd, lpd, store: sqlite, reviewer, floorReviewer, occupancyReviewer, brain, cfg: tools.capture,
+    camera, vpd, lpd, occupancyReviewer, brain, cfg: tools.capture,
     lpdEnabled: tools.setup.lpdEnabled, expectedByPreset,
     placeRoiFile: join(tools.store.dataDir, tools.store.placeRoiFile),
     cuboidCtx,
@@ -71,7 +67,6 @@ async function main(): Promise<void> {
     store: sqlite, repo, brain, cfg: tools.capture,
     roiPadding: tools.setup.roiPadding, yBandTolerance: tools.setup.yBandTolerance, expectedByPreset, saveStore,
     placeRoiFile: join(tools.store.dataDir, tools.store.placeRoiFile),
-    camera,
   });
 
   // 주차면별 번호판 중심정렬·줌 센터라이징(/calibrate/*). PlatePtz 결정형 폐루프 위임 + DB(centering_slot) 미러.

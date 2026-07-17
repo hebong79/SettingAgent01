@@ -1,6 +1,5 @@
-import { describe, it, expect, afterEach, vi } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { CaptureJob, type CaptureJobDeps } from '../src/capture/CaptureJob.js';
-import { SqliteStore } from '../src/capture/SqliteStore.js';
 import type { CameraClient } from '../src/clients/CameraClient.js';
 import type { VpdClient } from '../src/clients/VpdClient.js';
 import type { CapturedImage, VehicleBox } from '../src/domain/types.js';
@@ -56,21 +55,14 @@ function makeManualTimers() {
   return { setTimer, clearTimer, fireNext };
 }
 
-let openStores: SqliteStore[] = [];
-afterEach(() => {
-  for (const s of openStores) { try { s.close(); } catch { /* noop */ } }
-  openStores = [];
-});
-
 function makeJob(over: Partial<CaptureJobDeps> = {}) {
-  const st = new SqliteStore(':memory:');
   const timers = makeManualTimers();
   const deps: CaptureJobDeps = {
-    camera: fakeCameraJob(), vpd: fakeVpdJob(), store: st, cfg: captureCfg, lpdEnabled: false,
+    camera: fakeCameraJob(), vpd: fakeVpdJob(), cfg: captureCfg, lpdEnabled: false,
     setTimer: timers.setTimer, clearTimer: timers.clearTimer, sleep: async () => {}, now: () => 'T',
     ...over,
   };
-  return { job: new CaptureJob(deps), store: st, timers };
+  return { job: new CaptureJob(deps), timers };
 }
 
 /** occupancyReviewer.review 스텁(체크포인트 시 호출). 반환 { llmUnavailable }. */
@@ -82,8 +74,7 @@ function makeOccReviewer() {
 describe('CaptureJob checkpoint occupancyReviewer 게이트 (G6-①)', () => {
   it('floorRoiUseLlm:false(파일 모드) → occupancyReviewer.review 미호출(LLM 점유 스킵)', async () => {
     const { occupancyReviewer, reviewSpy } = makeOccReviewer();
-    const { job, store, timers } = makeJob({ occupancyReviewer });
-    openStores.push(store);
+    const { job, timers } = makeJob({ occupancyReviewer });
     job.start({ count: 1, intervalMs: 1000, checkpointEvery: 1, checkpointTriggerMode: 'rounds', checkpointIntervalMs: 60000, targets: jobTargets, floorRoiUseLlm: false });
     await timers.fireNext();
     expect(reviewSpy).not.toHaveBeenCalled();
@@ -91,8 +82,7 @@ describe('CaptureJob checkpoint occupancyReviewer 게이트 (G6-①)', () => {
 
   it('floorRoiUseLlm:true → occupancyReviewer.review 호출(LLM 모드)', async () => {
     const { occupancyReviewer, reviewSpy } = makeOccReviewer();
-    const { job, store, timers } = makeJob({ occupancyReviewer });
-    openStores.push(store);
+    const { job, timers } = makeJob({ occupancyReviewer });
     job.start({ count: 1, intervalMs: 1000, checkpointEvery: 1, checkpointTriggerMode: 'rounds', checkpointIntervalMs: 60000, targets: jobTargets, floorRoiUseLlm: true });
     await timers.fireNext();
     expect(reviewSpy).toHaveBeenCalledTimes(1);
@@ -100,8 +90,7 @@ describe('CaptureJob checkpoint occupancyReviewer 게이트 (G6-①)', () => {
 
   it('floorRoiUseLlm 미지정(기본 true) → occupancyReviewer.review 호출(회귀 0)', async () => {
     const { occupancyReviewer, reviewSpy } = makeOccReviewer();
-    const { job, store, timers } = makeJob({ occupancyReviewer });
-    openStores.push(store);
+    const { job, timers } = makeJob({ occupancyReviewer });
     job.start({ count: 1, intervalMs: 1000, checkpointEvery: 1, checkpointTriggerMode: 'rounds', checkpointIntervalMs: 60000, targets: jobTargets });
     await timers.fireNext();
     expect(reviewSpy).toHaveBeenCalledTimes(1);

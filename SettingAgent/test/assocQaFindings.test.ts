@@ -75,7 +75,7 @@ const fakeRepo = (): Repository => {
 function makeServer(o: { placeRoiFile?: string; cameraposFile?: string; ground?: ToolsConfig['ground']; camera: CameraClient; vpd: VpdClient }) {
   const store = new SqliteStore(':memory:');
   const job = new CaptureJob({
-    camera: o.camera, vpd: o.vpd, store, cfg: captureCfg, lpdEnabled: false,
+    camera: o.camera, vpd: o.vpd, cfg: captureCfg, lpdEnabled: false,
     setTimer: (fn) => { void fn; return [] as unknown as NodeJS.Timeout; },
     clearTimer: () => {}, sleep: async () => {}, now: () => 'T',
   });

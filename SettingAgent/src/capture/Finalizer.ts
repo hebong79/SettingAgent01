@@ -7,7 +7,6 @@ import { aggregate, type AggregateOptions } from './Aggregator.js';
 import { clusterRef } from './CheckpointReviewer.js';
 import { buildPlateAnchoredQuad, deconflictPolygons, estimatePlateQuadFromNeighbors, type PlateNeighbor } from './floorRoi.js';
 import { loadNormalizedPlaceRoi, normalizeGlobalIdx } from './placeRoi.js';
-import { resolvePresetPtz } from './detectPipeline.js';
 import { pointInPolygon } from '../domain/polygon.js';
 import { orderByPosition } from '../setup/ordering.js';
 import { buildGlobalIndex, validateCoverage, type IndexableSlot } from '../setup/GlobalIndexer.js';
@@ -16,15 +15,14 @@ import { logger } from '../util/logger.js';
 import type {
   GlobalSlotIndex,
   NormalizedPoint,
-  NormalizedPolygon,
   NormalizedQuad,
   NormalizedRect,
   ParkingSlot,
   Preset,
   SetupArtifact,
 } from '../domain/types.js';
-import type { AggregatedSlot, ParkingSlotRow } from './types.js';
-import type { CameraClient } from '../clients/CameraClient.js';
+import type { AggregatedSlot, SlotSetupRow } from './types.js';
+import type { CaptureSnapshot } from './CaptureJob.js';
 
 /** 슬롯 ID(기존 slotIdOf 규칙 동일). */
 function slotIdOf(camIdx: number, presetIdx: number, positionIdx: number): string {
@@ -52,10 +50,8 @@ export interface FinalizerDeps {
   expectedByPreset?: Record<string, number>;
   /** finalize 완료 시 결과 스냅샷 자동 저장(save/). 미주입 시 자동 저장 생략(가산). */
   saveStore?: SaveStore;
-  /** 미리 정의된 주차면 폴리곤 파일(Place01/PtzCamRoi.json) 경로. 주입 시 finalize 에서 parking_slots 저장(§06). */
+  /** 미리 정의된 주차면 폴리곤 파일(Place01/PtzCamRoi.json) 경로. 주입 시 finalize 에서 slot_setup 저장(§06). */
   placeRoiFile?: string;
-  /** 프리셋 실 PTZ 조회용(선택). 주입 시 parking_slots 행에 pan/tilt/zoom 결합 저장(best-effort). */
-  camera?: Pick<CameraClient, 'listCameras'>;
 }
 
 export interface FinalizeResult {
@@ -91,19 +87,17 @@ export class Finalizer {
     };
   }
 
-  async finalize(runId: number, opts?: { logicOccupancy?: LogicOccupancyPreset[] }): Promise<FinalizeResult> {
+  async finalize(snapshot: CaptureSnapshot, opts?: { logicOccupancy?: LogicOccupancyPreset[] }): Promise<FinalizeResult> {
     // 1) 최신 결정형 집계(멱등 — 체크포인트 status 갱신을 덮어쓰지 않도록 기존 status 보존).
-    const dets = this.deps.store.getDetectionsForRun(runId);
-    const presetRounds = this.deps.store.getPresetRounds(runId);
-    const fresh = aggregate(dets, presetRounds, this.aggOptions());
+    //    구 DB 재조회(getDetectionsForRun/getPresetRounds/getAggregatedSlots) → 인메모리 스냅샷 참조(설계서 §2.3).
+    const fresh = aggregate(snapshot.dets, snapshot.presetRounds, this.aggOptions());
 
     // 체크포인트에서 갱신한 status(merged/rejected)를 보존 병합.
-    const prior = new Map(this.deps.store.getAggregatedSlots(runId).map((s) => [clusterRef(s), s.status]));
+    const prior = new Map(snapshot.aggregated.map((s) => [clusterRef(s), s.status]));
     for (const s of fresh) {
       const ps = prior.get(clusterRef(s));
       if (ps === 'merged' || ps === 'rejected') s.status = ps;
     }
-    this.deps.store.replaceAggregatedSlots(runId, fresh);
 
     // 2) (LLM 활성 시) 최종 보조 판정.
     let llm: FinalizeCaptureResult | null = null;
@@ -112,9 +106,6 @@ export class Finalizer {
       for (const s of fresh) if (s.status !== 'rejected' && s.status !== 'merged') {
         presetCounts.set(s.presetKey, (presetCounts.get(s.presetKey) ?? 0) + 1);
       }
-      const checkpointNotes = this.deps.store
-        .getCheckpoints(runId)
-        .map((c) => c.summaryJson);
       try {
         llm = await this.deps.brain.finalizeCapture({
           totalSlots: [...presetCounts.values()].reduce((a, b) => a + b, 0),
@@ -123,28 +114,22 @@ export class Finalizer {
             slotCount,
             expected: this.deps.expectedByPreset?.[key],
           })),
-          checkpointNotes,
+          // 구 getCheckpoints(DB 체크포인트 노트) 폐기(LLM 최소화, 설계서 §2.3) — 노트 미제공.
+          checkpointNotes: [],
         });
       } catch {
         llm = null; // 장애 격리: 결정형 강등.
       }
     }
 
-    // 2b) (best-effort, R4) 로직 점유(바디 전달분) vs LLM 점유(캡처 중 저장분, getLatestOccupancy) 1회 비교.
-    // 새 LLM 호출 없음 — 프레임 재수집/배선 불필요(Finalizer 는 프레임 미보유, 저장분 재사용이 가장 단순).
+    // 2b) (best-effort, R4) 로직 점유(바디 전달분) vs LLM 점유(캡처 중 인메모리 occByPreset) 1회 비교.
+    // 새 LLM 호출 없음 — 스냅샷의 축소 occupancy 재사용(구 getLatestOccupancy DB 대체, 설계서 §2.3).
     // graceful skip 조건: LLM 전면 비활성, 로직 점유 바디 미전달, 저장분 없음, 비교 가능한 면 0개.
     let occupancyAgreement: FinalizeResult['occupancyAgreement'];
     if (this.deps.brain?.enabled && opts?.logicOccupancy?.length) {
-      const llmRows = this.deps.store.getLatestOccupancy(runId);
       const llmSpacesByKey = new Map<string, Array<{ id: number; occupied: boolean }>>();
-      for (const row of llmRows) {
-        if (!row.spacesJson) continue;
-        try {
-          const parsed = JSON.parse(row.spacesJson) as Array<{ id: number; occupied: boolean }>;
-          if (Array.isArray(parsed)) llmSpacesByKey.set(`${row.camIdx}:${row.presetIdx}`, parsed);
-        } catch {
-          /* 파싱 실패 → 해당 프리셋 비교 skip(graceful). */
-        }
+      for (const [key, j] of snapshot.occByPreset) {
+        llmSpacesByKey.set(key, j.spaces.map((s) => ({ id: s.id, occupied: s.occupied })));
       }
       let comparedPresets = 0;
       let comparedSpaces = 0;
@@ -172,19 +157,14 @@ export class Finalizer {
     }
 
     // 4) 채택 클러스터만 → 프리셋별 positionIdx 부여 → ParkingSlot/Preset 조립.
+    //    floor 발자국은 assemble 이 buildPlateAnchoredQuad 결정형으로 항상 생성(구 getFloorRois 별 테이블 폐기, 설계서 §6.5).
     const accepted = fresh.filter((s) => s.status === 'candidate' && !rejectedRefs.has(clusterRef(s)));
-    // floor ROI(체크포인트 LLM 산출, 별 테이블) 를 clusterRef 키로 조회 가능하게 맵 구성(가산).
-    const floorByRef = new Map<string, NormalizedPolygon>();
-    for (const f of this.deps.store.getFloorRois(runId)) {
-      floorByRef.set(`${f.presetKey}#${f.clusterId}`, f.polygon);
-    }
-    const { presets, slots, indexable } = this.assemble(accepted, llm?.zoneLabels ?? {}, floorByRef);
+    const { presets, slots, indexable } = this.assemble(accepted, llm?.zoneLabels ?? {});
 
     // 주차면 점유 로그(cat:'occupancy'): 채택 클러스터별 점유 근거(support=검출 수).
     logger.info(
       {
         cat: 'occupancy',
-        runId,
         accepted: accepted.length,
         slots: slots.length,
         byCluster: accepted.map((s) => ({ ref: clusterRef(s), support: s.support, occupancyRate: s.occupancyRate, confidence: s.confidence })),
@@ -206,10 +186,12 @@ export class Finalizer {
       ...(llm?.report_ko ? { report: llm.report_ko } : {}),
     };
     this.deps.repo.saveArtifact(artifact);
-    this.deps.store.insertArtifactSnapshot(runId, this.now(), JSON.stringify(artifact));
+    // 구 insertArtifactSnapshot(artifact_snapshot 테이블) 폐기(설계서 §2.3) — 정본은 repo.saveArtifact(setup_artifact.json).
 
-    // 파일 바닥ROI(PtzCamRoi.json) 기준 주차면 저장(§06 · best-effort — 파일 없음/검출 없음 시 graceful skip,
-    // artifact 흐름 불변). VPD/LPD/점유는 accepted(집계 대표) 재사용(D1) + pointInPolygon 공간배정(D2/D3).
+    // 파일 바닥ROI(PtzCamRoi.json) 기준 슬롯 셋업(slot_setup) 전량 교체(§06 · best-effort — 파일 없음/검출 없음 시 graceful skip,
+    // artifact 흐름 불변). VPD/LPD/점유영역은 accepted(집계 대표) 재사용(D1) + pointInPolygon 공간배정(D2/D3).
+    // ★ 단일 트랜잭션 교체(실패 자동 롤백 → 이전 확정본 보존, 설계서 배경 A.3).
+    // pan/tilt/zoom/centered/img1 은 센터라이징(PtzCalibrator) 산출 — finalize 시점엔 미보유 → null/0(이후 upsertSlotCentering 채움).
     try {
       const place = await loadNormalizedPlaceRoi(this.deps.placeRoiFile);
       if (place) {
@@ -219,44 +201,46 @@ export class Finalizer {
           if (!arr) byPresetAcc.set(s.presetKey, (arr = []));
           arr.push(s);
         }
-        const rows: ParkingSlotRow[] = [];
-        // slot_idx 는 **전역번호(1..N)** 로 기록한다 — 뷰어(web/core.js normalizeGlobalIdx)와 동일 규칙으로
-        // 정규화(Unity 생성 0-based 파일도 재부여). 파일이 이미 1..N 이면 무변경(멱등).
+        const rows: SlotSetupRow[] = [];
+        // slot_id 는 **전역번호(1..N)** — 뷰어(web/core.js normalizeGlobalIdx)와 동일 규칙으로
+        // 정규화(Unity 생성 0-based 파일도 재부여). 파일이 이미 1..N 이면 무변경(멱등). setup_artifact.globalIndex 와 정합(§2-5).
         const byPresetPlace = normalizeGlobalIdx(place.byPreset);
-        // preset_key별 실 PTZ 1회 조회(캐시). camera 미주입/조회 실패 → null(격리·폴백 유지).
-        const ptzByKey = new Map<string, { pan: number; tilt: number; zoom: number } | null>();
+        const updatedAt = this.now();
         for (const [key, spaces] of byPresetPlace) {
           const [camIdx, presetIdx] = key.split(':').map(Number);
           const clusters = byPresetAcc.get(key) ?? [];
-          let ptz = ptzByKey.get(key);
-          if (ptz === undefined) {
-            ptz = this.deps.camera ? await resolvePresetPtz(this.deps.camera, camIdx, presetIdx) : null;
-            ptzByKey.set(key, ptz);
-          }
-          for (const sp of spaces) {
+          spaces.forEach((sp, i) => {
             const hit = clusters.find((c) => {
               const pc = c.plateQuad ? quadCentroid(c.plateQuad) : null; // 번호판 중심 우선.
               if (pc && pointInPolygon(sp.points, pc)) return true;
               return pointInPolygon(sp.points, { x: c.x + c.w / 2, y: c.y + c.h / 2 }); // 차량 중심 폴백.
             });
+            // 점유영역(발자국) = 배정 차량 rect + 번호판 quad 로 결정형 사변형(부재 시 null).
+            const occupyRange = hit
+              ? buildPlateAnchoredQuad({ x: hit.x, y: hit.y, w: hit.w, h: hit.h }, hit.plateQuad ?? undefined)
+              : null;
             rows.push({
-              camIdx, presetIdx, presetKey: key, slotIdx: sp.idx,
-              roiJson: JSON.stringify(sp.points),
-              vpdJson: hit ? JSON.stringify({ x: hit.x, y: hit.y, w: hit.w, h: hit.h }) : null,
-              lpdJson: hit?.plateQuad ? JSON.stringify(hit.plateQuad) : null,
-              occupied: hit ? 1 : 0,
-              occupancyRate: hit?.occupancyRate ?? null,
-              pan: ptz?.pan ?? null,
-              tilt: ptz?.tilt ?? null,
-              zoom: ptz?.zoom ?? null,
-              updatedAt: this.now(),
+              slotId: sp.idx,
+              camId: camIdx,
+              presetId: presetIdx,
+              presetSlotIdx: i + 1, // 프리셋 내 배열순 1-based.
+              slotRoi: JSON.stringify(sp.points),
+              vpdBbox: hit ? JSON.stringify({ x: hit.x, y: hit.y, w: hit.w, h: hit.h }) : null,
+              lpdObb: hit?.plateQuad ? JSON.stringify(hit.plateQuad) : null,
+              occupyRange: occupyRange ? JSON.stringify(occupyRange) : null,
+              pan: null,
+              tilt: null,
+              zoom: null,
+              centered: 0,
+              img1: null,
+              updatedAt,
             });
-          }
+          });
         }
-        this.deps.store.replaceParkingSlots(runId, rows);
+        this.deps.store.replaceSlotSetup(rows);
       }
     } catch (err) {
-      logger.warn({ err }, '주차면(parking_slots) 저장 실패'); // 격리 — 정본 artifact 는 이미 저장됨.
+      logger.warn({ err }, '슬롯 셋업(slot_setup) 저장 실패'); // 격리 — 정본 artifact 는 이미 저장됨.
     }
 
     // finalize 완료 시 결과 스냅샷 자동 저장(요구사항 1). 실패는 격리(정본 저장은 이미 완료).
@@ -280,7 +264,6 @@ export class Finalizer {
   private assemble(
     accepted: AggregatedSlot[],
     zoneLabels: Record<string, string>,
-    floorByRef: Map<string, NormalizedPolygon>,
   ): { presets: Preset[]; slots: ParkingSlot[]; indexable: IndexableSlot[] } {
     const byPreset = new Map<string, AggregatedSlot[]>();
     for (const s of accepted) {
@@ -316,8 +299,8 @@ export class Finalizer {
             .map((n) => ({ vehicle: { x: n.x, y: n.y, w: n.w, h: n.h }, plateQuad: n.plateQuad! }));
           estimated = estimatePlateQuadFromNeighbors(rect, neighbors);
         }
-        // 폴백 우선순위: floorByRef(LLM) > 빌더(실측 plateQuad > 이웃추정 > predictPlateRect 상수).
-        const base = floorByRef.get(clusterRef(m)) ?? buildPlateAnchoredQuad(rect, m.plateQuad ?? estimated ?? undefined);
+        // floor 발자국 결정형 생성(실측 plateQuad > 이웃추정 > predictPlateRect 상수). 구 floorByRef(LLM) 폐기(§6.5).
+        const base = buildPlateAnchoredQuad(rect, m.plateQuad ?? estimated ?? undefined);
         return { pos, srcIdx, m, rect, plateRect, base };
       });
       const deconflicted = deconflictPolygons(

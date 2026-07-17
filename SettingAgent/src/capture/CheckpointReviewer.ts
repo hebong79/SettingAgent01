@@ -81,21 +81,22 @@ export class CheckpointReviewer {
     if (!result) return null;
 
     // 적용(좌표 불변): rejects → status='rejected', merges 그룹의 2번째부터 → status='merged'.
+    // ★ DB 중간테이블 폐기(설계서 §2) — status 는 인메모리 AggregatedSlot 에 직접 반영(구 updateAggregatedStatus 대체).
+    //   본 클래스는 캡처 루프 배선에서 분리됨(§6.5) — clusterRef/advisoryLines 공유 유틸만 잔존.
     const refToSlot = new Map<string, AggregatedSlot>();
     for (const s of slots) refToSlot.set(clusterRef(s), s);
 
     for (const ref of result.rejects) {
       const s = refToSlot.get(ref);
-      if (s) this.deps.store.updateAggregatedStatus(runId, s.presetKey, s.clusterId, 'rejected');
+      if (s) s.status = 'rejected';
     }
     for (const group of result.merges) {
       for (const ref of group.slice(1)) {
         const s = refToSlot.get(ref);
-        if (s) this.deps.store.updateAggregatedStatus(runId, s.presetKey, s.clusterId, 'merged');
+        if (s) s.status = 'merged';
       }
     }
 
-    this.deps.store.insertCheckpoint(runId, atRound, this.now(), JSON.stringify(result));
     return result;
   }
 }
