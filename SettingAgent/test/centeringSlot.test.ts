@@ -5,10 +5,9 @@ import { SqliteStore } from '../src/capture/SqliteStore.js';
 import { expandPlateTargets } from '../src/calibrate/slotPtzWriter.js';
 import type { CameraClient } from '../src/clients/CameraClient.js';
 import type { LpdClient, PlateBox } from '../src/clients/LpdClient.js';
-import type { Repository } from '../src/store/Repository.js';
 import type { ToolsConfig } from '../src/config/toolsConfig.js';
 import type { SetupArtifact } from '../src/domain/types.js';
-import type { SlotSetupRow } from '../src/capture/types.js';
+import type { SlotSetupRow, SlotSetupView } from '../src/capture/types.js';
 import { rectToQuad, quadBoundingRect } from '../src/domain/geometry.js';
 import type { SlotPtzArtifact, Ptz } from '../src/calibrate/types.js';
 import type { PlatePtzOpts, PlatePtzResult } from '../src/calibrate/platePtz.js';
@@ -40,30 +39,28 @@ function artifact(): SetupArtifact {
   };
 }
 
-/** 2슬롯 fixture(globalIdx 1,2 — 부분 캘리브레이션·zip 정렬용). */
-function artifact2(): SetupArtifact {
+/** 신 소스(slot_setup) 센터라이징 대상의 LPD OBB 시드(quadBoundingRect → 0.62/0.62). */
+const LPD_QUAD = rectToQuad({ x: 0.62, y: 0.62, w: 0.05, h: 0.03 });
+
+/** lpd 보유 slot_setup 뷰 1건(globalIdx=slotId). PtzCalibrator 센터라이징 소스. */
+function viewRow(slotId: number, presetSlotIdx: number): SlotSetupView {
   return {
-    createdAt: 'T',
-    presets: [{ camIdx: 1, presetIdx: 1, label: 'p1', coveredSlotIds: ['c1p1s1', 'c1p1s2'] }],
-    globalIndex: [
-      { globalIdx: 1, slotId: 'c1p1s1', camIdx: 1, presetIdx: 1 },
-      { globalIdx: 2, slotId: 'c1p1s2', camIdx: 1, presetIdx: 1 },
-    ],
-    slots: [
-      { slotId: 'c1p1s1', zone: 'z', roiByPreset: { '1:1': { x: 0.6, y: 0.6, w: 0.1, h: 0.05 } }, plateRoiByPreset: { '1:1': rectToQuad({ x: 0.62, y: 0.62, w: 0.05, h: 0.03 }) } },
-      { slotId: 'c1p1s2', zone: 'z', roiByPreset: { '1:1': { x: 0.6, y: 0.6, w: 0.1, h: 0.05 } }, plateRoiByPreset: { '1:1': rectToQuad({ x: 0.62, y: 0.62, w: 0.05, h: 0.03 }) } },
-    ],
+    slotId, camId: 1, presetId: 1, presetSlotIdx, presetKey: '1:1',
+    roi: [], vpd: null, lpd: LPD_QUAD, occupyRange: null,
+    pan: null, tilt: null, zoom: null, centered: false, img1: null, updatedAt: null,
   };
 }
 
-function repoWith(a: SetupArtifact | null): Repository {
-  return { loadArtifact: () => a } as unknown as Repository;
+/** getSlotSetup 만 주입하는 경량 store 시임(비-DB 물리 시나리오용). */
+function storeWith(v: SlotSetupView[]): Pick<SqliteStore, 'upsertSlotCentering' | 'getSlotSetup'> {
+  return { getSlotSetup: () => v, upsertSlotCentering: () => {} } as unknown as Pick<SqliteStore, 'upsertSlotCentering' | 'getSlotSetup'>;
 }
 
 const roi = [{ x: 0.6, y: 0.6 }, { x: 0.7, y: 0.6 }, { x: 0.7, y: 0.65 }, { x: 0.6, y: 0.65 }];
+/** 시드용 slot_setup 행(lpd_obb 포함 — 신 소스가 대상으로 펼치려면 lpd 필수). */
 const slotRow = (slotId: number, presetSlotIdx: number, updatedAt = 'T-seed'): SlotSetupRow => ({
   slotId, camId: 1, presetId: 1, presetSlotIdx, slotRoi: JSON.stringify(roi),
-  vpdBbox: null, lpdObb: null, occupyRange: null, pan: null, tilt: null, zoom: null,
+  vpdBbox: null, lpdObb: JSON.stringify(LPD_QUAD), occupyRange: null, pan: null, tilt: null, zoom: null,
   centered: 0, img1: null, updatedAt,
 });
 
@@ -100,12 +97,13 @@ function makeMockModel() {
   return { camera, lpd, moves };
 }
 
-function makeCalibrator(over: Partial<PtzCalibratorDeps> = {}, a: SetupArtifact | null = artifact()) {
+function makeCalibrator(over: Partial<PtzCalibratorDeps> = {}) {
   const m = makeMockModel();
   let saved: SlotPtzArtifact | undefined;
   let nowCount = 0;
   const deps: PtzCalibratorDeps = {
-    camera: m.camera, lpd: m.lpd, repo: repoWith(a), cfg,
+    // 기본 소스 = lpd 보유 슬롯 1건(globalIdx=7). override 로 seededStore/시나리오 store 주입.
+    camera: m.camera, lpd: m.lpd, store: storeWith([viewRow(7, 1)]), cfg,
     writer: (art) => { saved = art; },
     sleep: async () => {},
     now: () => `T${nowCount++}`,
@@ -328,14 +326,14 @@ describe('T6 center 실패 → zoom 미시도', () => {
 describe('T7 slot_setup 센터라이징 미러 멱등 + 경계면 교차', () => {
   it('동일 잡 2회 → 행수 불변, slot_setup pan/tilt/zoom == item.ptz(정수 slot_id 매핑)', async () => {
     const store = seededStore([slotRow(1, 1), slotRow(2, 2)]);
-    const { cal, getSaved } = makeCalibrator({ store }, artifact2());
+    const { cal, getSaved } = makeCalibrator({ store });
     cal.start();
     await waitDone(cal);
     const first = store.getSlotSetup();
     expect(first).toHaveLength(2);
     expect(first.filter((r) => r.centered)).toHaveLength(2); // 두 슬롯 모두 센터라이징 반영
 
-    const { cal: cal2 } = makeCalibrator({ store }, artifact2());
+    const { cal: cal2 } = makeCalibrator({ store });
     cal2.start();
     await waitDone(cal2);
     const second = store.getSlotSetup();
@@ -352,10 +350,10 @@ describe('T7 slot_setup 센터라이징 미러 멱등 + 경계면 교차', () =>
   });
 });
 
-// ── T8: DB 미주입 정상 동작 ──
-describe('T8 DB 미주입', () => {
-  it('store 생략 → 잡 done + JSON 저장, 예외 없음', async () => {
-    const { cal, getSaved } = makeCalibrator(); // store 없음
+// ── T8: 기본 소스(단일 lpd 뷰) 잡 완료 + JSON 저장 ──
+describe('T8 기본 store 소스 잡 완료', () => {
+  it('lpd 1슬롯 소스 → 잡 done + JSON 저장(1건), 예외 없음', async () => {
+    const { cal, getSaved } = makeCalibrator(); // 기본 store = viewRow(7,1)
     cal.start();
     await waitDone(cal);
     expect(cal.getStatus().state).toBe('done');
@@ -390,15 +388,15 @@ describe('T9 presetSlotIdx 도출', () => {
 describe('T10 부분 캘리브레이션 UPDATE 범위', () => {
   it('2슬롯 전량 → 2행 갱신. 슬롯1만 재실행 → 여전히 2행, 타 슬롯 updated_at·centered 불변', async () => {
     const store = seededStore([slotRow(1, 1), slotRow(2, 2)]);
-    const { cal } = makeCalibrator({ store, now: () => 'T-first' }, artifact2());
+    const { cal } = makeCalibrator({ store, now: () => 'T-first' });
     cal.start();
     await waitDone(cal);
     const before = store.getSlotSetup();
     expect(before.every((r) => r.centered && r.updatedAt === 'T-first')).toBe(true);
 
-    // 슬롯1(globalIdx=1)만 부분 재실행.
-    const { cal: cal2 } = makeCalibrator({ store, now: () => 'T-second' }, artifact2());
-    cal2.start(['c1p1s1']);
+    // 슬롯1(globalIdx=1)만 부분 재실행. ★ 신 소스 slotId=String(정수)='1'(구 'c1p1s1' 아님).
+    const { cal: cal2 } = makeCalibrator({ store, now: () => 'T-second' });
+    cal2.start(['1']);
     await waitDone(cal2);
 
     const after = store.getSlotSetup();
@@ -451,7 +449,7 @@ describe('T14 items↔slot_id 매핑(슬롯 예외 혼재)', () => {
       },
     } as unknown as CameraClient;
 
-    const { cal, getSaved } = makeCalibrator({ store, camera, lpd: m.lpd }, artifact2());
+    const { cal, getSaved } = makeCalibrator({ store, camera, lpd: m.lpd });
     cal.start();
     await waitDone(cal);
     expect(cal.getStatus().state).toBe('done');
@@ -472,8 +470,9 @@ describe('T14 items↔slot_id 매핑(슬롯 예외 혼재)', () => {
 describe('T13 DB 예외 격리', () => {
   it('upsertSlotCentering throw → 잡 done 유지 + JSON 정상', async () => {
     const store = {
+      getSlotSetup: () => [viewRow(7, 1)], // 대상 1건 소싱(converged=true 재현) — upsert 는 throw.
       upsertSlotCentering: () => { throw new Error('db down'); },
-    } as unknown as Pick<SqliteStore, 'upsertSlotCentering'>;
+    } as unknown as Pick<SqliteStore, 'upsertSlotCentering' | 'getSlotSetup'>;
     const { cal, getSaved } = makeCalibrator({ store });
     cal.start();
     await waitDone(cal);

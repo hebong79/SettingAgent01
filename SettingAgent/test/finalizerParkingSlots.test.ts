@@ -26,7 +26,7 @@ import type { DetectionRow, SlotSetupView } from '../src/capture/types.js';
 const captureCfg: ToolsConfig['capture'] = {
   defaultCount: 50, intervalMs: 1000, moveIntervalMs: 1000, checkpointEvery: 10,
   checkpointTriggerMode: 'rounds', checkpointIntervalMs: 60000, dbFile: ':memory:',
-  clusterDist: 0.06, clusterMinSupport: 3, minConfidence: 0.5, moveBeforeCapture: true,
+  clusterDist: 0.06, clusterMinSupport: 3, minConfidence: 0.5, slotAssignGate: 0.12, moveBeforeCapture: true,
 };
 
 const fakeRepo = (): Repository => {
@@ -93,6 +93,12 @@ const POLY_EMPTY = [[600, 600], [900, 600], [900, 900], [600, 900]];
 
 function makeFinalizer(store: SqliteStore, placeRoiFile?: string) {
   return new Finalizer({ store, repo: fakeRepo(), cfg: captureCfg, roiPadding: 0, yBandTolerance: 0.1, now: () => 'T', placeRoiFile });
+}
+
+/** 게이트값을 명시해 finalizer 생성(cascade 회수 통합 케이스용 — 프로덕션 기본 0.18 재현). */
+function makeFinalizerGate(store: SqliteStore, placeRoiFile: string, slotAssignGate: number) {
+  const cfg = { ...captureCfg, slotAssignGate };
+  return new Finalizer({ store, repo: fakeRepo(), cfg, roiPadding: 0, yBandTolerance: 0.1, now: () => 'T', placeRoiFile });
 }
 
 describe('Finalizer parking_slots(slot_setup) 조립 (§06 H4)', () => {
@@ -250,5 +256,80 @@ describe('Finalizer slot_setup 전역번호(slot_id = 1..N)', () => {
     const slots = store.getSlotSetup();
     expect(slots.find((r) => r.presetKey === '1:1')!.slotId).toBe(2); // 재부여 금지
     expect(slots.find((r) => r.presetKey === '1:2')!.slotId).toBe(1);
+  });
+});
+
+/**
+ * cascade 회수 통합(설계서 §5.2 + 02_developer_changes §5.5): 한 프리셋에 2 클러스터가
+ * 폴리곤 A 에 몰리고 인접 폴리곤 B 가 빈 배치. C1(id1)은 A 만 도달, C2(id2)는 A(근접)·B(게이트내)
+ * 둘 다 도달. 선착 그리디였다면 최저비용 C2-A 가 A 를 선점 → C1 고아 → A 만 채워지고 손실 1.
+ * 최대매칭은 증가경로로 C2 를 B 로 밀어 A 를 C1 이 회수 → **두 슬롯 모두 vpd/lpd 채움(손실 0)**.
+ */
+// 폴리곤 A(240~430,250~400): 두 클러스터 대표점이 모두 내부. 폴리곤 B(450~600,250~400): 인접·빈칸.
+const POLY_A = [[240, 250], [430, 250], [430, 400], [240, 400]];
+const POLY_B = [[450, 250], [600, 250], [600, 400], [450, 400]];
+
+/** 회전 번호판 quad(중심 명시). 차량 rep ROI 내부에 중심이 놓이도록 배치. */
+function plateQuadAt(cx: number, cy: number): NormalizedQuad {
+  return [
+    { x: cx - 0.01, y: cy - 0.005 }, { x: cx + 0.01, y: cy - 0.005 },
+    { x: cx + 0.01, y: cy + 0.005 }, { x: cx - 0.01, y: cy + 0.005 },
+  ];
+}
+
+/** 프리셋 1:1 에 2 클러스터(C1 center 0.30,0.30 · C2 center 0.40,0.30) 생성. 각 3라운드 + 번호판 quad. */
+function detsTwoClustersOnePreset(): { dets: DetectionRow[]; presetRounds: Map<string, number> } {
+  const dets: DetectionRow[] = [];
+  for (const round of [1, 2, 3]) {
+    // C1: 차량 bbox center (0.30,0.30) + 번호판 quad center (0.30,0.30).
+    dets.push({ observationId: round * 10 + 1, roundIdx: round, camIdx: 1, presetIdx: 1, kind: 'vehicle', x: 0.27, y: 0.27, w: 0.06, h: 0.06, conf: 0.9 });
+    dets.push({ observationId: round * 10 + 2, roundIdx: round, camIdx: 1, presetIdx: 1, kind: 'plate', x: 0.29, y: 0.295, w: 0.02, h: 0.01, conf: 0.9, quad: plateQuadAt(0.30, 0.30) });
+    // C2: 차량 bbox center (0.40,0.30) + 번호판 quad center (0.40,0.30).
+    dets.push({ observationId: round * 10 + 3, roundIdx: round, camIdx: 1, presetIdx: 1, kind: 'vehicle', x: 0.37, y: 0.27, w: 0.06, h: 0.06, conf: 0.9 });
+    dets.push({ observationId: round * 10 + 4, roundIdx: round, camIdx: 1, presetIdx: 1, kind: 'plate', x: 0.39, y: 0.295, w: 0.02, h: 0.01, conf: 0.9, quad: plateQuadAt(0.40, 0.30) });
+  }
+  return { dets, presetRounds: new Map([['1:1', 3]]) };
+}
+
+describe('Finalizer slot_setup cascade 회수(최대매칭 통합)', () => {
+  it('gate 0.18: 한 폴리곤에 2 클러스터 몰림 + 인접 빈칸 → 두 슬롯 모두 vpd/lpd 채움(손실 0)', async () => {
+    const store = mem();
+    seedFkParents(store, [{ camId: 1, presetId: 1 }]);
+    const { dets, presetRounds } = detsTwoClustersOnePreset();
+    const file = writePlaceRoi([{ preset_idx: 1, parking_spaces: [
+      { idx: 1, points: POLY_A },
+      { idx: 2, points: POLY_B },
+    ] }]);
+    await makeFinalizerGate(store, file, 0.18).finalize(snapshotFromDets(dets, presetRounds));
+
+    const slots = store.getSlotSetup();
+    expect(slots).toHaveLength(2);
+    const a = slots.find((r) => r.slotId === 1)!;
+    const b = slots.find((r) => r.slotId === 2)!;
+    // 손실 0: 두 슬롯 모두 차량·번호판 배정(vpd≠null AND lpd≠null).
+    expect(a.vpd).not.toBeNull();
+    expect(a.lpd).not.toBeNull();
+    expect(b.vpd).not.toBeNull();
+    expect(b.lpd).not.toBeNull();
+    // vpd≠null 슬롯 수 = 게이트 통과 클러스터 수(2) — 클러스터 손실 0.
+    expect(slots.filter((r) => r.vpd !== null)).toHaveLength(2);
+    // 상호배타 1:1: 두 슬롯의 차량 bbox 는 서로 다른 클러스터(중심 x 상이).
+    expect(a.vpd!.x).not.toBeCloseTo(b.vpd!.x, 5);
+  });
+
+  it('대조: gate 0.12 이면 인접 폴리곤이 게이트 밖 → 한 슬롯만 채움(손실 1) — 게이트가 회수 경계', async () => {
+    const store = mem();
+    seedFkParents(store, [{ camId: 1, presetId: 1 }]);
+    const { dets, presetRounds } = detsTwoClustersOnePreset();
+    const file = writePlaceRoi([{ preset_idx: 1, parking_spaces: [
+      { idx: 1, points: POLY_A },
+      { idx: 2, points: POLY_B },
+    ] }]);
+    await makeFinalizerGate(store, file, 0.12).finalize(snapshotFromDets(dets, presetRounds));
+
+    const slots = store.getSlotSetup();
+    // 게이트 0.12 에선 C2 가 폴리곤 B centroid 게이트 밖 → 두 클러스터 모두 A 만 후보 →
+    // 상호배타로 하나만 배정, 나머지는 고아. vpd≠null 슬롯 = 1(손실 1).
+    expect(slots.filter((r) => r.vpd !== null)).toHaveLength(1);
   });
 });

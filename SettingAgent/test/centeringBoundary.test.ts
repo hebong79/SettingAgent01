@@ -105,14 +105,14 @@ function makeServer() {
   store.upsertPresetPos([{ camId: 1, presetId: 1, sname: null, pan: 0, tilt: 0, zoom: 1, updatedAt: 'seed' }]);
   const roi = JSON.stringify([{ x: 0.6, y: 0.6 }, { x: 0.7, y: 0.6 }, { x: 0.7, y: 0.65 }, { x: 0.6, y: 0.65 }]);
   store.replaceSlotSetup([
-    { slotId: 1, camId: 1, presetId: 1, presetSlotIdx: 1, slotRoi: roi, vpdBbox: null, lpdObb: null, occupyRange: null, pan: null, tilt: null, zoom: null, centered: 0, img1: null, updatedAt: 'seed' },
-    { slotId: 2, camId: 1, presetId: 1, presetSlotIdx: 2, slotRoi: roi, vpdBbox: null, lpdObb: null, occupyRange: null, pan: null, tilt: null, zoom: null, centered: 0, img1: null, updatedAt: 'seed' },
+    { slotId: 1, camId: 1, presetId: 1, presetSlotIdx: 1, slotRoi: roi, vpdBbox: null, lpdObb: JSON.stringify(rectToQuad({ x: 0.62, y: 0.62, w: 0.05, h: 0.03 })), occupyRange: null, pan: null, tilt: null, zoom: null, centered: 0, img1: null, updatedAt: 'seed' },
+    { slotId: 2, camId: 1, presetId: 1, presetSlotIdx: 2, slotRoi: roi, vpdBbox: null, lpdObb: JSON.stringify(rectToQuad({ x: 0.62, y: 0.62, w: 0.05, h: 0.03 })), occupyRange: null, pan: null, tilt: null, zoom: null, centered: 0, img1: null, updatedAt: 'seed' },
   ]);
   const repo = repoWith(artifact());
   const camera = fakeCamera();
   const cfg = calCfg(outFile);
   // ★ writer 미주입 = 실 writeSlotPtz 로 실제 파일 기록(경계면 왕복의 핵심)
-  const calibrator = new PtzCalibrator({ camera, lpd: fakeLpd(), repo, cfg, store, sleep: async () => {}, now: () => '2026-07-16T00:00:00Z' });
+  const calibrator = new PtzCalibrator({ camera, lpd: fakeLpd(), cfg, store, sleep: async () => {}, now: () => '2026-07-16T00:00:00Z' });
   const orchestrator = new SetupOrchestrator({ camera, vpd: fakeVpd(), repo, cfg: setupCfg, sleep: async () => {}, now: () => 'T' });
   app = buildServer({ orchestrator, repo, camera, vpd: fakeVpd(), calibrator, calibrate: cfg, dbFile });
   return { app, outFile, dbFile };
@@ -142,7 +142,8 @@ describe('경계면: /calibrate/result ↔ slot_ptz.json ↔ centering_slot', ()
     expect(Object.keys(body).sort()).toEqual(['createdAt', 'items']); // SlotPtzArtifact 계약
     expect(body.items).toHaveLength(2);
 
-    const item = body.items.find((i: { slotId: string }) => i.slotId === 'c1p1s1');
+    // 신 소스: slotId = String(정수 slot_id) → '1'(구 'c1p1s1' 아님).
+    const item = body.items.find((i: { slotId: string }) => i.slotId === '1');
     // SlotPtzItem 계약(성공 항목엔 reason 키 자체가 없음)
     expect(Object.keys(item).sort()).toEqual(['camIdx', 'centered', 'converged', 'globalIdx', 'plateWidth', 'presetIdx', 'ptz', 'slotId']);
     expect(item.centered).toBe(true);
@@ -180,7 +181,7 @@ describe('경계면: /calibrate/result ↔ slot_ptz.json ↔ centering_slot', ()
     expect(row.updated_at).toBe('2026-07-16T00:00:00Z');
 
     // 2번째 슬롯(globalIdx=2)은 preset_slotidx=2 (1-based 순서 규약)
-    const item2 = body.items.find((i: { slotId: string }) => i.slotId === 'c1p1s2');
+    const item2 = body.items.find((i: { slotId: string }) => i.slotId === '2');
     const row2 = dbBody.rows.find((r: { slot_id: number }) => r.slot_id === item2.globalIdx);
     expect(row2.preset_slotidx).toBe(2);
 

@@ -1,13 +1,12 @@
 import type { ICameraClient } from '../clients/CameraClient.js';
 import type { LpdClient } from '../clients/LpdClient.js';
-import type { Repository } from '../store/Repository.js';
 import type { SqliteStore } from '../capture/SqliteStore.js';
 import type { SlotCenteringRow } from '../capture/types.js';
 import type { ToolsConfig } from '../config/toolsConfig.js';
 import { logger } from '../util/logger.js';
 import { quadBoundingRect } from '../domain/geometry.js';
 import { resolvePresetPtz } from '../capture/detectPipeline.js';
-import { expandPlateTargets, writeSlotPtz } from './slotPtzWriter.js';
+import { expandPlateTargetsFromSlotSetup, writeSlotPtz } from './slotPtzWriter.js';
 import { buildSlotPtzJson } from './controlMath.js';
 import { PlatePtz, type PlatePtzOpts, type PlatePtzResult } from './platePtz.js';
 import type { PlateTarget, Ptz, SlotPtzItem, CalibrateState, CalibrateStatus } from './types.js';
@@ -23,10 +22,9 @@ type PlatePtzApi = Pick<PlatePtz, 'centerOnPlate' | 'zoomToPlateWidth'>;
 export interface PtzCalibratorDeps {
   camera: ICameraClient;
   lpd: LpdClient;
-  repo: Repository;
   cfg: ToolsConfig['calibrate'];
-  /** centering_slot 미러 저장(옵셔널). 미주입 시 JSON 만 저장 — 잡은 정상 동작. */
-  store?: Pick<SqliteStore, 'upsertSlotCentering'>;
+  /** 센터라이징 소스(slot_setup 조회) + centering_slot 미러 저장. 잡의 유일 데이터 소스이므로 필수. */
+  store: Pick<SqliteStore, 'upsertSlotCentering' | 'getSlotSetup'>;
   /** PlatePtz 팩토리 주입(테스트 시임). 기본=new PlatePtz({camera, lpd, sleep}, opts). */
   makePlatePtz?: (opts: PlatePtzOpts) => PlatePtzApi;
   /** slot_ptz.json writer 주입(테스트는 캡처 stub). 기본=writeSlotPtz. */
@@ -55,8 +53,7 @@ export class PtzCalibrator {
 
   private readonly camera: ICameraClient;
   private readonly cfg: ToolsConfig['calibrate'];
-  private readonly repo: Repository;
-  private readonly store?: Pick<SqliteStore, 'upsertSlotCentering'>;
+  private readonly store: Pick<SqliteStore, 'upsertSlotCentering' | 'getSlotSetup'>;
   private readonly makePlatePtz: (opts: PlatePtzOpts) => PlatePtzApi;
   private readonly writer: (artifact: ReturnType<typeof buildSlotPtzJson>, outFile: string) => void;
   private readonly now: () => string;
@@ -66,7 +63,6 @@ export class PtzCalibrator {
   constructor(deps: PtzCalibratorDeps) {
     this.camera = deps.camera;
     this.cfg = deps.cfg;
-    this.repo = deps.repo;
     this.store = deps.store;
     const sleep = deps.sleep ?? defaultSleep;
     this.makePlatePtz = deps.makePlatePtz ?? ((opts) => new PlatePtz({ camera: deps.camera, lpd: deps.lpd, sleep }, opts));
@@ -91,9 +87,7 @@ export class PtzCalibrator {
    */
   start(slotIds?: string[]): { total: number } {
     if (this.state === 'running') throw new Error('calibrate already running');
-    const artifact = this.repo.loadArtifact();
-    if (!artifact) throw new Error('no setup artifact');
-    let targets = expandPlateTargets(artifact);
+    let targets = expandPlateTargetsFromSlotSetup(this.store.getSlotSetup());
     if (slotIds && slotIds.length > 0) {
       const set = new Set(slotIds);
       targets = targets.filter((t) => set.has(t.slotId));

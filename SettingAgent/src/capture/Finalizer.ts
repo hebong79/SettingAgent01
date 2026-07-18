@@ -7,14 +7,13 @@ import { aggregate, type AggregateOptions } from './Aggregator.js';
 import { clusterRef } from './CheckpointReviewer.js';
 import { buildPlateAnchoredQuad, deconflictPolygons, estimatePlateQuadFromNeighbors, type PlateNeighbor } from './floorRoi.js';
 import { loadNormalizedPlaceRoi, normalizeGlobalIdx } from './placeRoi.js';
-import { pointInPolygon } from '../domain/polygon.js';
+import { assignClustersToSpaces } from './spaceAssign.js';
 import { orderByPosition } from '../setup/ordering.js';
 import { buildGlobalIndex, validateCoverage, type IndexableSlot } from '../setup/GlobalIndexer.js';
 import { pad, rectToQuad } from '../domain/geometry.js';
 import { logger } from '../util/logger.js';
 import type {
   GlobalSlotIndex,
-  NormalizedPoint,
   NormalizedQuad,
   NormalizedRect,
   ParkingSlot,
@@ -27,14 +26,6 @@ import type { CaptureSnapshot } from './CaptureJob.js';
 /** 슬롯 ID(기존 slotIdOf 규칙 동일). */
 function slotIdOf(camIdx: number, presetIdx: number, positionIdx: number): string {
   return `c${camIdx}p${presetIdx}s${positionIdx}`;
-}
-
-/** quad 4점 산술평균 중심(번호판 근사 중심, D2). */
-function quadCentroid(quad: NormalizedQuad): NormalizedPoint {
-  return {
-    x: (quad[0].x + quad[1].x + quad[2].x + quad[3].x) / 4,
-    y: (quad[0].y + quad[1].y + quad[2].y + quad[3].y) / 4,
-  };
 }
 
 export interface FinalizerDeps {
@@ -209,12 +200,10 @@ export class Finalizer {
         for (const [key, spaces] of byPresetPlace) {
           const [camIdx, presetIdx] = key.split(':').map(Number);
           const clusters = byPresetAcc.get(key) ?? [];
+          // 프리셋 단위 상호배타 전역-그리디 1:1 배정(설계서 §2/§3). 선착순 find() 대신 사전 배정.
+          const assigned = assignClustersToSpaces(spaces, clusters, { centroidGate: this.deps.cfg.slotAssignGate });
           spaces.forEach((sp, i) => {
-            const hit = clusters.find((c) => {
-              const pc = c.plateQuad ? quadCentroid(c.plateQuad) : null; // 번호판 중심 우선.
-              if (pc && pointInPolygon(sp.points, pc)) return true;
-              return pointInPolygon(sp.points, { x: c.x + c.w / 2, y: c.y + c.h / 2 }); // 차량 중심 폴백.
-            });
+            const hit = assigned.get(i) ?? null;
             // 점유영역(발자국) = 배정 차량 rect + 번호판 quad 로 결정형 사변형(부재 시 null).
             const occupyRange = hit
               ? buildPlateAnchoredQuad({ x: hit.x, y: hit.y, w: hit.w, h: hit.h }, hit.plateQuad ?? undefined)

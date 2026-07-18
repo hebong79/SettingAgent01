@@ -86,6 +86,12 @@ const CaptureSchema = z.object({
   /** 집계용 최소 신뢰도(setup 과 독립값 허용). */
   minConfidence: z.number().min(0).max(1),
   /**
+   * finalize 공간배정 거리 게이트(정규화). 대표점↔주차면 centroid 거리가 이 값 미만이면
+   * 폴리곤 밖이라도 후보쌍 형성(인접 슬롯 회수). 관측형 튜닝값(설계서 §4).
+   * 라이브 검증: 최대매칭+상호배타가 과배정을 억제하므로 원근 오프셋 큰 프리셋의 정당 슬롯(실측 0.172)까지 포함하도록 0.18.
+   */
+  slotAssignGate: z.number().min(0).max(1).default(0.18),
+  /**
    * 캡처 전 카메라를 프리셋 PTZ 로 실제 이동(/req_move)할지.
    * true 면 시뮬/실 카메라의 활성 화면이 프리셋마다 물리적으로 이동(미리보기와 동일하게 보임).
    * false 면 /req_img 스냅샷만(활성 화면 정지). 기본 true.
@@ -272,7 +278,7 @@ export const DEFAULT_TOOLS_CONFIG: ToolsConfig = {
   capture: {
     defaultCount: 50, intervalMs: 30000, moveIntervalMs: 1000, checkpointEvery: 10,
     checkpointTriggerMode: 'rounds', checkpointIntervalMs: 60000, dbFile: 'data/setting.sqlite',
-    clusterDist: 0.06, clusterMinSupport: 3, minConfidence: 0.5, moveBeforeCapture: true,
+    clusterDist: 0.06, clusterMinSupport: 3, minConfidence: 0.5, slotAssignGate: 0.18, moveBeforeCapture: true,
   },
   calibrate: {
     targetPlateWidth: 0.2, centerTol: 0.03, widthTol: 0.02, maxIterations: 15,

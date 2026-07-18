@@ -144,7 +144,7 @@ describe('최근접 선택 argmin — 입력 순서 무관(불변식3 하드닝)
 const captureCfg: ToolsConfig['capture'] = {
   defaultCount: 50, intervalMs: 1000, moveIntervalMs: 1000, checkpointEvery: 10,
   checkpointTriggerMode: 'rounds', checkpointIntervalMs: 60000, dbFile: ':memory:',
-  clusterDist: 0.06, clusterMinSupport: 3, minConfidence: 0.5, moveBeforeCapture: true,
+  clusterDist: 0.06, clusterMinSupport: 3, minConfidence: 0.5, slotAssignGate: 0.12, moveBeforeCapture: true,
 };
 const fakeRepo = (): { repo: Repository; saved: SetupArtifact[] } => {
   const saved: SetupArtifact[] = [];

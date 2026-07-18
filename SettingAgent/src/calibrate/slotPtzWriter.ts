@@ -4,11 +4,35 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { SetupArtifact } from '../domain/types.js';
+import type { SlotSetupView } from '../capture/types.js';
 import { quadBoundingRect } from '../domain/geometry.js';
 import { logger } from '../util/logger.js';
 import type { PlateTarget, SlotPtzArtifact } from './types.js';
 
 /**
+ * slot_setup → 캘리브레이션 대상 펼침. lpd(LPD OBB) 보유 슬롯만 1 항목씩.
+ * globalIdx = 정수 slot_id(항상 존재), presetSlotIdx 는 DB preset_slotidx 그대로(재계산 금지).
+ */
+export function expandPlateTargetsFromSlotSetup(views: SlotSetupView[]): PlateTarget[] {
+  const targets: PlateTarget[] = [];
+  for (const v of views) {
+    if (v.lpd == null) continue;
+    targets.push({
+      camIdx: v.camId,
+      presetIdx: v.presetId,
+      slotId: String(v.slotId),
+      globalIdx: v.slotId,
+      // 캘리브레이션 내부 math 는 rect 사용 → LPD quad→축정렬 boundingRect 유도.
+      plateRoi: quadBoundingRect(v.lpd),
+      presetSlotIdx: v.presetSlotIdx,
+    });
+  }
+  return targets;
+}
+
+/**
+ * @deprecated 센터라이징 소스가 slot_setup 으로 전환됨(expandPlateTargetsFromSlotSetup 사용). artifact 경로 잔존.
+ *
  * setup_artifact → 캘리브레이션 대상 펼침. plateRoiByPreset 보유 슬롯 전부,
  * 키(`${camIdx}:${presetIdx}`)마다 1 항목. globalIdx 는 globalIndex 역참조(없으면 null).
  * presetSlotIdx 는 해당 프리셋 coveredSlotIds 순서(1-based, 미포함 시 null).

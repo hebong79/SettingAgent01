@@ -2,9 +2,9 @@ import { describe, it, expect } from 'vitest';
 import { PtzCalibrator, type PtzCalibratorDeps } from '../src/calibrate/PtzCalibrator.js';
 import type { CameraClient } from '../src/clients/CameraClient.js';
 import type { LpdClient, PlateBox } from '../src/clients/LpdClient.js';
-import type { Repository } from '../src/store/Repository.js';
+import type { SqliteStore } from '../src/capture/SqliteStore.js';
+import type { SlotSetupView, SlotCenteringRow } from '../src/capture/types.js';
 import type { ToolsConfig } from '../src/config/toolsConfig.js';
-import type { SetupArtifact } from '../src/domain/types.js';
 import { rectToQuad } from '../src/domain/geometry.js';
 import type { SlotPtzArtifact } from '../src/calibrate/types.js';
 
@@ -20,17 +20,25 @@ const cfg: ToolsConfig['calibrate'] = {
   settleMs: 0, outFile: 'data/slot_ptz.json',
 };
 
-/** plateRoiByPreset 1슬롯 fixture. */
-function artifact(): SetupArtifact {
-  return {
-    createdAt: 'T', presets: [],
-    globalIndex: [{ globalIdx: 7, slotId: 'c1p1s1', camIdx: 1, presetIdx: 1 }],
-    slots: [{ slotId: 'c1p1s1', zone: 'z', roiByPreset: { '1:1': { x: 0.6, y: 0.6, w: 0.1, h: 0.05 } }, plateRoiByPreset: { '1:1': rectToQuad({ x: 0.62, y: 0.62, w: 0.05, h: 0.03 }) } }],
-  };
+/** lpd 보유 1슬롯 slot_setup fixture(slot_id=7 → globalIdx=7). */
+function views(): SlotSetupView[] {
+  return [{
+    slotId: 7, camId: 1, presetId: 1, presetSlotIdx: 1, presetKey: '1:1',
+    roi: [], vpd: null, lpd: rectToQuad({ x: 0.62, y: 0.62, w: 0.05, h: 0.03 }),
+    occupyRange: null, pan: null, tilt: null, zoom: null, centered: false, img1: null, updatedAt: null,
+  }];
 }
 
-function repoWith(a: SetupArtifact | null): Repository {
-  return { loadArtifact: () => a } as unknown as Repository;
+function storeWith(v: SlotSetupView[]): Pick<SqliteStore, 'upsertSlotCentering' | 'getSlotSetup'> {
+  return { getSlotSetup: () => v, upsertSlotCentering: () => {} } as unknown as Pick<SqliteStore, 'upsertSlotCentering' | 'getSlotSetup'>;
+}
+
+/** upsertSlotCentering 호출 인자(rows)를 캡처하는 store 시임 — saveCenteringSlots 경계 검증용. */
+function storeWithSink(v: SlotSetupView[], sink: SlotCenteringRow[][]): Pick<SqliteStore, 'upsertSlotCentering' | 'getSlotSetup'> {
+  return {
+    getSlotSetup: () => v,
+    upsertSlotCentering: (rows: SlotCenteringRow[]) => { sink.push(rows); },
+  } as unknown as Pick<SqliteStore, 'upsertSlotCentering' | 'getSlotSetup'>;
 }
 
 /**
@@ -67,11 +75,11 @@ function makeMockModel() {
   return { camera, lpd, moves };
 }
 
-function makeCalibrator(over: Partial<PtzCalibratorDeps> = {}, a: SetupArtifact | null = artifact()) {
+function makeCalibrator(over: Partial<PtzCalibratorDeps> = {}, v: SlotSetupView[] = views()) {
   const m = makeMockModel();
   let saved: SlotPtzArtifact | undefined;
   const deps: PtzCalibratorDeps = {
-    camera: m.camera, lpd: m.lpd, repo: repoWith(a), cfg,
+    camera: m.camera, lpd: m.lpd, store: storeWith(v), cfg,
     writer: (art) => { saved = art; },
     sleep: async () => {}, now: () => 'T',
     ...over,
@@ -169,6 +177,39 @@ describe('PtzCalibrator 다수 번호판', () => {
   });
 });
 
+describe('PtzCalibrator saveCenteringSlots → upsertSlotCentering(정수 slot_id 키)', () => {
+  it('수렴 성공 → upsertSlotCentering 1회 호출, slotId:7(정수)·centered:1·ptz 분해 매핑', async () => {
+    const sink: SlotCenteringRow[][] = [];
+    const { cal, getSaved } = makeCalibrator({ store: storeWithSink(views(), sink) });
+    cal.start();
+    await waitDone(cal);
+    expect(cal.getStatus().state).toBe('done');
+
+    // saveCenteringSlots 는 성공(centered&&converged) 항목만 1회 배치 upsert.
+    expect(sink).toHaveLength(1);
+    expect(sink[0]).toHaveLength(1);
+    const row = sink[0][0];
+    // ★ 경계면: slotId 는 정수 전역 slot_id(=item.globalIdx=7), 문자열 'c1p1s1' 아님.
+    expect(row.slotId).toBe(7);
+    expect(typeof row.slotId).toBe('number');
+    expect(row.centered).toBe(1);
+    // SlotCenteringRow shape 완전성(부분 UPDATE 컬럼).
+    expect(Object.keys(row).sort()).toEqual(['centered', 'img1', 'pan', 'slotId', 'tilt', 'updatedAt', 'zoom']);
+    // 분해 PTZ ↔ JSON item.ptz 일치.
+    const it = getSaved()!.items[0];
+    expect({ pan: row.pan, tilt: row.tilt, zoom: row.zoom }).toEqual(it.ptz);
+    expect(row.slotId).toBe(it.globalIdx);
+  });
+
+  it('lpd 슬롯 0(빈 소스) → upsertSlotCentering 미호출(빈 rows 스킵)', async () => {
+    const sink: SlotCenteringRow[][] = [];
+    const { cal } = makeCalibrator({ store: storeWithSink([], sink) }, []);
+    cal.start();
+    await waitDone(cal);
+    expect(sink).toHaveLength(0);
+  });
+});
+
 describe('PtzCalibrator 중복 시작·산출물 없음', () => {
   it('running 중 start → throw', async () => {
     const { cal } = makeCalibrator();
@@ -177,8 +218,11 @@ describe('PtzCalibrator 중복 시작·산출물 없음', () => {
     await waitDone(cal);
   });
 
-  it('setup_artifact 없음 → throw', () => {
-    const { cal } = makeCalibrator({}, null);
-    expect(() => cal.start()).toThrow('no setup artifact');
+  it('lpd 슬롯 0(빈 slot_setup) → total 0, state done', async () => {
+    const { cal } = makeCalibrator({}, []);
+    const r = cal.start();
+    expect(r.total).toBe(0);
+    await waitDone(cal);
+    expect(cal.getStatus().state).toBe('done');
   });
 });

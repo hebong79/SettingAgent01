@@ -58,7 +58,8 @@
 		"dbFile": "data/setting.sqlite",
 		"clusterDist": 0.06,
 		"clusterMinSupport": 3,
-		"minConfidence": 0.5
+		"minConfidence": 0.5,
+		"slotAssignGate": 0.18
 	},
 	"calibrate": {
 		"targetPlateWidth": 0.2,
