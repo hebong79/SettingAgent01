@@ -80,6 +80,7 @@ describe('readEditableSettings (편집 대상 추출 + 키 비노출)', () => {
       llm: { provider: 'openai-compatible', model: 'Qwen/Qwen2.5-VL-32B-Instruct', baseUrl: 'http://192.168.0.221:8000/v1', apiKeyEnv: 'LLM_API_KEY' },
       vpd: { endpoint: 'http://192.168.0.125:9081', detPath: '/vpd/api/v2/det/imgupload', apiKeyEnv: 'VPD_API_KEY' },
       lpd: { endpoint: 'http://192.168.0.125:9082', detPath: '/lpd/api/v1/imgupload', apiKeyEnv: 'LPD_API_KEY' },
+      camera: { executionMode: 'typescript-native', selectedCameraId: '', sources: [] },
     });
   });
 
@@ -214,6 +215,14 @@ describe('SettingsPatchSchema (검증 거부)', () => {
   it('허용 밖 섹션(lpr) → strict 거부', () => {
     const r = SettingsPatchSchema.safeParse({ lpr: { endpoint: 'http://x:1', detPath: '/lpr' } });
     expect(r.success).toBe(false);
+  });
+
+  it('실카메라는 RTSP 필수이며 URL userinfo를 거부', () => {
+    const source = { id: 'real-1', label: '실카메라', kind: 'hucoms', baseUrl: 'http://10.0.0.2' } as const;
+    expect(SettingsPatchSchema.safeParse({ camera: { source } }).success).toBe(false);
+    expect(SettingsPatchSchema.safeParse({ camera: { source: { ...source, rtspUrl: 'http://10.0.0.2/live' } } }).success).toBe(false);
+    expect(SettingsPatchSchema.safeParse({ camera: { source: { ...source, rtspUrl: 'rtsp://admin:secret@10.0.0.2/live' } } }).success).toBe(false);
+    expect(SettingsPatchSchema.safeParse({ camera: { source: { ...source, rtspUrl: 'rtsp://10.0.0.2/live' } } }).success).toBe(true);
   });
 
   it('허용 밖 필드(llm.apiKeyEnv 등 키 편집 시도) → 거부(키 편집 불가)', () => {

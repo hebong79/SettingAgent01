@@ -71,7 +71,7 @@ const slotRow = (over: Partial<SlotSetupRow> = {}): SlotSetupRow => ({
   vpdBbox: JSON.stringify({ x: 0.3, y: 0.3, w: 0.1, h: 0.1 }),
   lpdObb: JSON.stringify([{ x: 0.33, y: 0.34 }, { x: 0.36, y: 0.35 }, { x: 0.34, y: 0.36 }, { x: 0.32, y: 0.35 }]),
   occupyRange: null,
-  pan: null, tilt: null, zoom: null, centered: 0, img1: null, updatedAt: 'T',
+  pan: null, tilt: null, zoom: null, centered: 0, img1: null, slot3dFrontCenter: null, updatedAt: 'T',
   ...over,
 });
 

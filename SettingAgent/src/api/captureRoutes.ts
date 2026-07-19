@@ -7,6 +7,7 @@ import { estimateAlign } from '../capture/frameAlign.js';
 import { applyPlaceRoiUpdate, loadNormalizedPlaceRoi } from '../capture/placeRoi.js';
 import type { CaptureJob } from '../capture/CaptureJob.js';
 import type { Finalizer } from '../capture/Finalizer.js';
+import type { SetupPipeline } from '../pipeline/SetupPipeline.js';
 import type { SqliteStore } from '../capture/SqliteStore.js';
 import type { ICameraClient } from '../clients/CameraClient.js';
 import type { VpdClient } from '../clients/VpdClient.js';
@@ -19,6 +20,9 @@ import { estimateGroundModels } from '../ground/groundModel.js';
 import { buildFrameCuboids } from '../ground/frameCuboids.js';
 import { makeCuboidContextResolver } from '../ground/cuboidContext.js';
 import { filterVehiclesOnPlace } from '../capture/onPlaceFilter.js';
+import { assignPlatesToSlotViews } from '../setup/plateMatch.js';
+import type { NormalizedQuad } from '../domain/types.js';
+import type { PlateBox } from '../clients/LpdClient.js';
 import type { GroundModel } from '../ground/types.js';
 import { writeCamerapos } from '../setup/cameraposWriter.js';
 import type { PresetProvider } from '../setup/presetProvider.js';
@@ -26,6 +30,19 @@ import type { SetupBrain } from '../brain/SetupBrain.js';
 import type { ToolsConfig } from '../config/toolsConfig.js';
 import type { SaveStore } from '../store/SaveStore.js';
 import { validateArtifactBody } from './artifactSchema.js';
+import { stringify5 } from '../util/round.js';
+
+/** POST /capture/slots/lpd — 라이브 LPD 검출을 slot_setup.lpd 에 저장. plates 빈 배열 허용(0건). */
+const SlotLpdSaveSchema = z.object({
+  cam: z.number().int().positive(),
+  preset: z.number().int().positive(),
+  plates: z.array(
+    z.object({
+      quad: z.array(z.object({ x: z.number(), y: z.number() })).length(4),
+      confidence: z.number().optional(),
+    }),
+  ),
+});
 
 const TargetSchema = z.object({
   camIdx: z.number().int().positive(),
@@ -45,6 +62,10 @@ const StartBodySchema = z.object({
   floorRoiUseLlm: z.boolean().optional(),
   /** VPD 검출 모드(옵셔널·하위호환). 미지정/true=주차면 위 차량만, false=모든 차량. */
   vpdOnParkingOnly: z.boolean().optional(),
+  /** VPD(차량) 검출 게이트(옵셔널). 라우트 기본 false(제품 정책 — 자동 경로 VPD 정지). LPD 는 계속. */
+  vpdEnabled: z.boolean().optional(),
+  /** 원버튼 셋업: 수집 done 후 자동 최종화+센터라이징 연쇄(옵셔널·기본 false, 명시적 옵트인). */
+  autoChain: z.boolean().optional(),
 });
 
 const FinalizeBodySchema = z
@@ -66,6 +87,10 @@ const DetectBodySchema = z.object({
   preset: z.number().int().positive(),
   /** VPD 검출 모드(옵셔널). 미지정/true=주차면 위 차량만, false=모든 차량. */
   vpdOnParkingOnly: z.boolean().optional(),
+  /** VPD(차량) 검출 게이트(옵셔널). 라우트 기본 false(제품 정책). '검출 실행'=LPD only, 'VPD 검출' 버튼만 true. */
+  vpdEnabled: z.boolean().optional(),
+  /** base 프레임 PTZ 오버라이드(옵셔널, lpd-live). 제공 시 프리셋 대신 이 PTZ 로 재렌더 후 검출. 미지정=프리셋 경로. */
+  ptz: z.object({ pan: z.number().optional(), tilt: z.number().optional(), zoom: z.number().optional() }).optional(),
 });
 
 // 주차면 자동보정(§04): 기준 저장·자동보정은 {cam,preset}, place-roi 저장은 {camId,presetIdx,spaces}.
@@ -119,6 +144,8 @@ export interface CaptureRouteDeps {
   camera?: ICameraClient;
   vpd?: VpdClient;
   lpd?: LpdClient;
+  /** 원버튼 셋업 파이프라인(옵셔널·가산). 주입 시 autoChain 배선 + GET /capture/pipeline 등록. */
+  pipeline?: SetupPipeline;
 }
 
 /**
@@ -161,6 +188,11 @@ export function registerCaptureRoutes(app: FastifyInstance, deps: CaptureRouteDe
       reply.code(400);
       return { error: 'targets 비어 있음' };
     }
+    // 자동 체인 진행(finalize/calibrate) 중이면 새 수집 거부(F9 스냅샷 참조 안전하나 의미 혼선 방지, §3.5).
+    if (deps.pipeline?.isBusy()) {
+      reply.code(409);
+      return { error: 'pipeline busy', stage: deps.pipeline.getStatus().stage };
+    }
     try {
       const { runId } = deps.job.start({
         count: parsed.data.count,
@@ -171,7 +203,11 @@ export function registerCaptureRoutes(app: FastifyInstance, deps: CaptureRouteDe
         targets,
         floorRoiUseLlm: parsed.data.floorRoiUseLlm,
         vpdOnParkingOnly: parsed.data.vpdOnParkingOnly,
+        vpdEnabled: parsed.data.vpdEnabled ?? false, // 제품 정책: 자동 경로 VPD 정지(라우트 기본 OFF).
       });
+      // 자동 체인 무장/해제(옵트인 — 기본 false). 비무장이면 파이프라인 콜백 전부 no-op(수동 흐름 회귀 0).
+      // vpdEnabled 도 함께 전달 — F10 가드가 VPD off 흐름에서 finalize 부트스트랩을 막지 않도록(결정 E).
+      deps.pipeline?.onCaptureStart(parsed.data.autoChain ?? false, parsed.data.vpdEnabled ?? false);
       return { ok: true, runId };
     } catch (err) {
       reply.code(409);
@@ -180,6 +216,12 @@ export function registerCaptureRoutes(app: FastifyInstance, deps: CaptureRouteDe
   });
 
   app.get('/capture/status', async () => deps.job.getStatus());
+
+  // 원버튼 셋업 파이프라인 상태(가산). 주입 시에만 등록 — CaptureStatus shape 은 불변(회귀 0).
+  if (deps.pipeline) {
+    const pipeline = deps.pipeline;
+    app.get('/capture/pipeline', async () => pipeline.getStatus());
+  }
 
   // LLM 강제 구동(warm-up). 사용자가 필요할 때 즉시 모델 로드. best-effort — { ok } 반환(미주입/비활성 시 false).
   app.post('/capture/warmup', async () => {
@@ -271,6 +313,40 @@ export function registerCaptureRoutes(app: FastifyInstance, deps: CaptureRouteDe
   // 슬롯 셋업(slot_setup) 정본 직접 조회(구 /capture/runs/:id/slots). presetKey 파생·slotId 포함(SlotSetupView).
   app.get('/capture/slots', async () => deps.store.getSlotSetup());
 
+  // 검출·센터링 초기화(수동 버튼). slot_setup 의 vpd/lpd/occupy/ptz/centered/img1 만 비움 — slot_roi·행은 보존.
+  app.post('/capture/slots/reset', async () => {
+    const cleared = deps.store.clearSlotSetupEnrichment(new Date().toISOString());
+    return { ok: true, cleared };
+  });
+
+  // 라이브 LPD 검출 → 슬롯 공간배정 → slot_setup.lpd 부분 UPDATE(수동 "DB에 추가" 버튼). VPD 미접촉.
+  app.post('/capture/slots/lpd', async (req, reply) => {
+    const parsed = SlotLpdSaveSchema.safeParse(req.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return { ok: false, error: 'invalid body' };
+    }
+    const { cam, preset, plates } = parsed.data;
+    const views = deps.store
+      .getSlotSetup()
+      .filter((v) => v.camId === cam && v.presetId === preset && v.roi?.length >= 3);
+    const plateBoxes: PlateBox[] = plates.map((p) => ({
+      quad: p.quad as NormalizedQuad,
+      confidence: p.confidence ?? 0,
+      cls: 'car_license_plate',
+    }));
+    const assigned = assignPlatesToSlotViews(views, plateBoxes);
+    const now = new Date().toISOString();
+    const rows = [...assigned].map(([slotId, quad]) => ({ slotId, lpdObb: stringify5(quad), updatedAt: now }));
+    deps.store.upsertSlotLpd(rows);
+    // 반환 quad 는 입력 plate.quad 참조 보존(plateMatch 계약) → 참조 역조회로 원 confidence 부착.
+    const assignedOut = [...assigned].map(([slotId, quad]) => {
+      const src = plateBoxes.find((p) => p.quad === quad);
+      return src ? { slotId, confidence: src.confidence } : { slotId };
+    });
+    return { ok: true, updated: rows.length, assigned: assignedOut, unassigned: plates.length - assigned.size };
+  });
+
   // 정밀수집 결과 저장/열기(save/*). saveStore 주입 시에만 등록(가산). 라우트는 위임만.
   if (deps.saveStore) {
     const saveStore = deps.saveStore;
@@ -343,7 +419,7 @@ export function registerCaptureRoutes(app: FastifyInstance, deps: CaptureRouteDe
     try {
       const raw = await readFile(deps.placeRoiFile, 'utf8');
       const next = applyPlaceRoiUpdate(JSON.parse(raw), parsed.data);
-      await writeFile(deps.placeRoiFile, JSON.stringify(next, null, 2), 'utf8');
+      await writeFile(deps.placeRoiFile, stringify5(next, 2), 'utf8');
       return { ok: true, spaceCount: parsed.data.spaces.length };
     } catch (err) {
       const e = err as NodeJS.ErrnoException;
@@ -595,7 +671,7 @@ export function registerCaptureRoutes(app: FastifyInstance, deps: CaptureRouteDe
         const cuboidCtx = await resolveCuboidContext(cam, preset);
         return await runDetect(
           { camera, vpd, lpd },
-          { cam, preset },
+          { cam, preset, vpdEnabled: parsed.data.vpdEnabled ?? false, ptz: parsed.data.ptz }, // 제품 정책: 자동 경로(검출 실행) VPD 정지. ptz 지정 시 base 프레임 오버라이드(lpd-live).
           cfg,
           {
             onlyOnPlace: parsed.data.vpdOnParkingOnly ?? true,

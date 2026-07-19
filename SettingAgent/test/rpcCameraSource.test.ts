@@ -148,6 +148,23 @@ describe('RpcCameraSource', () => {
     });
   });
 
+  describe('getPtz — cam.getPTZ', () => {
+    it('현재 장비 PTZ를 그대로 반환한다', async () => {
+      const { client, calls } = fakeRpc({ 'cam.getPTZ': { pan: 15, tilt: -4, zoom: 9 } });
+      const src = new RpcCameraSource(client, fakeCamera().client);
+
+      await expect(src.getPtz(2)).resolves.toEqual({ pan: 15, tilt: -4, zoom: 9 });
+      expect(calls).toEqual([{ method: 'cam.getPTZ', params: { camId: 2 } }]);
+    });
+
+    it('필수 PTZ 필드가 없으면 조회 실패를 전파한다', async () => {
+      const { client } = fakeRpc({ 'cam.getPTZ': { pan: 15 } });
+      const src = new RpcCameraSource(client, fakeCamera().client);
+
+      await expect(src.getPtz(2)).rejects.toThrow('Unity PTZ 응답이 완전하지 않습니다');
+    });
+  });
+
   describe('snapshot manual — cam.setPTZ → cam.captureJPG', () => {
     it('호출 순서/인자 정합, base64→Buffer, ptz=요청 echo', async () => {
       const jpegB64 = Buffer.from('JPEGDATA').toString('base64');

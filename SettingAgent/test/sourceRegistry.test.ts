@@ -37,23 +37,41 @@ describe('buildSourceRegistry — 하위호환/다중소스', () => {
     const tools = base();
     tools.cameraSources = [
       { id: 'unity', kind: 'sim', baseUrl: 'http://localhost:13100' },
-      { id: 'ptz1', kind: 'hucoms', host: '192.168.0.153', port: 80 },
+      { id: 'ptz1', kind: 'hucoms', host: '192.168.0.153', port: 80, rtspUrl: 'rtsp://192.168.0.153/stream1' },
     ];
     const reg = buildSourceRegistry(tools);
     expect([...reg.keys()]).toEqual(['unity', 'ptz1']);
     expect(reg.get('unity')).toBeInstanceOf(SimulatorSource);
     expect(reg.get('ptz1')).toBeInstanceOf(RealPtzSource);
     expect(reg.get('ptz1')!.kind).toBe('hucoms');
+    expect(reg.get('unity')!.streamTransport).toBe('http-mjpeg');
+    expect(reg.get('ptz1')!.streamTransport).toBe('rtsp-ffmpeg');
   });
 
   it('첫 소스 = registry 삽입 순서 첫번째(라우트 pickSource 기본값 근거)', () => {
     const tools = base();
     tools.cameraSources = [
-      { id: 'ptz1', kind: 'hucoms', host: '10.0.0.1' },
+      { id: 'ptz1', kind: 'hucoms', host: '10.0.0.1', rtspUrl: 'rtsp://10.0.0.1/stream1' },
       { id: 'unity', kind: 'sim' },
     ];
     const reg = buildSourceRegistry(tools);
     const first = reg.values().next().value;
     expect(first).toBe(reg.get('ptz1'));
+  });
+
+  it('cameraRuntime.selectedCameraId를 레지스트리 첫 소스로 배치', () => {
+    const tools = base() as RegistryCfg & { cameraRuntime: { executionMode: 'typescript-native'; selectedCameraId: string } };
+    tools.cameraSources = [
+      { id: 'simulator-1', kind: 'sim', protocol: 'unity-rpc', baseUrl: 'http://localhost:13110' },
+      { id: 'real-camera-1', kind: 'hucoms', protocol: 'hucoms-v1.22', baseUrl: 'http://10.0.0.20', rtspUrl: 'rtsp://10.0.0.20/stream1' },
+    ];
+    tools.cameraRuntime = { executionMode: 'typescript-native', selectedCameraId: 'real-camera-1' };
+    expect([...buildSourceRegistry(tools).keys()]).toEqual(['real-camera-1', 'simulator-1']);
+  });
+
+  it('실카메라 RTSP URL 누락은 fail-fast', () => {
+    const tools = base();
+    tools.cameraSources = [{ id: 'real-no-stream', kind: 'hucoms', baseUrl: 'http://10.0.0.30' }];
+    expect(() => buildSourceRegistry(tools)).toThrow('실카메라(real-no-stream) RTSP URL이 없습니다');
   });
 });

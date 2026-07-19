@@ -52,7 +52,7 @@ function storeWith(): Pick<SqliteStore, 'upsertSlotCentering' | 'getSlotSetup'> 
   const v: SlotSetupView[] = [{
     slotId: 1, camId: 1, presetId: 1, presetSlotIdx: 1, presetKey: '1:1',
     roi: [], vpd: null, lpd: rectToQuad({ x: 0.62, y: 0.62, w: 0.05, h: 0.03 }),
-    occupyRange: null, pan: null, tilt: null, zoom: null, centered: false, img1: null, updatedAt: null,
+    occupyRange: null, pan: null, tilt: null, zoom: null, centered: false, img1: null, slot3dFrontCenter: null, updatedAt: null,
   }];
   return { getSlotSetup: () => v, upsertSlotCentering: () => {} } as unknown as Pick<SqliteStore, 'upsertSlotCentering' | 'getSlotSetup'>;
 }

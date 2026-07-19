@@ -1,6 +1,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { CameraView } from './mapTargets.js';
+import { stringify5 } from '../util/round.js';
 
 /**
  * CameraView[] 를 camerapos.json 표준 포맷(형식 A: 카메라별 그룹)으로 저장한다.
@@ -34,5 +35,5 @@ export function writeCamerapos(views: CameraView[], path: string): void {
     datas,
   };
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, JSON.stringify(out, null, 2), 'utf-8');
+  writeFileSync(path, stringify5(out, 2), 'utf-8');
 }

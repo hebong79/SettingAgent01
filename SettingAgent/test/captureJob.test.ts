@@ -91,6 +91,30 @@ describe('CaptureJob 시작/중복 (G1)', () => {
   });
 });
 
+describe('CaptureJob onFinished 콜백 throw 흡수 (T9 — 파이프라인 배선)', () => {
+  it('done 완료 콜백이 throw 해도 잡은 죽지 않고 done 종단·콜백에 status 전달', async () => {
+    let called: string | undefined;
+    const { job, timers } = makeJob({
+      onFinished: (status) => { called = status; throw new Error('콜백 폭발'); },
+    });
+    job.start({ count: 1, intervalMs: 1000, checkpointEvery: 99, checkpointTriggerMode: 'rounds', checkpointIntervalMs: 60000, targets });
+    await timers.fireNext(); // 라운드1 → count 도달 → finishRun('done') → onFinished throw(흡수).
+    expect(called).toBe('done');
+    expect(job.getStatus().state).toBe('done'); // 예외 흡수 — 상태는 정상 종단.
+  });
+
+  it('stopped 즉시 종료 경로에서도 콜백 throw 흡수(state=stopped)', () => {
+    let called: string | undefined;
+    const { job } = makeJob({
+      onFinished: (status) => { called = status; throw new Error('콜백 폭발'); },
+    });
+    job.start({ count: 5, intervalMs: 1000, checkpointEvery: 99, checkpointTriggerMode: 'rounds', checkpointIntervalMs: 60000, targets });
+    job.stop(); // roundRunning=false → 즉시 finishRun('stopped') → onFinished throw(흡수).
+    expect(called).toBe('stopped');
+    expect(job.getStatus().state).toBe('stopped');
+  });
+});
+
 describe('CaptureJob 프레임/시각 (수집 관찰·경과)', () => {
   it('라운드 후 getLastFrame = 마지막 타깃 프레임, status에 startedAt/endedAt', async () => {
     const { job, timers } = makeJob();

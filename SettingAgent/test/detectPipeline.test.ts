@@ -116,8 +116,8 @@ describe('runDetect — base 매칭 차량(recovered:false)', () => {
     expect(plateOut!.quad).toBe(p.quad); // base 매칭은 원 quad 그대로(클램프 미적용).
     // 매칭됐으므로 zoom 재시도 없음 → base 요청 1회.
     expect(camera.requestImage).toHaveBeenCalledTimes(1);
-    // 3인자 호출(모드 미지정) → 필터 미적용(계약 불변).
-    expect(out.summary).toEqual({ vpdCount: 1, lpdCount: 1, recovered: 0, onPlaceOnly: false, filteredOut: 0, lpdFilteredOut: 0 });
+    // 3인자 호출(모드 미지정) → 필터 미적용(계약 불변). vpdEnabled 미지정 → 라이브러리 기본 true.
+    expect(out.summary).toEqual({ vpdCount: 1, lpdCount: 1, recovered: 0, onPlaceOnly: false, filteredOut: 0, lpdFilteredOut: 0, vpdEnabled: true });
   });
 });
 
@@ -424,8 +424,50 @@ describe('runDetect — 주차면 필터(OnPlaceOpts)', () => {
     const camera = makeCamera({ presetPtz: PRESET_PTZ });
     const deps: DetectDeps = { camera, vpd: makeVpd([PARKED]), lpd: makeLpd([[PARKED_PLATE]]) };
     const out = await runDetect(deps, { cam: 1, preset: 1 }, cfg);
-    expect(out.summary).toEqual({ vpdCount: 1, lpdCount: 1, recovered: 0, onPlaceOnly: false, filteredOut: 0, lpdFilteredOut: 0 });
+    expect(out.summary).toEqual({ vpdCount: 1, lpdCount: 1, recovered: 0, onPlaceOnly: false, filteredOut: 0, lpdFilteredOut: 0, vpdEnabled: true });
     expect(out.summary).not.toHaveProperty('onPlaceDegraded'); // 키 자체가 없다(옵셔널 스프레드).
+  });
+});
+
+describe('runDetect — VPD 게이트(vpdEnabled, 설계서 S2)', () => {
+  it('vpdEnabled:false → vpd.detect 미호출(0회) · plates 는 반환 · summary.vpdEnabled=false', async () => {
+    const camera = makeCamera({ presetPtz: PRESET_PTZ });
+    const vpd = makeVpd([vehicle(0.4, 0.5, 0.06, 0.24)]);
+    const lpd = makeLpd([[plate(0.42, 0.62)]]);
+    const deps: DetectDeps = { camera, vpd, lpd };
+    const out = await runDetect(deps, { cam: 1, preset: 1, vpdEnabled: false }, cfg);
+    expect(vpd.detect).toHaveBeenCalledTimes(0); // ★ VPD 정지.
+    expect(out.vehicles).toHaveLength(0); // 차량 없음.
+    expect(out.plates).toHaveLength(1); // LPD 는 계속 — 폴리곤 필터 미요청이라 전량.
+    expect(out.summary.vpdEnabled).toBe(false);
+    expect(out.summary.vpdCount).toBe(0);
+    expect(out.summary.lpdCount).toBe(1);
+  });
+
+  it('vpdEnabled 미지정 → 라이브러리 기본 true(vpd.detect 호출 · 회귀 0)', async () => {
+    const camera = makeCamera({ presetPtz: PRESET_PTZ });
+    const vpd = makeVpd([vehicle(0.4, 0.5, 0.06, 0.24)]);
+    const deps: DetectDeps = { camera, vpd, lpd: makeLpd([[]]) };
+    const out = await runDetect(deps, { cam: 1, preset: 1 }, cfg);
+    expect(vpd.detect).toHaveBeenCalledTimes(1);
+    expect(out.summary.vpdEnabled).toBe(true);
+    expect(out.vehicles).toHaveLength(1);
+  });
+
+  // ★ 보강(qa) — 설계 §3 S2 "seg 호출도 스킵"을 봉인한다: cuboidCtx·segment·canSegment 를 **다 배선**해도
+  //   vpdEnabled:false 면 seg 게이트(`cuboidCtx && vpdEnabled && …`)가 단락돼 vpd.segment 를 0회 부른다.
+  //   개발자 테스트는 vpd.detect=0 만 봉인해 육면체 seg 게이트가 무검증이었다.
+  it('vpdEnabled:false + cuboidCtx·segment·canSegment 배선 → vpd.segment 0회 · cuboids 키 없음', async () => {
+    const camera = makeCamera({ presetPtz: PRESET_PTZ });
+    const segment = vi.fn(async () => { throw new Error('seg 는 호출되면 안 된다'); });
+    const canSegment = vi.fn(() => true);
+    const vpd = { detect: vi.fn(async () => [vehicle(0.4, 0.5, 0.06, 0.24)]), segment, canSegment };
+    const deps: DetectDeps = { camera, vpd, lpd: makeLpd([[plate(0.42, 0.62)]]) };
+    const out = await runDetect(deps, { cam: 1, preset: 1, vpdEnabled: false }, cfg, undefined, {} as never);
+    expect(vpd.detect).toHaveBeenCalledTimes(0);
+    expect(segment).toHaveBeenCalledTimes(0); // ★ 육면체 seg 문맥 미호출(설계 결정 D).
+    expect(out).not.toHaveProperty('cuboids'); // 미산출 → 키 자체가 없다(응답 shape 불변).
+    expect(out.plates).toHaveLength(1); // LPD 는 계속.
   });
 });
 

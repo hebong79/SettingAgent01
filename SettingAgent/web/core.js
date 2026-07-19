@@ -145,26 +145,70 @@ export function captureUiState(state) {
 }
 
 /**
+ * 앞면중심 LOOP discovery 상태(/discover/status) → UI 뷰(순수). 진행바 percent·라벨·실행버튼 disable·프레임폴 여부.
+ * calPoll 의 인라인 계산(percent/label/폴게이트)을 순수화해 vitest 로 커버. status: { state, done, total, found }.
+ * running 에서만 실행버튼 disable·프레임폴(pollPlan 과 정합). total 0 → percent 0(0나눗셈 방어).
+ */
+export function discoverView(status) {
+  const st = status?.state ?? 'idle';
+  const done = status?.done ?? 0;
+  const total = status?.total ?? 0;
+  const found = status?.found ?? 0;
+  const percent = total > 0 ? Math.round((done / total) * 100) : 0;
+  const running = st === 'running';
+  return {
+    percent,
+    label: `${st} ${done}/${total} (found ${found})`,
+    runDisabled: running,
+    polling: running,
+  };
+}
+
+/**
  * 옵션(설정) 폼 클라이언트 검증(순수). 백엔드 zod(VpdSchema/LpdSchema/LlmSchema)와 동일 규칙의 사전 검증 —
  * 저장 전에 형식 오류를 즉시 안내한다(권위 검증은 서버). form={ llm:{provider,model,baseUrl}, vpd:{endpoint,detPath}, lpd:{endpoint,detPath} }.
  * → 오류 메시지 문자열 배열(빈 배열이면 통과). URL 은 http/https 만 허용(zod .url() 근사).
  */
 export function settingsFormErrors(form) {
   const errors = [];
-  const isHttpUrl = (s) => {
+  const hasProtocol = (s, protocols) => {
     try {
       const u = new URL(String(s));
-      return u.protocol === 'http:' || u.protocol === 'https:';
+      return protocols.includes(u.protocol);
     } catch {
       return false;
     }
   };
+  const isHttpUrl = (s) => hasProtocol(s, ['http:', 'https:']);
   if (!String(form?.llm?.model ?? '').trim()) errors.push('LLM model 필수');
   if (!isHttpUrl(form?.llm?.baseUrl)) errors.push('LLM Base URL 형식 오류(http/https)');
   if (!isHttpUrl(form?.vpd?.endpoint)) errors.push('VPD endpoint 형식 오류(http/https)');
   if (!isHttpUrl(form?.lpd?.endpoint)) errors.push('LPD endpoint 형식 오류(http/https)');
   if (!String(form?.vpd?.detPath ?? '').startsWith('/')) errors.push('VPD detPath 는 / 로 시작');
   if (!String(form?.lpd?.detPath ?? '').startsWith('/')) errors.push('LPD detPath 는 / 로 시작');
+  if (form?.camera) {
+    if (form.camera.executionMode !== 'typescript-native') errors.push('카메라 실행 모드는 TypeScript Native만 지원');
+    if (!String(form.camera.selectedCameraId ?? '').trim()) errors.push('사용 카메라 선택 필수');
+    const source = form.camera.source;
+    if (!source || source.id !== form.camera.selectedCameraId) errors.push('선택 카메라 정보 불일치');
+    if (!String(source?.label ?? '').trim()) errors.push('카메라 표시 이름 필수');
+    if (!isHttpUrl(source?.baseUrl)) errors.push('카메라 제어 URL 형식 오류(http/https)');
+    const rtsp = String(source?.rtspUrl ?? '').trim();
+    if (source?.kind === 'hucoms' && !rtsp) errors.push('실카메라 RTSP URL 필수');
+    if (source?.kind === 'hucoms' && rtsp && !hasProtocol(rtsp, ['rtsp:', 'rtsps:'])) {
+      errors.push('실카메라 RTSP URL 형식 오류(rtsp/rtsps)');
+    } else if (rtsp && !hasProtocol(rtsp, ['rtsp:', 'rtsps:', 'http:', 'https:'])) {
+      errors.push('RTSP URL 형식 오류(rtsp/rtsps/http/https)');
+    }
+    if (rtsp) {
+      try {
+        const url = new URL(rtsp);
+        if (url.username || url.password) errors.push('RTSP URL 계정은 관리자 ID/Password 입력란에 분리');
+      } catch {
+        /* 형식 오류는 위에서 보고 */
+      }
+    }
+  }
   return errors;
 }
 
@@ -1250,6 +1294,45 @@ export function nextPresetId(views, camIdx) {
   return max + 1;
 }
 
+// ===== VPD 차량 검출 중복 제거(dedup) 순수 로직 =====
+// 같은 차량에 겹친 VPD 박스(NMS 없는 모델 응답)를 IoU 연결요소(union-find)로 병합 — 차량당 1개(마지막 검지)만 남긴다.
+
+/** 두 NormalizedRect(정규화 0..1)의 IoU(교집합/합집합). 겹침 없음/퇴화 → 0. */
+export function rectIoU(a, b) {
+  const ix = Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x));
+  const iy = Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
+  const inter = ix * iy;
+  const uni = a.w * a.h + b.w * b.h - inter;
+  return uni <= 0 ? 0 : inter / uni;
+}
+
+/**
+ * VPD 차량 배열 중복 제거(차량당 1개). IoU≥iouThresh 간선으로 **연결요소(union-find) 그룹핑** 후
+ * 각 그룹의 원배열 최대 index(=마지막 검지)만 생존시킨다. 같은 차량의 동심 다중스케일 박스는
+ * 연속 겹침으로 transitive 하게 1그룹으로 묶여(체인 양 끝이 서로 IoU<th 여도) 확실히 1개로 병합되고,
+ * 인접 별개 차량은 IoU 가 낮아 별도 그룹으로 유지(과잉병합 없음).
+ * 마지막에 생존 index 를 원배열 순서로 정렬(렌더/선택 index 안정). 원객체 참조 반환 → plate/confidence/cls 보존.
+ * rect 없는 malformed 요소는 스킵(원순서 유지). iouThresh 기본 0.5(설정 플럼빙 없음).
+ * (그리디 방식은 체인 양 끝이 서로 안 겹치면 둘 다 생존해 "차량당 1개"를 위반 — 연결요소로 교정.)
+ */
+export function dedupeVehicles(vehicles, iouThresh = 0.5) {
+  const vs = (vehicles ?? []).filter((v) => v?.rect); // malformed 스킵(원순서 유지).
+  const n = vs.length;
+  const parent = Array.from({ length: n }, (_, i) => i);
+  const find = (x) => (parent[x] === x ? x : (parent[x] = find(parent[x])));
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      if (rectIoU(vs[i].rect, vs[j].rect) >= iouThresh) parent[find(i)] = find(j);
+    }
+  }
+  const lastOf = new Map(); // 그룹 대표 → 그 그룹의 최대 index(마지막 검지).
+  for (let i = 0; i < n; i++) {
+    const r = find(i);
+    if (!lastOf.has(r) || i > lastOf.get(r)) lastOf.set(r, i);
+  }
+  return [...lastOf.values()].sort((a, b) => a - b).map((i) => vs[i]); // 원순서 복원, 그룹당 마지막.
+}
+
 // ===== [기능2] VPD/LPD 검출 박스 선택·편집 순수 로직 =====
 // detect = { vehicles:[{ rect:{x,y,w,h}, plate? }], plates:[{ quad:[{x,y}×4] }] }(정규화). 임시(메모리) 편집.
 
@@ -1373,6 +1456,57 @@ export function projectCuboid(floorQuad, groundModel, heightM) {
       [0, 4], [1, 5], [2, 6], [3, 7], // 수직
     ],
   };
+}
+
+/** 바닥 4모서리 edge(코너 순서 규약). 앞면은 이 중 카메라 최근접 edge. 서버 project.ts BOTTOM_EDGES 와 동일. */
+const CUBOID_BOTTOM_EDGES = [[0, 1], [1, 2], [2, 3], [3, 0]];
+
+/**
+ * 육면체 앞면(근접면) 4 corner 인덱스 — **감김순서 불변**. 서버 src/ground/project.ts frontFaceCornerIdx 와
+ * **동일 정의**(단일 진실 — 표시=DB 파리티). projectCuboid.corners 규약: [바닥 0..3, 상면 4..7(같은 순서)].
+ * 바닥 corner 감김순서는 프리셋마다 회전될 수 있으므로(프리셋1=[근좌,원좌,원우,근우], 프리셋2=한 칸 회전)
+ * 고정 인덱스([0,3,7,4]) 대신 기하로 판정한다: 바닥 4 edge 중 두 끝점의 이미지 y 평균이 최대(하향 틸트
+ * 카메라에서 y 클수록 최근접=화면 아래=앞) 인 edge 의 두 바닥 corner a,b → 앞면 = [a, b, a+4, b+4].
+ * 상면은 위로 올라가 y 가 작아지므로 판정엔 바닥 y 만 쓴다. bottomY = 바닥 corner 0..3 의 이미지 y.
+ */
+function frontFaceCornerIdx(bottomY) {
+  let best = CUBOID_BOTTOM_EDGES[0];
+  let bestVal = -Infinity;
+  for (const [a, b] of CUBOID_BOTTOM_EDGES) {
+    const avg = (bottomY[a] + bottomY[b]) / 2;
+    if (avg > bestVal) {
+      bestVal = avg;
+      best = [a, b];
+    }
+  }
+  const [a, b] = best;
+  return [a, b, a + 4, b + 4];
+}
+
+/**
+ * 육면체 앞면 중심 = 근접면 4 corner 산술평균(정규화 0..1). cuboid=projectCuboid 반환 {corners,edges}.
+ * 앞면 corner 는 frontFaceCornerIdx 로 감김순서-불변 판정(프리셋2형 회전 quad 에서도 우측면 오선택 방지).
+ * corners 8점 미만/비유한 → null(호출측이 원 렌더 skip). 높이 의존 — 상면 corner 포함(H 정책은 호출측).
+ */
+export function frontFaceCenter(cuboid) {
+  const corners = cuboid?.corners;
+  if (!Array.isArray(corners) || corners.length < 8) return null;
+  const bottomY = [];
+  for (let i = 0; i < 4; i++) {
+    const c = corners[i];
+    if (!c || !Number.isFinite(c.y)) return null;
+    bottomY.push(c.y);
+  }
+  const idx = frontFaceCornerIdx(bottomY);
+  let sx = 0;
+  let sy = 0;
+  for (const i of idx) {
+    const c = corners[i];
+    if (!c || !Number.isFinite(c.x) || !Number.isFinite(c.y)) return null;
+    sx += c.x;
+    sy += c.y;
+  }
+  return { x: sx / idx.length, y: sy / idx.length };
 }
 
 /**

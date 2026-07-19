@@ -155,17 +155,30 @@ const ViewerSchema = z.object({
   controlToken: z.string(),
 });
 
+/** TypeScript 네이티브 카메라 클라이언트 실행 모드. */
+export const CameraExecutionModeSchema = z.enum(['typescript-native']);
+
 /**
  * 카메라 소스 설정(다중 소스). 미설정 시 camera(단일 sim)로 폴백(하위호환).
- * 자격증명은 여기 두지 않는다(UI 입력 → 통과).
+ * password는 독립형 폐쇄망 배포를 위해 선택적으로 저장할 수 있지만 GET /settings에는 절대 노출하지 않는다.
  */
-const CameraSourceConfigSchema = z.object({
+export const CameraSourceConfigSchema = z.object({
   id: z.string().min(1),
+  label: z.string().min(1).optional(),
   kind: z.enum(['sim', 'hucoms']),
-  baseUrl: z.string().url().optional(), // sim
-  host: z.string().optional(), // hucoms
+  /** 소스 프로토콜. 기존 설정(undefined)은 kind별 레거시 동작을 유지한다. */
+  protocol: z.enum(['unity-rpc', 'unity-rest', 'hucoms-v1.22']).optional(),
+  /** 시뮬레이터/실카메라 HTTP 제어 URL. Hucoms는 host/port보다 우선한다. */
+  baseUrl: z.string().url().optional(),
+  host: z.string().optional(), // hucoms 레거시
   port: z.number().int().positive().optional(),
+  username: z.string().optional(),
+  password: z.string().optional(),
+  /** 영상 소비자가 직접 사용할 스트림 주소. Hucoms HTTP 제어에는 사용하지 않는다. */
+  rtspUrl: z.string().url().or(z.literal('')).optional(),
+  /** @deprecated Hucoms V1.22는 별도 login CGI가 없으며 id/passwd query 인증을 사용한다. */
   loginPath: z.string().optional(),
+  /** @deprecated 네이티브 클라이언트는 /cgi-bin/image/jpeg.cgi를 사용한다. */
   snapshotUrl: z.string().optional(),
   ptz: z
     .object({
@@ -176,6 +189,22 @@ const CameraSourceConfigSchema = z.object({
     .optional(),
 });
 export type CameraSourceConfig = z.infer<typeof CameraSourceConfigSchema>;
+
+export const CameraRuntimeSchema = z.object({
+  executionMode: CameraExecutionModeSchema.default('typescript-native'),
+  /** 옵션창과 런타임이 공통으로 사용하는 활성 카메라 source id. */
+  selectedCameraId: z.string().min(1),
+});
+
+/** 실카메라 RTSP를 Viewer용 JPEG 프레임으로 변환하는 로컬 FFmpeg 설정. */
+export const CameraStreamingSchema = z.object({
+  ffmpegPath: z.string().min(1).default('ffmpeg'),
+  rtspTransport: z.enum(['tcp', 'udp']).default('tcp'),
+  fps: z.number().int().min(1).max(30).default(5),
+  /** FFmpeg MJPEG q:v. 낮을수록 고화질. */
+  jpegQuality: z.number().int().min(2).max(31).default(5),
+  startupTimeoutMs: z.number().int().positive().default(10_000),
+});
 
 const StoreSchema = z.object({
   dataDir: z.string().min(1),
@@ -253,6 +282,10 @@ export const ToolsConfigSchema = z.object({
   unityRpc: UnityRpcSchema,
   /** 다중 카메라 소스(옵셔널). 미설정 시 단일 sim 폴백. */
   cameraSources: z.array(CameraSourceConfigSchema).optional(),
+  /** TypeScript 네이티브 실행 및 활성 카메라 선택. 미설정 시 기존 cameraMode 동작을 유지한다. */
+  cameraRuntime: CameraRuntimeSchema.optional(),
+  /** RTSP → JPEG 변환 기본값. */
+  cameraStreaming: CameraStreamingSchema,
   /**
    * 뷰어 카메라 소스 선택. cameraSources(다중/고급) 미설정 시 이 값으로 단일 소스를 구성.
    * precedence: cameraSources(명시·길이>0) > cameraMode.
@@ -292,6 +325,7 @@ export const DEFAULT_TOOLS_CONFIG: ToolsConfig = {
   unityRpc: { baseUrl: 'http://localhost:13110', timeoutMs: 10000 },
   // cameraSources 는 기본값 미설정(undefined → sourceRegistry 가 단일 sim 으로 폴백).
   cameraMode: 'simulator',
+  cameraStreaming: { ffmpegPath: 'ffmpeg', rtspTransport: 'tcp', fps: 5, jpegQuality: 5, startupTimeoutMs: 10_000 },
   // realCamera 는 기본값 미설정(cameraMode='real' 전환 시 사용자가 추가).
 };
 
@@ -309,8 +343,9 @@ export function loadToolsConfig(path = 'config/tools.config.json'): ToolsConfig 
         merged[key] = raw[key] ?? def;
       }
     }
-    // cameraSources·realCamera 는 옵셔널(DEFAULT 에 없어 위 순회에서 누락) → 있으면 그대로 통과.
+    // cameraSources·cameraRuntime·realCamera 는 옵셔널(DEFAULT 에 없어 위 순회에서 누락) → 있으면 그대로 통과.
     if (raw.cameraSources !== undefined) merged.cameraSources = raw.cameraSources;
+    if (raw.cameraRuntime !== undefined) merged.cameraRuntime = raw.cameraRuntime;
     if (raw.realCamera !== undefined) merged.realCamera = raw.realCamera;
     return ToolsConfigSchema.parse(merged);
   }

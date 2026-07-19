@@ -38,6 +38,8 @@ export interface PlatePtzDeps {
   camera: ICameraClient;
   lpd: LpdClient;
   sleep?: (ms: number) => Promise<void>;
+  /** 매 캡처 직후 방금 찍은 JPEG 을 흘려보내는 관찰용 훅(가산·옵셔널 — 새 requestImage 없음). */
+  onFrame?: (jpeg: Buffer, camIdx: number, presetIdx: number) => void;
 }
 
 /** 게인은 항상 측정 기준 zoom(zoomRef)과 함께 다닌다 — 실효 게인 = gain·zoomRef/현재zoom(설계 §2.6). */
@@ -148,12 +150,14 @@ export class PlatePtz {
   private readonly camera: ICameraClient;
   private readonly lpd: LpdClient;
   private readonly sleep: (ms: number) => Promise<void>;
+  private readonly onFrame?: (jpeg: Buffer, camIdx: number, presetIdx: number) => void;
   private readonly opts: ResolvedOpts;
 
   constructor(deps: PlatePtzDeps, opts: PlatePtzOpts = {}) {
     this.camera = deps.camera;
     this.lpd = deps.lpd;
     this.sleep = deps.sleep ?? defaultSleep;
+    this.onFrame = deps.onFrame;
     this.opts = {
       centerTol: opts.centerTol ?? 0.03,
       targetPlateWidth: opts.targetPlateWidth ?? 0.2,
@@ -384,6 +388,7 @@ export class PlatePtz {
     radius: number | null,
   ): Promise<PlateBox | null> {
     const cap = await this.camera.requestImage(camIdx, presetIdx, ptz);
+    this.onFrame?.(cap.jpg, camIdx, presetIdx);
     await this.sleep(this.opts.settleMs);
     const plates = await this.lpd.detect(cap.jpg);
     const picked = pickNearestPlate(plates, prior);

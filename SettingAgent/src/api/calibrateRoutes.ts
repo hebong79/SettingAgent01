@@ -34,6 +34,21 @@ export function registerCalibrateRoutes(app: FastifyInstance, deps: CalibrateRou
 
   app.get('/calibrate/status', async () => deps.calibrator.getStatus());
 
+  // 최근 센터라이징 프레임(진행 관찰용). 카메라 재명령 없이 잡이 방금 찍은 JPEG 그대로(/capture/frame 미러).
+  app.get('/calibrate/frame', async (_req, reply) => {
+    const latest = deps.calibrator.getLastFrame();
+    if (!latest) {
+      reply.code(404);
+      return { error: 'no frame' };
+    }
+    reply
+      .header('Content-Type', 'image/jpeg')
+      .header('Cache-Control', 'no-store')
+      .header('X-Cal-Cam', String(latest.camIdx))
+      .header('X-Cal-Preset', String(latest.presetIdx));
+    return reply.send(latest.jpeg);
+  });
+
   app.get('/calibrate/result', async (_req, reply) => {
     if (!existsSync(deps.outFile)) {
       reply.code(404);

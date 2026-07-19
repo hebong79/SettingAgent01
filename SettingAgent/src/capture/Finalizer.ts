@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises';
 import type { SqliteStore } from './SqliteStore.js';
 import type { Repository } from '../store/Repository.js';
 import { defaultSaveName, type SaveStore } from '../store/SaveStore.js';
@@ -12,20 +13,51 @@ import { orderByPosition } from '../setup/ordering.js';
 import { buildGlobalIndex, validateCoverage, type IndexableSlot } from '../setup/GlobalIndexer.js';
 import { pad, rectToQuad } from '../domain/geometry.js';
 import { logger } from '../util/logger.js';
+import { stringify5 } from '../util/round.js';
+import { buildGroundInputs } from '../ground/groundInputs.js';
+import { estimateGroundModels } from '../ground/groundModel.js';
+import { backprojectToGround, projectCuboidPixels, frontFaceCenterPx } from '../ground/project.js';
+import { parseCameraViews } from '../setup/mapTargets.js';
+import type { GroundModel } from '../ground/types.js';
+import type { Vec3 } from '../ground/contactTypes.js';
 import type {
   GlobalSlotIndex,
+  NormalizedPoint,
   NormalizedQuad,
   NormalizedRect,
   ParkingSlot,
   Preset,
   SetupArtifact,
 } from '../domain/types.js';
-import type { AggregatedSlot, SlotSetupRow } from './types.js';
+import type { AggregatedSlot, SlotSetupRow, SlotSetupView } from './types.js';
 import type { CaptureSnapshot } from './CaptureJob.js';
 
 /** 슬롯 ID(기존 slotIdOf 규칙 동일). */
 function slotIdOf(camIdx: number, presetIdx: number, positionIdx: number): string {
   return `c${camIdx}p${presetIdx}s${positionIdx}`;
+}
+
+/** slot_setup 앞면 중심 DB 저장용 캐노니컬 높이(m). 뷰어 슬라이더 기본값과 동일. */
+const H_CONST = 1.5;
+
+/**
+ * 정규화 슬롯 quad(4점) + GroundModel + 높이 → 앞면 중심(정규화 0..1) | null.
+ * points→픽셀→backprojectToGround→projectCuboidPixels(h)→frontFaceCenterPx→ /imgW,/imgH.
+ * 지면모델 퇴화(지평선 위 등)/코너 수 이상 → null(강등, 저장은 null).
+ */
+function slotFrontCenter(points: NormalizedPoint[], g: GroundModel, h: number): { x: number; y: number } | null {
+  if (!Array.isArray(points) || points.length !== 4) return null;
+  const floorGround: Vec3[] = [];
+  for (const p of points) {
+    const X = backprojectToGround({ x: p.x * g.imgW, y: p.y * g.imgH }, g);
+    if (!X) return null;
+    floorGround.push(X);
+  }
+  const corners = projectCuboidPixels(floorGround, h, g);
+  if (!corners) return null;
+  const c = frontFaceCenterPx(corners);
+  if (!c) return null;
+  return { x: c.x / g.imgW, y: c.y / g.imgH };
 }
 
 export interface FinalizerDeps {
@@ -43,6 +75,10 @@ export interface FinalizerDeps {
   saveStore?: SaveStore;
   /** 미리 정의된 주차면 폴리곤 파일(Place01/PtzCamRoi.json) 경로. 주입 시 finalize 에서 slot_setup 저장(§06). */
   placeRoiFile?: string;
+  /** zoom 소스(camerapos.json) 경로. ground 와 함께 주입 시 slot3d_front_center 산출(미주입 시 f 강등). */
+  cameraposFile?: string;
+  /** 지면모델 설정(ground-model 라우트와 동일). 미주입/disabled 시 slot3d_front_center 전부 null 강등. */
+  ground?: ToolsConfig['ground'];
 }
 
 export interface FinalizeResult {
@@ -186,6 +222,12 @@ export class Finalizer {
     try {
       const place = await loadNormalizedPlaceRoi(this.deps.placeRoiFile);
       if (place) {
+        // 검출 hit 없는 슬롯이 직전 정상 vpd/lpd/occupy 를 null 로 파괴하지 않도록 기존 slot_setup 보존용 조회(slotId 키).
+        const existingBySlot = new Map<number, SlotSetupView>();
+        for (const v of this.deps.store.getSlotSetup()) existingBySlot.set(v.slotId, v);
+        // 프리셋별 지면모델 1회 산출(ground-model 라우트와 동일 조합). 3D 앞면 중심 저장의 유일 근거.
+        // ground 미주입/disabled·파일 부재·추정 실패 → 빈 맵/키 부재 → 해당 슬롯 front_center=null 강등(finalize 불변).
+        const modelByKey = await this.buildGroundModelMap();
         const byPresetAcc = new Map<string, AggregatedSlot[]>();
         for (const s of accepted) {
           let arr = byPresetAcc.get(s.presetKey);
@@ -200,10 +242,14 @@ export class Finalizer {
         for (const [key, spaces] of byPresetPlace) {
           const [camIdx, presetIdx] = key.split(':').map(Number);
           const clusters = byPresetAcc.get(key) ?? [];
+          const model = modelByKey.get(key) ?? null; // 지면모델 부재/퇴화 → 이 프리셋 front_center 전부 null.
           // 프리셋 단위 상호배타 전역-그리디 1:1 배정(설계서 §2/§3). 선착순 find() 대신 사전 배정.
           const assigned = assignClustersToSpaces(spaces, clusters, { centroidGate: this.deps.cfg.slotAssignGate });
           spaces.forEach((sp, i) => {
             const hit = assigned.get(i) ?? null;
+            const prev = existingBySlot.get(sp.idx); // hit 없을 때 기존 검출값 보존(빈 finalize 파괴 방지).
+            // 3D 앞면 중심 = 슬롯 quad + 지면모델 + 캐노니컬 높이(기하 소스 — 검출 무관, 매 finalize 재계산).
+            const front = model ? slotFrontCenter(sp.points, model, H_CONST) : null;
             // 점유영역(발자국) = 배정 차량 rect + 번호판 quad 로 결정형 사변형(부재 시 null).
             const occupyRange = hit
               ? buildPlateAnchoredQuad({ x: hit.x, y: hit.y, w: hit.w, h: hit.h }, hit.plateQuad ?? undefined)
@@ -213,15 +259,16 @@ export class Finalizer {
               camId: camIdx,
               presetId: presetIdx,
               presetSlotIdx: i + 1, // 프리셋 내 배열순 1-based.
-              slotRoi: JSON.stringify(sp.points),
-              vpdBbox: hit ? JSON.stringify({ x: hit.x, y: hit.y, w: hit.w, h: hit.h }) : null,
-              lpdObb: hit?.plateQuad ? JSON.stringify(hit.plateQuad) : null,
-              occupyRange: occupyRange ? JSON.stringify(occupyRange) : null,
+              slotRoi: stringify5(sp.points),
+              vpdBbox: hit ? stringify5({ x: hit.x, y: hit.y, w: hit.w, h: hit.h }) : (prev?.vpd ? stringify5(prev.vpd) : null),
+              lpdObb: hit?.plateQuad ? stringify5(hit.plateQuad) : (prev?.lpd ? stringify5(prev.lpd) : null),
+              occupyRange: occupyRange ? stringify5(occupyRange) : (prev?.occupyRange ? stringify5(prev.occupyRange) : null),
               pan: null,
               tilt: null,
               zoom: null,
               centered: 0,
               img1: null,
+              slot3dFrontCenter: front ? stringify5(front) : null,
               updatedAt,
             });
           });
@@ -247,6 +294,34 @@ export class Finalizer {
       globalCount: globalIndex.length,
       ...(occupancyAgreement ? { occupancyAgreement } : {}),
     };
+  }
+
+  /**
+   * 프리셋별 지면모델 맵(`${camIdx}:${presetIdx}` → GroundModel) — ground-model 라우트와 동일 조합.
+   * ground 미주입/disabled·placeRoiFile 부재·파일 읽기 실패 → 빈 맵(front_center 전부 null 강등, throw 금지).
+   */
+  private async buildGroundModelMap(): Promise<Map<string, GroundModel>> {
+    const out = new Map<string, GroundModel>();
+    if (!this.deps.ground?.enabled || !this.deps.placeRoiFile) return out;
+    try {
+      const raw = JSON.parse(await readFile(this.deps.placeRoiFile, 'utf8'));
+      let views: ReturnType<typeof parseCameraViews> = [];
+      if (this.deps.cameraposFile) {
+        try {
+          views = parseCameraViews(JSON.parse(await readFile(this.deps.cameraposFile, 'utf8')));
+        } catch {
+          /* camerapos 없음/파싱실패 → zoom 미상 강등(ground-model 라우트와 동일 처리). */
+        }
+      }
+      for (const cam of buildGroundInputs(raw, views)) {
+        for (const m of estimateGroundModels(cam, this.deps.ground).models) {
+          out.set(`${m.camIdx}:${m.presetIdx}`, m);
+        }
+      }
+    } catch (err) {
+      logger.warn({ err }, '지면모델 산출 실패 — slot3d_front_center 강등'); // 격리 — 나머지 slot_setup 저장 정상.
+    }
+    return out;
   }
 
   /** 채택 클러스터 → 프리셋별 위치 정렬 → ParkingSlot/Preset/Indexable 조립. */

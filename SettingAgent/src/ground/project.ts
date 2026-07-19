@@ -81,6 +81,54 @@ export function projectPointAtHeight(ground: Vec3, h: number, g: GroundModel): P
   return projectToPixel([ground[0] - h * n[0], ground[1] - h * n[1], ground[2] - h * n[2]], g);
 }
 
+/** 바닥 4모서리 edge(코너 순서 규약). 앞면은 이 중 카메라 최근접 edge(뷰어 web/core.js CUBOID_BOTTOM_EDGES 동일). */
+const BOTTOM_EDGES: readonly (readonly [number, number])[] = [[0, 1], [1, 2], [2, 3], [3, 0]];
+
+/**
+ * 육면체 앞면(근접면) 4 corner 인덱스 — **감김순서 불변**. 뷰어 web/core.js frontFaceCornerIdx 와 **동일 정의**.
+ * projectCuboidPixels 순서 규약: [바닥 0..3, 상면 4..7(같은 순서)]. 바닥 감김은 프리셋마다 회전될 수 있어
+ * 고정 인덱스([0,3,7,4]) 대신 기하로 판정한다: 바닥 4 edge 중 두 끝점 y 평균이 최대(하향 틸트 카메라에서
+ * y 클수록 최근접=화면 아래=앞) 인 edge 의 두 바닥 corner a,b → 앞면 = [a, b, a+4, b+4](대응 상면 포함).
+ * 상면은 위로 올라가 y 가 작아지므로 판정엔 바닥 y 만 쓴다. bottomY = 바닥 corner 0..3 의 픽셀 y.
+ */
+function frontFaceCornerIdx(bottomY: readonly number[]): [number, number, number, number] {
+  let best: readonly [number, number] = BOTTOM_EDGES[0];
+  let bestVal = -Infinity;
+  for (const [a, b] of BOTTOM_EDGES) {
+    const avg = (bottomY[a] + bottomY[b]) / 2;
+    if (avg > bestVal) {
+      bestVal = avg;
+      best = [a, b];
+    }
+  }
+  const [a, b] = best;
+  return [a, b, a + 4, b + 4];
+}
+
+/**
+ * 육면체 앞면 중심 픽셀 = 근접면 4모서리 픽셀 산술평균. corners 길이≠8/비유한 → null.
+ * 앞면 corner 는 frontFaceCornerIdx 로 감김순서-불변 판정 — 뷰어 frontFaceCenter 와 같은 정의(qa 파리티 대조).
+ */
+export function frontFaceCenterPx(corners: readonly Px[]): Px | null {
+  if (corners.length !== 8) return null;
+  const bottomY: number[] = [];
+  for (let i = 0; i < 4; i++) {
+    const c = corners[i];
+    if (!c || !Number.isFinite(c.y)) return null;
+    bottomY.push(c.y);
+  }
+  const idx = frontFaceCornerIdx(bottomY);
+  let sx = 0;
+  let sy = 0;
+  for (const i of idx) {
+    const c = corners[i];
+    if (!c || !Number.isFinite(c.x) || !Number.isFinite(c.y)) return null;
+    sx += c.x;
+    sy += c.y;
+  }
+  return { x: sx / idx.length, y: sy / idx.length };
+}
+
 /**
  * 지면 4점 + 높이 h → 육면체 8모서리의 픽셀. 하나라도 퇴화하면 **전체 null**(부분 육면체 금지).
  * 순서: [바닥 0..3, 상면 4..7] — 뷰어 projectCuboid.corners 와 같은 규약.

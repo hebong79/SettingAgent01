@@ -10,6 +10,7 @@ import type { CRpcClient } from '../clients/CRpcClient.js';
 import type { LlmModelSelector } from '../brain/llmRegistry.js';
 import { parseCameraViews } from '../setup/mapTargets.js';
 import { writeCamerapos } from '../setup/cameraposWriter.js';
+import { StreamAdapterError } from '../stream/StreamAdapter.js';
 
 export interface ViewerDeps {
   sources: Map<string, CameraSource>;
@@ -27,6 +28,10 @@ const ZOOM_MAX = 36;
 const clampZoom = (z: number): number => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
 
 const CamerasQuery = z.object({ source: z.string().optional() });
+const PtzQuery = z.object({
+  source: z.string().optional(),
+  cam: z.coerce.number().int().positive(),
+});
 
 /** 동시 스트림 상한(스펙 고정값, 설계서 §8 가정 A3). */
 const MAX_STREAMS = 4;
@@ -124,6 +129,30 @@ export async function registerViewerRoutes(app: FastifyInstance, deps: ViewerDep
     }
   });
 
+  /** 장비가 보고하는 현재 PTZ 조회. 실카메라 제어 UI의 상태 동기화에만 사용한다. */
+  app.get('/viewer/api/ptz', async (req, reply) => {
+    const parsed = PtzQuery.safeParse(req.query);
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: 'invalid query', detail: parsed.error.flatten() };
+    }
+    const source = pickSource(parsed.data.source);
+    if (!source) {
+      reply.code(400);
+      return { error: 'source not found' };
+    }
+    if (!source.getPtz) {
+      reply.code(501);
+      return { error: 'ptz state unsupported', code: 'PTZ_STATE_UNSUPPORTED' };
+    }
+    try {
+      return { ptz: await source.getPtz(parsed.data.cam) };
+    } catch (err) {
+      reply.code(502);
+      return { error: err instanceof CameraApiError ? err.message : String(err) };
+    }
+  });
+
   app.get('/viewer/api/snapshot', async (req, reply) => {
     const parsed = SnapshotQuery.safeParse(req.query);
     if (!parsed.success) {
@@ -171,7 +200,7 @@ export async function registerViewerRoutes(app: FastifyInstance, deps: ViewerDep
       reply.code(400);
       return { error: 'source not found' };
     }
-    // 스트림 미지원 소스(예: RealPtzSource) → 501 → 프론트가 폴링으로 폴백.
+    // 스트림 미지원 소스 → 501 → 프론트가 폴링으로 폴백. 실카메라는 RTSP adapter를 사용한다.
     if (!source.streamMjpeg) {
       reply.code(501);
       return { error: 'stream unsupported', code: 'STREAM_UNSUPPORTED' };
@@ -202,6 +231,7 @@ export async function registerViewerRoutes(app: FastifyInstance, deps: ViewerDep
         return { error: err.message, code: 'TOO_MANY_STREAMS' };
       }
       reply.code(502);
+      if (err instanceof StreamAdapterError) return { error: err.message, code: err.code };
       return { error: err instanceof CameraApiError ? err.message : String(err) };
     }
 
@@ -374,7 +404,11 @@ export async function registerViewerRoutes(app: FastifyInstance, deps: ViewerDep
     });
   }
 
-  app.get('/viewer/api/health', async () => ({ status: 'ok', sources: [...sources.keys()] }));
+  app.get('/viewer/api/health', async () => ({
+    status: 'ok',
+    sources: [...sources.keys()],
+    sourceDetails: [...sources.entries()].map(([id, source]) => ({ id, kind: source.kind, streamTransport: source.streamTransport })),
+  }));
 
   // GET /viewer → /viewer/ (트레일링 슬래시) redirect.
   app.get('/viewer', async (_req, reply) => reply.redirect('/viewer/'));

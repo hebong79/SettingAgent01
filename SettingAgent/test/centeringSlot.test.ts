@@ -9,6 +9,7 @@ import type { ToolsConfig } from '../src/config/toolsConfig.js';
 import type { SetupArtifact } from '../src/domain/types.js';
 import type { SlotSetupRow, SlotSetupView } from '../src/capture/types.js';
 import { rectToQuad, quadBoundingRect } from '../src/domain/geometry.js';
+import { round5 } from '../src/util/round.js';
 import type { SlotPtzArtifact, Ptz } from '../src/calibrate/types.js';
 import type { PlatePtzOpts, PlatePtzResult } from '../src/calibrate/platePtz.js';
 
@@ -47,7 +48,7 @@ function viewRow(slotId: number, presetSlotIdx: number): SlotSetupView {
   return {
     slotId, camId: 1, presetId: 1, presetSlotIdx, presetKey: '1:1',
     roi: [], vpd: null, lpd: LPD_QUAD, occupyRange: null,
-    pan: null, tilt: null, zoom: null, centered: false, img1: null, updatedAt: null,
+    pan: null, tilt: null, zoom: null, centered: false, img1: null, slot3dFrontCenter: null, updatedAt: null,
   };
 }
 
@@ -61,7 +62,7 @@ const roi = [{ x: 0.6, y: 0.6 }, { x: 0.7, y: 0.6 }, { x: 0.7, y: 0.65 }, { x: 0
 const slotRow = (slotId: number, presetSlotIdx: number, updatedAt = 'T-seed'): SlotSetupRow => ({
   slotId, camId: 1, presetId: 1, presetSlotIdx, slotRoi: JSON.stringify(roi),
   vpdBbox: null, lpdObb: JSON.stringify(LPD_QUAD), occupyRange: null, pan: null, tilt: null, zoom: null,
-  centered: 0, img1: null, updatedAt,
+  centered: 0, img1: null, slot3dFrontCenter: null, updatedAt,
 });
 
 /** slot_setup(+FK 부모) 를 시드한 :memory: 스토어 — upsertSlotCentering 은 기존 행만 UPDATE 하므로 필수 선행. */
@@ -342,7 +343,10 @@ describe('T7 slot_setup 센터라이징 미러 멱등 + 경계면 교차', () =>
     // 경계면: slot_setup 분해 PTZ ↔ JSON item.ptz shape 교차 비교(정수 slot_id=globalIdx 매핑).
     const item = getSaved()!.items.find((i) => i.globalIdx === 1)!;
     const row = second.find((r) => r.slotId === 1)!;
-    expect({ pan: row.pan, tilt: row.tilt, zoom: row.zoom }).toEqual(item.ptz);
+    // ★ 영속화 5자리: DB REAL pan/tilt/zoom 은 upsertSlotCentering 이 round5 로 저장(예: 9.999999999999995→10,
+    //   3.722419436408399→3.72242). in-memory item.ptz 는 롱플로트 → 저장 정밀도(round5)로 맞춰 교차 비교(검증 의도 유지).
+    expect({ pan: row.pan, tilt: row.tilt, zoom: row.zoom })
+      .toEqual({ pan: round5(item.ptz.pan), tilt: round5(item.ptz.tilt), zoom: round5(item.ptz.zoom) });
     // 1-based 규약 유지.
     expect(row.camId).toBe(1);
     expect(row.presetId).toBe(1);

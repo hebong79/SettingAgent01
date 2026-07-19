@@ -20,6 +20,7 @@ interface RpcCamera {
  */
 export class CameraposSource implements CameraSource {
   readonly kind = 'rpc' as const;
+  readonly streamTransport = 'http-mjpeg' as const;
 
   constructor(
     private cameraposFile: string,
@@ -59,6 +60,11 @@ export class CameraposSource implements CameraSource {
 
   move(cam: number, ptz: Ptz): Promise<boolean> {
     return this.inner.move(cam, ptz);
+  }
+
+  /** camerapos는 프리셋만 소유하므로, 현재 PTZ는 Unity RPC 장비에 위임한다. */
+  getPtz(cam: number): Promise<Ptz> {
+    return this.inner.getPtz(cam);
   }
 
   streamMjpeg(cam: number, presetIdx: number, signal: AbortSignal, ptz?: Ptz): AsyncGenerator<Buffer> {

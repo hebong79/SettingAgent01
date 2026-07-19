@@ -111,6 +111,7 @@ export interface SlotSetupRow {
   zoom: number | null;
   centered: number; // 0/1
   img1: string | null; // 센터라이징 후 차량 스샷 상대경로. 부재 null
+  slot3dFrontCenter: string | null; // 3D 육면체 앞면 중심 정규화 {x,y} JSON. 지면모델 없음/퇴화 시 null
   updatedAt: string | null;
 }
 
@@ -133,6 +134,7 @@ export interface SlotSetupView {
   zoom: number | null;
   centered: boolean;
   img1: string | null;
+  slot3dFrontCenter: { x: number; y: number } | null; // 3D 육면체 앞면 중심(정규화). 부재 null
   updatedAt: string | null;
 }
 
@@ -147,6 +149,17 @@ export interface SlotCenteringRow {
   zoom: number | null;
   centered: number; // 0/1
   img1: string | null;
+  updatedAt: string;
+}
+
+/**
+ * upsertSlotLpd 입력(부분 갱신 — slot_id 키 UPDATE).
+ * 번호판 디스커버리(PlateDiscovery)가 lpd_obb 만 원본 좌표로 채운다 — 타 컬럼·타 슬롯 불변.
+ * lpdObb 는 stringify5 로 직렬화된 정규화 OBB JSON TEXT(slot_setup TEXT writer 규약).
+ */
+export interface SlotLpdRow {
+  slotId: number;
+  lpdObb: string | null;
   updatedAt: string;
 }
 
@@ -170,6 +183,8 @@ export interface CaptureStatus {
   llmFloorUnavailable?: boolean;
   /** 차량 점유율 LLM 동작불가(저장 생략) — UI 경고 표식. */
   llmOccupancyUnavailable?: boolean;
+  /** 이번 run 의 VPD(차량) 검출 게이트(false=자동 경로 VPD 정지 · LPD 전용). 강등 위장 금지 노출. */
+  vpdEnabled?: boolean;
   /** 이번 run 에 적용된 VPD 필터 모드(true=주차면 위 차량만). */
   vpdOnParkingOnly?: boolean;
   /** 필터로 제외된 차량 누적 대수(run 누적). */

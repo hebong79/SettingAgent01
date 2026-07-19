@@ -44,6 +44,11 @@ export interface CaptureJobDeps {
    * 산출물은 **인메모리**에만 둔다(DB 무접촉). 실패는 전부 흡수 — **잡은 절대 죽지 않는다**.
    */
   cuboidCtx?: (camIdx: number, presetIdx: number) => Promise<CuboidContext | null>;
+  /**
+   * ★ 잡 종단 완료 콜백(옵셔널·가산 — 원버튼 셋업 파이프라인 배선). done/stopped/error 로 1회 통지.
+   * 미주입 시 no-op(수동 흐름 회귀 0). throw 는 흡수한다 — 콜백이 잡을 죽이지 않는다.
+   */
+  onFinished?: (status: 'done' | 'stopped' | 'error') => void;
 }
 
 /** 잡이 들고 있는 프리셋별 최신 육면체(인메모리 — DB 저장 금지). `GET /capture/job-cuboids` 가 읽는다. */
@@ -74,6 +79,11 @@ export interface CaptureStartParams {
   floorRoiUseLlm?: boolean;
   /** VPD 검출 모드(옵셔널). 미지정/true=주차면 위 차량만, false=모든 차량. 기본 true. */
   vpdOnParkingOnly?: boolean;
+  /**
+   * VPD(차량) 검출 게이트(옵셔널). 미지정 시 **라이브러리 기본 true**(기존 완전 검출 동작 보존 → 기존 테스트 무수정).
+   * 라우트(제품 정책)는 false 를 명시해 자동 경로 VPD 를 정지시킨다. false 면 vpd.detect·cuboid seg 미호출.
+   */
+  vpdEnabled?: boolean;
 }
 
 /**
@@ -120,6 +130,8 @@ export class CaptureJob {
   private floorRoiUseLlm = true;
   /** VPD 검출 모드. true=주차면 위 차량만(기본), false=모든 차량. run 시작 시 고정(진행 중 토글 무시). */
   private vpdOnParkingOnly = true;
+  /** VPD(차량) 검출 게이트. 라이브러리 기본 true, 라우트가 false(제품 정책 OFF)로 정지. run 시작 시 고정. */
+  private vpdEnabled = true;
   /** 이번 run 의 주차면 폴리곤(run 시작 시 1회 로드 — 뷰어에서 편집·저장한 최신 ROI 반영). */
   private placePromise?: Promise<NormalizedPlaceRoi | null>;
   /** 모드A 필터로 제외한 차량 누적 대수. */
@@ -188,6 +200,7 @@ export class CaptureJob {
       ...(this.latestAdvisory.length > 0 ? { latestAdvisory: [...this.latestAdvisory] } : {}),
       ...(this.llmFloorUnavailable ? { llmFloorUnavailable: true } : {}),
       ...(this.llmOccupancyUnavailable ? { llmOccupancyUnavailable: true } : {}),
+      ...(this.runId !== undefined ? { vpdEnabled: this.vpdEnabled } : {}),
       ...(this.runId !== undefined ? { vpdOnParkingOnly: this.vpdOnParkingOnly } : {}),
       ...(this.vpdFilteredOut > 0 ? { vpdFilteredOut: this.vpdFilteredOut } : {}),
       ...(this.lpdFilteredOut > 0 ? { lpdFilteredOut: this.lpdFilteredOut } : {}),
@@ -221,6 +234,7 @@ export class CaptureJob {
     this.params = p;
     this.floorRoiUseLlm = p.floorRoiUseLlm ?? true; // 기본 true(기존 캡처 동작 회귀 0).
     this.vpdOnParkingOnly = p.vpdOnParkingOnly ?? true; // 기본 모드A(주차면 위 차량만).
+    this.vpdEnabled = p.vpdEnabled ?? true; // 라이브러리 기본 true(회귀 0). 라우트가 false 로 자동 경로 VPD 정지.
     this.vpdFilteredOut = 0;
     this.lpdFilteredOut = 0;
     this.onPlaceDegraded = undefined;
@@ -269,6 +283,12 @@ export class CaptureJob {
   private finishRun(status: 'done' | 'stopped' | 'error', _reason: 'count' | 'manual' | 'error'): void {
     this.endedAt = this.now();
     this.state = status;
+    // 원버튼 셋업 파이프라인 통지(옵셔널). throw 흡수 — 잡 사망 절대 금지.
+    try {
+      this.deps.onFinished?.(status);
+    } catch (e) {
+      logger.warn({ err: e, status }, '잡 완료 콜백 예외(흡수)');
+    }
   }
 
   private aggOptions(): AggregateOptions {
@@ -356,8 +376,9 @@ export class CaptureJob {
     if (!rs) this.roundsByPreset.set(presetKey, (rs = new Set<number>()));
     rs.add(roundIdx);
 
-    const raw = await this.deps.vpd.detect(cap.jpg);
-    const vehicles = this.vpdOnParkingOnly ? await this.applyOnPlaceFilter(raw, t) : raw;
+    // VPD off(제품 정책) 시 vpd.detect 미호출 → vehicles=[]. 번호판 필터는 vehicles=[] 로 폴리곤 직접 전환(결정 C).
+    const raw = this.vpdEnabled ? await this.deps.vpd.detect(cap.jpg) : [];
+    const vehicles = this.vpdEnabled && this.vpdOnParkingOnly ? await this.applyOnPlaceFilter(raw, t) : raw;
     const dets: Array<{ kind: 'vehicle' | 'plate'; x: number; y: number; w: number; h: number; conf: number; quad?: NormalizedQuad }> =
       vehicles.map((v) => ({
         kind: 'vehicle',
@@ -405,7 +426,7 @@ export class CaptureJob {
     // ↓ 아래는 **가산**(읽기 전용). `raw`/`vehicles` 를 읽기만 하고 DB 에 아무것도 쓰지 않는다.
     //   ∴ 육면체 on/off 는 `insertDetections` 인자를 바꿀 수 없다(구조적 회귀 0 — T6 가 봉인).
     // ─────────────────────────────────────────────────────────────────────────
-    if (this.deps.cuboidCtx) {
+    if (this.deps.cuboidCtx && this.vpdEnabled) {
       // ★ `keptDetIdx` 는 필터를 **재계산하지 않고** 참조 동일성(indexOf)으로 얻는다 → 필터 경로 무접촉.
       //   (`filterVehiclesOnPlace` 는 Array.filter — 입력 객체 참조를 보존한다.)
       //   ⚠️ **-1 을 여기서 버리지 않는다**(DEFECT-2): 전제가 깨지면 `buildFrameCuboids` 가 issues 로 **드러낸다**.

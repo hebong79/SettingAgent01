@@ -31,6 +31,11 @@ export interface PtzCalibratorDeps {
   writer?: (artifact: ReturnType<typeof buildSlotPtzJson>, outFile: string) => void;
   sleep?: (ms: number) => Promise<void>;
   now?: () => string;
+  /**
+   * ★ 잡 종단 완료 콜백(옵셔널·가산 — 원버튼 셋업 파이프라인 배선). done/error 로 1회 통지.
+   * 미주입 시 no-op(수동 흐름 회귀 0). throw 는 흡수한다 — 콜백이 잡을 죽이지 않는다.
+   */
+  onFinished?: (state: 'done' | 'error') => void;
 }
 
 /**
@@ -57,17 +62,30 @@ export class PtzCalibrator {
   private readonly makePlatePtz: (opts: PlatePtzOpts) => PlatePtzApi;
   private readonly writer: (artifact: ReturnType<typeof buildSlotPtzJson>, outFile: string) => void;
   private readonly now: () => string;
+  /** 잡 종단 완료 콜백(옵셔널·가산 — 파이프라인 배선). 미주입 시 no-op. */
+  private readonly onFinished?: (state: 'done' | 'error') => void;
   /** 프리셋 PTZ 조회 캐시(`${cam}:${preset}` → PTZ) — Finalizer ptzByKey 패턴. */
   private readonly ptzByKey = new Map<string, Ptz>();
+  /** 최근 센터라이징 캡처 프레임(없으면 undefined). 뷰어 /calibrate/frame 용 — CaptureJob.getLastFrame 패턴. */
+  private lastFrame?: { jpeg: Buffer; camIdx: number; presetIdx: number };
 
   constructor(deps: PtzCalibratorDeps) {
     this.camera = deps.camera;
     this.cfg = deps.cfg;
     this.store = deps.store;
     const sleep = deps.sleep ?? defaultSleep;
-    this.makePlatePtz = deps.makePlatePtz ?? ((opts) => new PlatePtz({ camera: deps.camera, lpd: deps.lpd, sleep }, opts));
+    const onFrame = (jpeg: Buffer, camIdx: number, presetIdx: number): void => {
+      this.lastFrame = { jpeg, camIdx, presetIdx };
+    };
+    this.makePlatePtz = deps.makePlatePtz ?? ((opts) => new PlatePtz({ camera: deps.camera, lpd: deps.lpd, sleep, onFrame }, opts));
     this.writer = deps.writer ?? writeSlotPtz;
     this.now = deps.now ?? (() => new Date().toISOString());
+    this.onFinished = deps.onFinished;
+  }
+
+  /** 최근 센터라이징 캡처 프레임(없으면 undefined). 뷰어 /calibrate/frame 용. 잡 종료 후에도 유지. */
+  getLastFrame(): { jpeg: Buffer; camIdx: number; presetIdx: number } | undefined {
+    return this.lastFrame;
   }
 
   getStatus(): CalibrateStatus {
@@ -121,10 +139,21 @@ export class PtzCalibrator {
       this.current = undefined;
       this.endedAt = this.now();
       this.state = 'done';
+      this.notifyFinished('done');
     } catch (e) {
       logger.error({ err: e }, '센터라이징 잡 예외 → error');
       this.endedAt = this.now();
       this.state = 'error';
+      this.notifyFinished('error');
+    }
+  }
+
+  /** 종단 완료 콜백 통지(옵셔널). throw 흡수 — 콜백이 잡을 죽이지 않는다. */
+  private notifyFinished(state: 'done' | 'error'): void {
+    try {
+      this.onFinished?.(state);
+    } catch (e) {
+      logger.warn({ err: e, state }, '센터라이징 완료 콜백 예외(흡수)');
     }
   }
 

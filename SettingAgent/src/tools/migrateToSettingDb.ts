@@ -24,6 +24,7 @@ import type {
   SlotCenteringRow,
   SlotSetupRow,
 } from '../capture/types.js';
+import { stringify5 } from '../util/round.js';
 
 const PLACE_ID = 1;
 const PLACE_NAME = 'Place01';
@@ -112,7 +113,7 @@ function buildSlots(ptzRaw: unknown, now: string): SlotSetupRow[] {
         camId,
         presetId,
         presetSlotIdx: i + 1, // 배열순 1-based
-        slotRoi: JSON.stringify(sp.points), // 정규화 NormalizedPoint[]
+        slotRoi: stringify5(sp.points), // 정규화 NormalizedPoint[]
         vpdBbox: null,
         lpdObb: null,
         occupyRange: null,
@@ -121,6 +122,7 @@ function buildSlots(ptzRaw: unknown, now: string): SlotSetupRow[] {
         zoom: null,
         centered: 0,
         img1: null,
+        slot3dFrontCenter: null, // 마이그레이션엔 지면모델 없음 → null(다음 finalize 에서 채워짐).
         updatedAt: now,
       });
     });

@@ -12,6 +12,7 @@ import type { SetupArtifact, NormalizedQuad } from '../src/domain/types.js';
 import type { ToolsConfig } from '../src/config/toolsConfig.js';
 import type { CaptureSnapshot } from '../src/capture/CaptureJob.js';
 import type { DetectionRow } from '../src/capture/types.js';
+import { stringify5 } from '../src/util/round.js';
 
 /**
  * 검증자(qa-tester): Finalizer floor ROI 가산 (설계서 §7).
@@ -175,8 +176,13 @@ describe('Finalizer slot_setup(§06) occupyRange — 결정형 발자국 영속�
       const cluster = aggregate(dets, presetRounds, {
         clusterDist: captureCfg.clusterDist, clusterMinSupport: captureCfg.clusterMinSupport, minConfidence: captureCfg.minConfidence,
       })[0];
+      // ★ 영속화 5자리: occupyRange TEXT 는 Finalizer 가 stringify5 로 기록 → getSlotSetup 파싱본은 좌표가 5자리.
+      //   기대값(buildPlateAnchoredQuad 롱플로트)을 동일 stringify5 정규화(JSON 왕복)로 맞춰 비교 —
+      //   결정형 발자국 산식 검증 의도 유지, 자릿수만 저장 정밀도로 조정.
       expect(rows[0].occupyRange).toEqual(
-        buildPlateAnchoredQuad({ x: cluster.x, y: cluster.y, w: cluster.w, h: cluster.h }, cluster.plateQuad ?? undefined),
+        JSON.parse(stringify5(
+          buildPlateAnchoredQuad({ x: cluster.x, y: cluster.y, w: cluster.w, h: cluster.h }, cluster.plateQuad ?? undefined),
+        )),
       );
     } finally {
       rmSync(dir, { recursive: true, force: true });

@@ -6,10 +6,12 @@ import type {
   PlaceInfoRow,
   PresetPosRow,
   SlotCenteringRow,
+  SlotLpdRow,
   SlotSetupRow,
   SlotSetupView,
 } from './types.js';
 import type { NormalizedPoint, NormalizedQuad } from '../domain/types.js';
+import { round5 } from '../util/round.js';
 
 /**
  * SettingAgent 셋업 정본 SQLite DAO (설계서 §1 신 6테이블).
@@ -94,6 +96,7 @@ export class SqliteStore {
         centered       INTEGER NOT NULL DEFAULT 0
                          CHECK (centered IN (0,1)),
         img1           TEXT,
+        slot3d_front_center TEXT,
         updated_at     TEXT,
         FOREIGN KEY (cam_id, preset_id)
           REFERENCES preset_pos(cam_id, preset_id),
@@ -125,6 +128,12 @@ export class SqliteStore {
                         REFERENCES parking_evnt(evnt_id)
       );
     `);
+
+    // 멱등 마이그레이션: 기존 DB(컬럼 부재)에 3D 앞면 중심 컬럼 추가. 신규 DB 는 CREATE 에 포함 → no-op.
+    const slotSetupCols = this.db.prepare(`PRAGMA table_info(slot_setup)`).all() as { name: string }[];
+    if (!slotSetupCols.some((c) => c.name === 'slot3d_front_center')) {
+      this.db.exec(`ALTER TABLE slot_setup ADD COLUMN slot3d_front_center TEXT`);
+    }
   }
 
   // ── place_info ──────────────────────────────────────────
@@ -176,7 +185,7 @@ export class SqliteStore {
          updated_at=excluded.updated_at`,
     );
     const tx = this.db.transaction((list: PresetPosRow[]) => {
-      for (const r of list) stmt.run(r.camId, r.presetId, r.sname, r.pan, r.tilt, r.zoom, r.updatedAt);
+      for (const r of list) stmt.run(r.camId, r.presetId, r.sname, round5(r.pan), round5(r.tilt), round5(r.zoom), r.updatedAt);
     });
     tx(rows);
   }
@@ -191,8 +200,8 @@ export class SqliteStore {
     const ins = this.db.prepare(
       `INSERT INTO slot_setup
          (slot_id, cam_id, preset_id, preset_slotidx, slot_roi, vpd_bbox, lpd_obb, occupy_range,
-          pan, tilt, zoom, centered, img1, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          pan, tilt, zoom, centered, img1, slot3d_front_center, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const tx = this.db.transaction((list: SlotSetupRow[]) => {
       del.run();
@@ -200,7 +209,9 @@ export class SqliteStore {
         ins.run(
           r.slotId, r.camId, r.presetId, r.presetSlotIdx ?? null,
           r.slotRoi, r.vpdBbox ?? null, r.lpdObb ?? null, r.occupyRange ?? null,
-          r.pan ?? null, r.tilt ?? null, r.zoom ?? null, r.centered, r.img1 ?? null, r.updatedAt ?? null,
+          r.pan == null ? null : round5(r.pan), r.tilt == null ? null : round5(r.tilt), r.zoom == null ? null : round5(r.zoom),
+          r.centered, r.img1 ?? null,
+          r.slot3dFrontCenter ?? null, r.updatedAt ?? null,
         );
       }
     });
@@ -214,7 +225,8 @@ export class SqliteStore {
         `SELECT slot_id AS slotId, cam_id AS camId, preset_id AS presetId,
                 preset_slotidx AS presetSlotIdx, slot_roi AS slotRoi,
                 vpd_bbox AS vpdBbox, lpd_obb AS lpdObb, occupy_range AS occupyRange,
-                pan, tilt, zoom, centered, img1, updated_at AS updatedAt
+                pan, tilt, zoom, centered, img1,
+                slot3d_front_center AS slot3dFrontCenter, updated_at AS updatedAt
          FROM slot_setup ORDER BY cam_id, preset_id, preset_slotidx`,
       )
       .all() as Array<{
@@ -231,6 +243,7 @@ export class SqliteStore {
       zoom: number | null;
       centered: number;
       img1: string | null;
+      slot3dFrontCenter: string | null;
       updatedAt: string | null;
     }>;
     return rows.map((r) => ({
@@ -248,6 +261,7 @@ export class SqliteStore {
       zoom: r.zoom ?? null,
       centered: r.centered === 1,
       img1: r.img1 ?? null,
+      slot3dFrontCenter: parseJsonOrNull<SlotSetupView['slot3dFrontCenter']>(r.slot3dFrontCenter),
       updatedAt: r.updatedAt ?? null,
     }));
   }
@@ -265,10 +279,36 @@ export class SqliteStore {
     );
     const tx = this.db.transaction((list: SlotCenteringRow[]) => {
       for (const r of list) {
-        stmt.run(r.pan ?? null, r.tilt ?? null, r.zoom ?? null, r.centered, r.img1 ?? null, r.updatedAt, r.slotId);
+        stmt.run(
+          r.pan == null ? null : round5(r.pan), r.tilt == null ? null : round5(r.tilt), r.zoom == null ? null : round5(r.zoom),
+          r.centered, r.img1 ?? null, r.updatedAt, r.slotId,
+        );
       }
     });
     tx(rows);
+  }
+
+  /**
+   * 번호판 디스커버리 결과를 slot_id 키로 부분 UPDATE(lpd_obb/updated_at 만).
+   * ★ 전량 delete 금지(메모리 노트 "finalize slot_setup wipe fragility") — 키 단위 UPDATE 로
+   *   타깃 외 슬롯·타 컬럼(slot_roi/vpd/pan/tilt/센터링) 불변. slot_id 미존재 행은 조용히 무시.
+   * lpdObb 는 이미 stringify5 직렬화된 정규화 OBB JSON TEXT(호출측 규약).
+   */
+  upsertSlotLpd(rows: SlotLpdRow[]): void {
+    const stmt = this.db.prepare(`UPDATE slot_setup SET lpd_obb = ?, updated_at = ? WHERE slot_id = ?`);
+    const tx = this.db.transaction((list: SlotLpdRow[]) => {
+      for (const r of list) stmt.run(r.lpdObb ?? null, r.updatedAt, r.slotId);
+    });
+    tx(rows);
+  }
+
+  /** slot_setup 검출·센터링 컬럼 전량 초기화(수동 '초기화' 버튼). slot_roi·행은 보존. 반환=초기화 행수. */
+  clearSlotSetupEnrichment(updatedAt: string): number {
+    const info = this.db.prepare(
+      `UPDATE slot_setup SET vpd_bbox=NULL, lpd_obb=NULL, occupy_range=NULL,
+       pan=NULL, tilt=NULL, zoom=NULL, centered=0, img1=NULL, updated_at=?`,
+    ).run(updatedAt);
+    return info.changes;
   }
 }
 

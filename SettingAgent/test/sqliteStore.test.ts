@@ -9,6 +9,7 @@ import type {
   PlaceInfoRow,
   PresetPosRow,
   SlotCenteringRow,
+  SlotLpdRow,
   SlotSetupRow,
 } from '../src/capture/types.js';
 import type { NormalizedPoint, NormalizedQuad } from '../src/domain/types.js';
@@ -48,7 +49,7 @@ const lpdQuad: NormalizedQuad = [
 const slotRow = (over: Partial<SlotSetupRow> = {}): SlotSetupRow => ({
   slotId: 1, camId: 1, presetId: 1, presetSlotIdx: 1,
   slotRoi: JSON.stringify(roi), vpdBbox: null, lpdObb: null, occupyRange: null,
-  pan: null, tilt: null, zoom: null, centered: 0, img1: null, updatedAt: 'T', ...over,
+  pan: null, tilt: null, zoom: null, centered: 0, img1: null, slot3dFrontCenter: null, updatedAt: 'T', ...over,
 });
 
 /** place/camera/preset(FK 부모) 를 시드한 :memory: 스토어. slot_setup FK(→preset_pos) 충족용. */
@@ -258,6 +259,95 @@ describe('SqliteStore upsertSlotCentering (부분 UPDATE · 타 슬롯 불변)',
     const rows = store.getSlotSetup();
     expect(rows).toHaveLength(1);
     expect(rows[0].centered).toBe(false); // slotId 1 은 미갱신
+  });
+});
+
+// ── upsertSlotLpd: slot_id 키 부분 UPDATE(wipe-safety 봉인) ──
+describe('SqliteStore upsertSlotLpd (부분 UPDATE · 타 컬럼·타 슬롯 불변)', () => {
+  const lpdRow = (over: Partial<SlotLpdRow> = {}): SlotLpdRow => ({
+    slotId: 1, lpdObb: JSON.stringify(lpdQuad), updatedAt: 'T-lpd', ...over,
+  });
+
+  /** 검출·센터링·기하 컬럼이 전부 채워진 슬롯을 시드(변경 격리 검증용 fixture). */
+  function seedEnriched(): SqliteStore {
+    const s = seededStore([presetRow({ presetId: 1 })]);
+    s.replaceSlotSetup([
+      slotRow({
+        slotId: 1, presetId: 1, presetSlotIdx: 1,
+        vpdBbox: JSON.stringify({ x: 0.3, y: 0.3, w: 0.1, h: 0.1 }),
+        lpdObb: null, // 검출 실패로 비어 있던 lpd → discovery 가 채운다
+        occupyRange: JSON.stringify(roi),
+        pan: 51.5, tilt: 9.3, zoom: 14.4, centered: 1, img1: 'shots/c1.jpg',
+        slot3dFrontCenter: JSON.stringify({ x: 0.4, y: 0.55 }),
+        updatedAt: 'T-orig',
+      }),
+      slotRow({ slotId: 2, presetId: 1, presetSlotIdx: 2, updatedAt: 'T-orig' }),
+    ]);
+    return s;
+  }
+
+  it('대상 슬롯의 lpd_obb·updated_at 만 갱신 — vpd/occupy/ptz/센터링/slot_roi/front_center 전부 불변', () => {
+    store = seedEnriched();
+    const newQuad: NormalizedQuad = [
+      { x: 0.61, y: 0.62 }, { x: 0.67, y: 0.61 }, { x: 0.68, y: 0.65 }, { x: 0.62, y: 0.66 },
+    ];
+    store.upsertSlotLpd([lpdRow({ slotId: 1, lpdObb: JSON.stringify(newQuad), updatedAt: 'T-lpd' })]);
+    const [v] = store.getSlotSetup();
+    // 갱신된 것.
+    expect(v.lpd).toEqual(newQuad);
+    expect(v.updatedAt).toBe('T-lpd');
+    // ★ 그 외 컬럼 전부 불변(wipe-safety).
+    expect(v.vpd).toEqual({ x: 0.3, y: 0.3, w: 0.1, h: 0.1 });
+    expect(v.occupyRange).toEqual(roi);
+    expect([v.pan, v.tilt, v.zoom]).toEqual([51.5, 9.3, 14.4]);
+    expect(v.centered).toBe(true);
+    expect(v.img1).toBe('shots/c1.jpg');
+    expect(v.slot3dFrontCenter).toEqual({ x: 0.4, y: 0.55 });
+    expect(v.roi).toEqual(roi);
+  });
+
+  it('부분 갱신: 대상 슬롯만 lpd 채움, 타 슬롯 전멸/변경 금지', () => {
+    store = seedEnriched();
+    store.upsertSlotLpd([lpdRow({ slotId: 1, updatedAt: 'T-lpd' })]);
+    const rows = store.getSlotSetup();
+    expect(rows).toHaveLength(2); // ★ DELETE+INSERT 아님 — 행 보존
+    const s1 = rows.find((r) => r.slotId === 1)!;
+    const s2 = rows.find((r) => r.slotId === 2)!;
+    expect(s1.lpd).toEqual(lpdQuad);
+    expect(s1.updatedAt).toBe('T-lpd');
+    // 타 슬롯(2) 완전 불변.
+    expect(s2.lpd).toBeNull();
+    expect(s2.updatedAt).toBe('T-orig');
+    expect(s2.vpd).toBeNull();
+  });
+
+  it('lpdObb=null 전달 → 해당 슬롯 lpd 를 null 로 클리어(updated_at 만 함께)', () => {
+    store = seededStore([presetRow({ presetId: 1 })]);
+    store.replaceSlotSetup([slotRow({ slotId: 1, presetId: 1, presetSlotIdx: 1, lpdObb: JSON.stringify(lpdQuad) })]);
+    store.upsertSlotLpd([lpdRow({ slotId: 1, lpdObb: null, updatedAt: 'T-clr' })]);
+    const [v] = store.getSlotSetup();
+    expect(v.lpd).toBeNull();
+    expect(v.updatedAt).toBe('T-clr');
+  });
+
+  it('미존재 slot_id → 조용히 무시(throw 없음, 타 슬롯 불변)', () => {
+    store = seedEnriched();
+    expect(() => store!.upsertSlotLpd([lpdRow({ slotId: 999 })])).not.toThrow();
+    const rows = store.getSlotSetup();
+    expect(rows).toHaveLength(2);
+    expect(rows.find((r) => r.slotId === 1)!.lpd).toBeNull(); // slot1 미갱신(원래 null)
+  });
+
+  it('여러 행 트랜잭션 일괄 갱신', () => {
+    store = seedEnriched();
+    store.upsertSlotLpd([
+      lpdRow({ slotId: 1, lpdObb: JSON.stringify(lpdQuad), updatedAt: 'T-a' }),
+      lpdRow({ slotId: 2, lpdObb: JSON.stringify(lpdQuad), updatedAt: 'T-b' }),
+    ]);
+    const rows = store.getSlotSetup();
+    expect(rows.find((r) => r.slotId === 1)!.lpd).toEqual(lpdQuad);
+    expect(rows.find((r) => r.slotId === 2)!.lpd).toEqual(lpdQuad);
+    expect(rows.find((r) => r.slotId === 2)!.updatedAt).toBe('T-b');
   });
 });
 

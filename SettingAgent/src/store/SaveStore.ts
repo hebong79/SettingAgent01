@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, statSy
 import { join } from 'node:path';
 import type { SetupArtifact } from '../domain/types.js';
 import { logger } from '../util/logger.js';
+import { stringify5 } from '../util/round.js';
 
 /**
  * 정밀수집 결과 스냅샷(save/ 폴더)의 파일 IO 담당(Repository 미러).
@@ -34,7 +35,7 @@ export class SaveStore {
   save(name: string, artifact: SetupArtifact): string {
     const safe = this.sanitizeName(name);
     if (!safe) throw new Error(`invalid save name: ${name}`);
-    const json = JSON.stringify(artifact, null, 2);
+    const json = stringify5(artifact, 2);
     mkdirSync(this.saveDir, { recursive: true });
     writeFileSync(join(this.saveDir, `${safe}.json`), json, 'utf-8'); // 정본(권위) — 실패 시 throw.
     if (this.reportsDir) {

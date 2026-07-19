@@ -1,7 +1,9 @@
 import type { NormalizedQuad } from '../domain/types.js';
 import type { PlateBox } from '../clients/LpdClient.js';
+import type { SlotSetupView } from '../capture/types.js';
 import type { BuiltSlot } from './RoiBuilder.js';
 import { center, containsPoint, intersectionArea, quadBoundingRect } from '../domain/geometry.js';
+import { lowerFrontAnchor } from '../calibrate/plateDiscoveryWriter.js';
 
 /**
  * 앞쪽(번호판) 기대 위치 비율(>0.5=하단=앞). `detectPipeline.ts:113`·`detectMath.ts:113` 과 **동일 상수** —
@@ -58,6 +60,53 @@ export function matchPlatesToSlots(slots: BuiltSlot[], plates: PlateBox[]): Map<
     if (usedPlate.has(p.pi) || result.has(p.slot)) continue; // 양쪽 미배정일 때만 확정.
     // quad **참조** 그대로 담는다 — onPlaceFilter.ts:80-88·detectPipeline.ts:303 이 참조 동등성에 의존(기존 계약).
     result.set(p.slot, p.quad);
+    usedPlate.add(p.pi);
+  }
+  return result;
+}
+
+/** discovery(matchRadiusNorm) 동일 거리 게이트 — plate중심↔앵커 거리가 이보다 크면 배정 후보 제외(과배정 방지). */
+const MATCH_RADIUS = 0.15;
+
+/**
+ * 특정 프리셋의 슬롯뷰에 라이브 LPD plate 를 공간배정한다(nearest 하향앵커 전역 1:1 그리디).
+ * 슬롯 앵커 = `lowerFrontAnchor(roi, slot3dFrontCenter)` — discovery(앞면중심 LOOP)와 **동일 앵커·게이트**
+ *   라 두 경로가 같은 슬롯에 판을 귀속(일관성). `slot3dFrontCenter==null` 슬롯은 배정 대상 제외.
+ * plate 중심(quadBoundingRect center)과 앵커의 거리 오름차순으로 정렬해 **양쪽 미배정일 때만** 확정
+ *   (plate당 slot≤1·slot당 plate≤1, tie-break=pi·si 로 결정성). 거리>MATCH_RADIUS 쌍은 후보 제외.
+ * 반환 quad 는 **입력 plate.quad 참조 보존**(라우트가 참조로 원 confidence 역조회 — 기존 계약).
+ *
+ * ★ bbox 포함판정(초안)에서 nearest 하향앵커로 교체한 이유: 인접 슬롯 bbox 가 겹치는 경계부에서
+ *   중심 포함이 한 칸 밀리는 오배정이 라이브에서 관찰됨. 앵커 최근접은 번호판이 맺히는 전면 하부와
+ *   직접 대응해 밀림을 제거하고 discovery 와 동일 슬롯에 귀속시킨다(설계 v2 §4).
+ */
+export function assignPlatesToSlotViews(
+  slots: SlotSetupView[],
+  plates: PlateBox[],
+): Map<number, NormalizedQuad> {
+  const anchors: { slotId: number; ax: number; ay: number }[] = [];
+  for (const s of slots) {
+    if (s.slot3dFrontCenter == null) continue;
+    const a = lowerFrontAnchor(s.roi, s.slot3dFrontCenter);
+    anchors.push({ slotId: s.slotId, ax: a.x, ay: a.y });
+  }
+
+  const pairs: { pi: number; si: number; slot: number; quad: NormalizedQuad; dist: number }[] = [];
+  plates.forEach((plate, pi) => {
+    const c = center(quadBoundingRect(plate.quad));
+    anchors.forEach((a, si) => {
+      const dist = Math.hypot(c.cx - a.ax, c.cy - a.ay);
+      if (dist > MATCH_RADIUS) return; // 거리 상한 게이트 — 초과 plate 는 미배정.
+      pairs.push({ pi, si, slot: a.slotId, quad: plate.quad, dist });
+    });
+  });
+  pairs.sort((p, q) => p.dist - q.dist || p.pi - q.pi || p.si - q.si);
+
+  const result = new Map<number, NormalizedQuad>();
+  const usedPlate = new Set<number>();
+  for (const p of pairs) {
+    if (usedPlate.has(p.pi) || result.has(p.slot)) continue; // 양쪽 미배정일 때만 확정.
+    result.set(p.slot, p.quad); // quad 참조 보존(confidence 역조회 계약).
     usedPlate.add(p.pi);
   }
   return result;

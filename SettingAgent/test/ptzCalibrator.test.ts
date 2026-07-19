@@ -25,7 +25,7 @@ function views(): SlotSetupView[] {
   return [{
     slotId: 7, camId: 1, presetId: 1, presetSlotIdx: 1, presetKey: '1:1',
     roi: [], vpd: null, lpd: rectToQuad({ x: 0.62, y: 0.62, w: 0.05, h: 0.03 }),
-    occupyRange: null, pan: null, tilt: null, zoom: null, centered: false, img1: null, updatedAt: null,
+    occupyRange: null, pan: null, tilt: null, zoom: null, centered: false, img1: null, slot3dFrontCenter: null, updatedAt: null,
   }];
 }
 
@@ -155,6 +155,19 @@ describe('PtzCalibrator maxIter 미수렴', () => {
     const it = getSaved()!.items[0];
     expect(it.centered).toBe(false);
     expect(it.converged).toBe(false);
+  });
+});
+
+describe('PtzCalibrator onFinished 콜백 throw 흡수 (T9 — 파이프라인 배선)', () => {
+  it('완료 콜백이 throw 해도 잡은 죽지 않고 done 종단·콜백 1회', async () => {
+    let called: string | undefined;
+    const { cal } = makeCalibrator({
+      onFinished: (state) => { called = state; throw new Error('콜백 폭발'); },
+    });
+    cal.start();
+    await waitDone(cal);
+    expect(called).toBe('done'); // 콜백은 발화됨.
+    expect(cal.getStatus().state).toBe('done'); // 그러나 잡 상태는 정상 종단(예외 흡수).
   });
 });
 

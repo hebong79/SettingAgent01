@@ -12,6 +12,7 @@ import type { SetupArtifact } from '../src/domain/types.js';
 import type { SetupBrain, CheckpointResult, FinalizeCaptureResult } from '../src/brain/SetupBrain.js';
 import type { ToolsConfig } from '../src/config/toolsConfig.js';
 import type { CaptureSnapshot } from '../src/capture/CaptureJob.js';
+import { stringify5 } from '../src/util/round.js';
 
 /**
  * 검증자(qa-tester): CheckpointReviewer/Finalizer (G4 — fake brain).
@@ -204,7 +205,10 @@ describe('Finalizer 자동 스냅샷 저장(save/)', () => {
     const r = await finalizer.finalize(snapshotOf(dets, presetRounds));
     const list = saveStore.list();
     expect(list).toHaveLength(1);
-    expect(saveStore.load(list[0].name)).toEqual(r.artifact);
+    // ★ 영속화 5자리: SaveStore.save 가 stringify5 로 기록 → 로드본은 floorRoi 등 좌표가 5자리(예:
+    //   0.39999999999999997→0.4). in-memory artifact 를 동일 stringify5 정규화(JSON 왕복)한 값과 비교 —
+    //   저장 내용이 artifact 와 (5자리 영속화 규약 하에서) 일치함을 검증(구조·shape 검증 의도 유지).
+    expect(saveStore.load(list[0].name)).toEqual(JSON.parse(stringify5(r.artifact)));
   });
 
   it('saveStore 미주입 → 예외 없이 finalize(기존 동작 불변)', async () => {

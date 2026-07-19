@@ -7,6 +7,7 @@ import type { SetupArtifact } from '../domain/types.js';
 import type { SlotSetupView } from '../capture/types.js';
 import { quadBoundingRect } from '../domain/geometry.js';
 import { logger } from '../util/logger.js';
+import { stringify5 } from '../util/round.js';
 import type { PlateTarget, SlotPtzArtifact } from './types.js';
 
 /**
@@ -75,5 +76,5 @@ export function expandPlateTargets(artifact: SetupArtifact): PlateTarget[] {
 /** slot_ptz.json 저장(디렉터리 자동 생성). Repository 미사용 — 별도 파일. */
 export function writeSlotPtz(artifact: SlotPtzArtifact, outFile: string): void {
   mkdirSync(dirname(outFile), { recursive: true });
-  writeFileSync(outFile, JSON.stringify(artifact, null, 2), 'utf-8');
+  writeFileSync(outFile, stringify5(artifact, 2), 'utf-8');
 }

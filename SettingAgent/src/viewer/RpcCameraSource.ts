@@ -1,5 +1,7 @@
 import type { CRpcClient } from '../clients/CRpcClient.js';
 import type { CameraClient } from '../clients/CameraClient.js';
+import { SimulatorMjpegAdapter } from '../stream/SimulatorMjpegAdapter.js';
+import type { StreamAdapter } from '../stream/StreamAdapter.js';
 import type { CameraList, CameraSource, Ptz, SnapshotOpts, SnapshotResult } from './CameraSource.js';
 
 /** cam.list {} 응답 항목. */
@@ -25,8 +27,13 @@ interface RpcPreset {
  */
 export class RpcCameraSource implements CameraSource {
   readonly kind = 'rpc' as const;
+  readonly streamTransport: StreamAdapter['transport'];
+  private readonly streamAdapter: StreamAdapter;
 
-  constructor(private rpc: CRpcClient, private camera: CameraClient) {}
+  constructor(private rpc: CRpcClient, private camera: CameraClient, streamAdapter?: StreamAdapter) {
+    this.streamAdapter = streamAdapter ?? new SimulatorMjpegAdapter((cam, preset, signal, ptz) => this.camera.streamMjpeg(cam, preset, signal, ptz));
+    this.streamTransport = this.streamAdapter.transport;
+  }
 
   /** cam.list + preset.list → CameraList. 프리셋은 camIdx 로 그룹핑, 카메라 PTZ 없어 pan/tilt/zoom omit(설계서 §3). */
   async listCameras(): Promise<CameraList> {
@@ -48,6 +55,11 @@ export class RpcCameraSource implements CameraSource {
       presets: presetsByCam.get(c.camId) ?? [],
     }));
     return { cameras };
+  }
+
+  /** Unity RPC cam.getPTZ를 읽기 전용으로 호출한다. UI 상태 조회에서는 폴백 값을 만들지 않는다. */
+  getPtz(cam: number): Promise<Ptz> {
+    return this.currentPtz(cam, true);
   }
 
   /**
@@ -81,7 +93,7 @@ export class RpcCameraSource implements CameraSource {
 
   /** MJPEG 스트림 위임(설계서 §1·§3). 13110 /stream 정상 동작 재사용. */
   streamMjpeg(cam: number, presetIdx: number, signal: AbortSignal, ptz?: Ptz): AsyncGenerator<Buffer> {
-    return this.camera.streamMjpeg(cam, presetIdx, signal, ptz);
+    return this.streamAdapter.stream({ cam, presetIdx, signal, ptz });
   }
 
   toNativePtz(viewerPtz: Ptz): unknown {
@@ -92,12 +104,25 @@ export class RpcCameraSource implements CameraSource {
     return native as Ptz;
   }
 
-  /** cam.getPTZ 결과(실패 시 UNKNOWN 강등 → {0,0,1} 폴백, 설계서 §3). */
-  private async currentPtz(cam: number): Promise<Ptz> {
+  /** cam.getPTZ 결과. 캡처 fallback은 기존대로 유지하고, UI 조회는 장비 응답을 필수로 한다. */
+  private async currentPtz(cam: number, requireDeviceResponse = false): Promise<Ptz> {
     try {
       const p = (await this.rpc.callRpc('cam.getPTZ', { camId: cam })) as Partial<Ptz>;
-      return { pan: p.pan ?? 0, tilt: p.tilt ?? 0, zoom: p.zoom ?? 1 };
-    } catch {
+      const pan = Number(p.pan);
+      const tilt = Number(p.tilt);
+      const zoom = Number(p.zoom);
+      if (!Number.isFinite(pan) || !Number.isFinite(tilt) || !Number.isFinite(zoom)) {
+        if (requireDeviceResponse) throw new Error('Unity PTZ 응답이 완전하지 않습니다');
+        // 프리셋 캡처 메타데이터는 기존처럼, 확인 가능한 축은 보존하고 결측 축만 기본값으로 둔다.
+        return {
+          pan: Number.isFinite(pan) ? pan : 0,
+          tilt: Number.isFinite(tilt) ? tilt : 0,
+          zoom: Number.isFinite(zoom) ? this.camera.clampZoom(zoom) : 1,
+        };
+      }
+      return { pan, tilt, zoom: this.camera.clampZoom(zoom) };
+    } catch (cause) {
+      if (requireDeviceResponse) throw cause;
       return { pan: 0, tilt: 0, zoom: 1 };
     }
   }

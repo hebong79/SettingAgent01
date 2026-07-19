@@ -105,8 +105,8 @@ function makeServer() {
   store.upsertPresetPos([{ camId: 1, presetId: 1, sname: null, pan: 0, tilt: 0, zoom: 1, updatedAt: 'seed' }]);
   const roi = JSON.stringify([{ x: 0.6, y: 0.6 }, { x: 0.7, y: 0.6 }, { x: 0.7, y: 0.65 }, { x: 0.6, y: 0.65 }]);
   store.replaceSlotSetup([
-    { slotId: 1, camId: 1, presetId: 1, presetSlotIdx: 1, slotRoi: roi, vpdBbox: null, lpdObb: JSON.stringify(rectToQuad({ x: 0.62, y: 0.62, w: 0.05, h: 0.03 })), occupyRange: null, pan: null, tilt: null, zoom: null, centered: 0, img1: null, updatedAt: 'seed' },
-    { slotId: 2, camId: 1, presetId: 1, presetSlotIdx: 2, slotRoi: roi, vpdBbox: null, lpdObb: JSON.stringify(rectToQuad({ x: 0.62, y: 0.62, w: 0.05, h: 0.03 })), occupyRange: null, pan: null, tilt: null, zoom: null, centered: 0, img1: null, updatedAt: 'seed' },
+    { slotId: 1, camId: 1, presetId: 1, presetSlotIdx: 1, slotRoi: roi, vpdBbox: null, lpdObb: JSON.stringify(rectToQuad({ x: 0.62, y: 0.62, w: 0.05, h: 0.03 })), occupyRange: null, pan: null, tilt: null, zoom: null, centered: 0, img1: null, slot3dFrontCenter: null, updatedAt: 'seed' },
+    { slotId: 2, camId: 1, presetId: 1, presetSlotIdx: 2, slotRoi: roi, vpdBbox: null, lpdObb: JSON.stringify(rectToQuad({ x: 0.62, y: 0.62, w: 0.05, h: 0.03 })), occupyRange: null, pan: null, tilt: null, zoom: null, centered: 0, img1: null, slot3dFrontCenter: null, updatedAt: 'seed' },
   ]);
   const repo = repoWith(artifact());
   const camera = fakeCamera();

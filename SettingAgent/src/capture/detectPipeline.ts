@@ -82,6 +82,8 @@ export interface DetectResult {
     lpdFilteredOut: number;
     /** 모드A 를 요청했으나 폴리곤이 없어 강등된 사유. */
     onPlaceDegraded?: string;
+    /** VPD(차량) 검출 게이트(false=VPD 미실행 · LPD 전용). 0대와 '미실행'을 구분(정직 표기). */
+    vpdEnabled: boolean;
   };
   /**
    * ★ 차량 3D 육면체(가산·옵셔널). `cuboidCtx` 미주입 시 **키 자체가 없다** → 기존 응답 shape 과 완전히 동일(회귀 0).
@@ -234,20 +236,26 @@ export async function resolvePresetPtz(
  */
 export async function runDetect(
   deps: DetectDeps,
-  args: { cam: number; preset: number },
+  args: { cam: number; preset: number; vpdEnabled?: boolean; ptz?: { pan?: number; tilt?: number; zoom?: number } },
   cfg: DetectCfg,
   onPlace?: OnPlaceOpts,
   /** ★ 차량 육면체 문맥(옵셔널·가산). 미지정 시 응답에 `cuboids` 키 자체가 없다 — 기존 계약 완전 불변. */
   cuboidCtx?: CuboidContext | null,
 ): Promise<DetectResult> {
   const { cam, preset } = args;
+  const vpdEnabled = args.vpdEnabled ?? true; // 라이브러리 기본 true(회귀 0). 라우트가 false(제품 정책)로 VPD 정지.
   // 프리셋 실제 PTZ 를 신뢰 원천으로 base 프레임을 렌더(시뮬 echo 0/0/1 불신 — 리더 실측 확정).
-  const presetPtz = await resolvePresetPtz(deps.camera, cam, preset);
+  // ★ args.ptz 제공 시(lpd-live: 현재 뷰어 수동 PTZ) resolvePresetPtz 를 건너뛰고 그 값을 base 로 사용 →
+  //   requestImage·basePtz·역투영·zoom 재시도가 모두 오버라이드 기준으로 정합(프리셋 스냅 없음).
+  const presetPtz = args.ptz
+    ? { pan: args.ptz.pan ?? 0, tilt: args.ptz.tilt ?? 0, zoom: args.ptz.zoom ?? 1 }
+    : await resolvePresetPtz(deps.camera, cam, preset);
   const base = await deps.camera.requestImage(cam, preset, presetPtz ?? undefined);
   const basePtz = presetPtz ?? { pan: base.pan, tilt: base.tilt, zoom: base.zoom }; // 조회 실패 시에만 echo 폴백(장애 격리).
   const size = readJpegSize(base.jpg);
 
-  const rawVehicles = await deps.vpd.detect(base.jpg);
+  // VPD off(제품 정책) 시 vpd.detect 미호출 → rawVehicles=[]. LPD 는 계속. 필터는 vehicles=[] 로 폴리곤 직접 전환(결정 C).
+  const rawVehicles = vpdEnabled ? await deps.vpd.detect(base.jpg) : [];
   const platesBase = await deps.lpd.detect(base.jpg);
 
   // 모드A: 주차면 위 차량만 남긴다. **zoom 재시도 루프 진입 전**에 축소 → 통행차에 대한 카메라 호출 0회.
@@ -272,7 +280,7 @@ export async function runDetect(
   //   base 프레임(det bbox 가 나온 바로 그 프레임)에서 산출한다. seg 미배선/실패 → 강등(throw 0) → `cuboids` 미포함.
   //   `deps.vpd.segment` 가 없으면(기존 스텁) 아예 시도하지 않는다.
   let cuboids: FrameCuboids | undefined;
-  if (cuboidCtx && deps.vpd.segment && deps.vpd.canSegment) {
+  if (cuboidCtx && vpdEnabled && deps.vpd.segment && deps.vpd.canSegment) {
     const vpdSeg = deps.vpd as Required<Pick<VpdClient, 'segment' | 'canSegment'>>;
     cuboids = await buildFrameCuboids({
       jpeg: base.jpg,
@@ -363,6 +371,7 @@ export async function runDetect(
       onPlaceOnly,
       filteredOut,
       lpdFilteredOut,
+      vpdEnabled,
       ...(onPlaceDegraded ? { onPlaceDegraded } : {}),
     },
     ...(cuboids ? { cuboids } : {}), // 미산출 시 **키 자체가 없다**(기존 응답 shape 불변).

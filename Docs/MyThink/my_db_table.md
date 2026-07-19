@@ -38,10 +38,13 @@
  - place_name 		: 장소이름
 
 * 센터라이징 (전체 슬롯 갯수만큼만 존재 )
-5. centering 
+5. slot_setup
  - slot_id		: 슬롯id ( 전체슬롯 기준 )
- - cam_id		: 카메라 id
- - preset_id	: 프리셋 id
+ - cam_id		: 카메라 id (1부터 시작)
+ - preset_id	: 프리셋 id ( 1부터 시작 )
+ - preset_slotidx : 프리셋내 슬롯 idx ( 1부터 시작)
+ - slot_roi     : 바닥 주차면 ROI
+ - slot3d_front_center : 주차면 3D 육면체의 앞면의 중심점( 이미지좌표로 변환된 점)
  - vpd_bbox		: vpd 바운딩 박스
  - lpd_obb		: LPD 번호판 OBB 영역
  - occupy_range	: 점유영역

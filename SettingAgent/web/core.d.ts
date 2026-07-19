@@ -69,6 +69,12 @@ export function captureUiState(state: string): {
   suppressFrameMsg: boolean;
   stoppingNote: boolean;
 };
+export function discoverView(status: { state?: string; done?: number; total?: number; found?: number } | null | undefined): {
+  percent: number;
+  label: string;
+  runDisabled: boolean;
+  polling: boolean;
+};
 export function capFrameKey(
   cam: number | string | null | undefined,
   preset: number | string | null | undefined,
@@ -78,6 +84,20 @@ export function settingsFormErrors(form: {
   llm?: { provider?: string; model?: string; baseUrl?: string };
   vpd?: { endpoint?: string; detPath?: string };
   lpd?: { endpoint?: string; detPath?: string };
+  camera?: {
+    executionMode?: string;
+    selectedCameraId?: string;
+    source?: {
+      id?: string;
+      label?: string;
+      kind?: 'sim' | 'hucoms';
+      protocol?: 'unity-rpc' | 'unity-rest' | 'hucoms-v1.22';
+      baseUrl?: string;
+      username?: string;
+      password?: string;
+      rtspUrl?: string;
+    };
+  };
 } | null | undefined): string[];
 
 export function toPixel(rect: NormalizedRect, imgW: number, imgH: number): PixelRect;
@@ -438,6 +458,10 @@ export function removeDetection(
   sel: DetectSelection | null | undefined,
 ): DetectResult;
 
+// ===== VPD 차량 검출 중복 제거(dedup) 순수 로직 =====
+export function rectIoU(a: NormalizedRect, b: NormalizedRect): number;
+export function dedupeVehicles<T extends { rect: NormalizedRect }>(vehicles: T[], iouThresh?: number): T[];
+
 // ===== [기능3] 주차면 자동보정 아핀(이동+스케일) 순수 로직 =====
 
 export interface TranslateScale {
@@ -488,6 +512,8 @@ export function projectCuboid(
   groundModel: ViewerGroundModel | null | undefined,
   heightM: number,
 ): Cuboid | null;
+
+export function frontFaceCenter(cuboid: Cuboid | null | undefined): NormalizedPoint | null;
 
 export function formatGroundBadge(model: ViewerGroundModel | null | undefined): string;
 

@@ -80,6 +80,11 @@ export class RpcCameraClient implements ICameraClient {
     };
   }
 
+  /** Unity RPC cam.getPTZ를 읽기 전용으로 노출한다. UI 현재 PTZ 조회는 장비 응답을 반드시 요구한다. */
+  getPtz(camIdx: number): Promise<{ pan: number; tilt: number; zoom: number }> {
+    return this.currentPtz(camIdx, true);
+  }
+
   /** MJPEG 스트림 위임(13110 /stream 재사용). */
   streamMjpeg(
     camIdx: number,
@@ -116,16 +121,29 @@ export class RpcCameraClient implements ICameraClient {
     return res.ok === true;
   }
 
-  /** cam.getPTZ best-effort(실패 시 {0,0,1} 강등, 설계서 §2.2). */
-  private async currentPtz(camIdx: number): Promise<{ pan: number; tilt: number; zoom: number }> {
+  /** cam.getPTZ. 캡처 echo는 best-effort, UI 조회는 장비 응답을 필수로 한다. */
+  private async currentPtz(camIdx: number, requireDeviceResponse = false): Promise<{ pan: number; tilt: number; zoom: number }> {
     try {
       const p = (await this.rpc.callRpc('cam.getPTZ', { camId: camIdx })) as Partial<{
         pan: number;
         tilt: number;
         zoom: number;
       }>;
-      return { pan: p.pan ?? 0, tilt: p.tilt ?? 0, zoom: p.zoom ?? 1 };
-    } catch {
+      const pan = Number(p.pan);
+      const tilt = Number(p.tilt);
+      const zoom = Number(p.zoom);
+      if (!Number.isFinite(pan) || !Number.isFinite(tilt) || !Number.isFinite(zoom)) {
+        if (requireDeviceResponse) throw new Error('Unity PTZ 응답이 완전하지 않습니다');
+        // 이미지 메타데이터는 기존처럼 확인 가능한 축을 보존한다.
+        return {
+          pan: Number.isFinite(pan) ? pan : 0,
+          tilt: Number.isFinite(tilt) ? tilt : 0,
+          zoom: Number.isFinite(zoom) ? this.clampZoom(zoom) : 1,
+        };
+      }
+      return { pan, tilt, zoom: this.clampZoom(zoom) };
+    } catch (cause) {
+      if (requireDeviceResponse) throw cause;
       return { pan: 0, tilt: 0, zoom: 1 };
     }
   }
