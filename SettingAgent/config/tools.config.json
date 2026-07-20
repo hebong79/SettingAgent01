@@ -1,95 +1,150 @@
 {
-	"_comment": "MCP 도구(능력 엔드포인트) + 기타 설정. llm.config 와 분리. SettingAgent 도구: camera, vpd. (lpd 는 ActionAgent 용 참조)",
-	"camera": {
-		"baseUrl": "http://localhost:13110",
-		"imageTimeoutMs": 7000,
-		"moveTimeoutMs": 3000,
-		"zoomMin": 1.0,
-		"zoomMax": 36.0
-	},
-	"vpd": {
-		"endpoint": "http://192.168.0.125:9081",
-		"detPath": "/vpd/api/v2/det/imgupload",
-		"segPath": "/vpd/api/v2/seg/imgupload",
-		"apiKeyEnv": "VPD_API_KEY",
-		"timeoutMs": 8000,
-		"maxRetries": 3
-	},
-	"lpd": {
-		"endpoint": "http://192.168.0.125:9082",
-		"detPath": "/lpd/api/v1/imgupload",
-		"apiKeyEnv": "LPD_API_KEY",
-		"timeoutMs": 8000,
-		"maxRetries": 3
-	},
-	"setup": {
-		"presetSettleMs": 1000,
-		"betweenPresetMs": 500,
-		"minConfidence": 0.5,
-		"roiPadding": 0.05,
-		"yBandTolerance": 0.1,
-		"accumFrames": 1,
-		"accumIntervalMs": 1000,
-		"clusterDist": 0.06,
-		"clusterMinSupport": 1,
-		"lpdEnabled": true
-	},
-	"map": {
-		"cameraposFile": "config/camerapos.json",
-		"presetFile": "config/preset.json"
-	},
-	"discovery": {
-		"enabled": false,
-		"maxCameras": 32,
-		"maxPresetsPerCamera": 32
-	},
-	"presetProvider": {
-		"type": "camerapos",
-		"unityUrl": "",
-		"refreshOnRun": false
-	},
-	"capture": {
-		"defaultCount": 50,
-		"intervalMs": 30000,
-		"moveIntervalMs": 1000,
-		"checkpointEvery": 10,
-		"checkpointTriggerMode": "rounds",
-		"checkpointIntervalMs": 60000,
-		"dbFile": "data/setting.sqlite",
-		"clusterDist": 0.06,
-		"clusterMinSupport": 3,
-		"minConfidence": 0.5,
-		"slotAssignGate": 0.18
-	},
-	"calibrate": {
-		"targetPlateWidth": 0.2,
-		"centerTol": 0.03,
-		"widthTol": 0.02,
-		"maxIterations": 15,
-		"probeStepDeg": 1.0,
-		"maxStepDeg": 5.0,
-		"fallbackGainPanDeg": -62,
-		"fallbackGainTiltDeg": -35.5,
-		"settleMs": 300,
-		"outFile": "data/slot_ptz.json"
-	},
-	"server": {
-		"port": 13020,
-		"apiKeyEnv": "SETTING_API_KEY"
-	},
-	"store": {
-		"dataDir": "data",
-		"captureDir": "data/captures",
-		"saveDir": "save",
-		"reportsDir": "reports",
-		"placeRoiFile": "Place01/PtzCamRoi.json"
-	},
-	"viewer": {
-		"enabled": true,
-		"allowMove": true,
-		"defaultFps": 3,
-		"staticDir": "web",
-		"controlToken": ""
-	},
-	"cameraMode": "simulator"
+  "_comment": "MCP 도구(능력 엔드포인트) + 기타 설정. llm.config 와 분리. SettingAgent 도구: camera, vpd. (lpd 는 ActionAgent 용 참조)",
+  "camera": {
+    "baseUrl": "http://localhost:13110",
+    "imageTimeoutMs": 7000,
+    "moveTimeoutMs": 3000,
+    "zoomMin": 1,
+    "zoomMax": 36
+  },
+  "vpd": {
+    "endpoint": "http://192.168.0.125:9081",
+    "detPath": "/vpd/api/v2/det/imgupload",
+    "segPath": "/vpd/api/v2/seg/imgupload",
+    "apiKeyEnv": "VPD_API_KEY",
+    "timeoutMs": 8000,
+    "maxRetries": 3
+  },
+  "lpd": {
+    "endpoint": "http://192.168.0.125:9082",
+    "detPath": "/lpd/api/v1/imgupload",
+    "apiKeyEnv": "LPD_API_KEY",
+    "timeoutMs": 8000,
+    "maxRetries": 3
+  },
+  "setup": {
+    "presetSettleMs": 1000,
+    "betweenPresetMs": 500,
+    "minConfidence": 0.5,
+    "roiPadding": 0.05,
+    "yBandTolerance": 0.1,
+    "accumFrames": 1,
+    "accumIntervalMs": 1000,
+    "clusterDist": 0.06,
+    "clusterMinSupport": 1,
+    "lpdEnabled": true
+  },
+  "map": {
+    "cameraposFile": "config/camerapos.json",
+    "presetFile": "config/preset.json"
+  },
+  "discovery": {
+    "enabled": false,
+    "maxCameras": 32,
+    "maxPresetsPerCamera": 32
+  },
+  "presetProvider": {
+    "type": "camerapos",
+    "unityUrl": "",
+    "refreshOnRun": false
+  },
+  "capture": {
+    "defaultCount": 50,
+    "intervalMs": 30000,
+    "moveIntervalMs": 1000,
+    "checkpointEvery": 10,
+    "checkpointTriggerMode": "rounds",
+    "checkpointIntervalMs": 60000,
+    "dbFile": "data/setting.sqlite",
+    "clusterDist": 0.06,
+    "clusterMinSupport": 1,
+    "minConfidence": 0.5,
+    "slotAssignGate": 0.18
+  },
+  "calibrate": {
+    "targetPlateWidth": 0.215,
+    "centerTol": 0.03,
+    "widthTol": 0.015,
+    "maxIterations": 15,
+    "probeStepDeg": 1,
+    "maxStepDeg": 5,
+    "maxZoomStepRatio": 1.3,
+    "acquirePlateWidth": 0.18,
+    "fallbackGainPanDeg": -62,
+    "fallbackGainTiltDeg": -35.5,
+    "settleMs": 300,
+    "outFile": "data/slot_ptz.json"
+  },
+  "server": {
+    "port": 13020,
+    "apiKeyEnv": "SETTING_API_KEY"
+  },
+  "store": {
+    "dataDir": "data",
+    "captureDir": "data/captures",
+    "saveDir": "save",
+    "reportsDir": "reports",
+    "placeRoiFile": "Place01/PtzCamRoi.json"
+  },
+  "viewer": {
+    "enabled": true,
+    "allowMove": true,
+    "defaultFps": 3,
+    "staticDir": "web",
+    "controlToken": ""
+  },
+  "cameraRuntime": {
+    "executionMode": "typescript-native",
+    "selectedCameraId": "simulator-1"
+  },
+  "cameraStreaming": {
+    "ffmpegPath": "ffmpeg",
+    "rtspTransport": "tcp",
+    "fps": 5,
+    "jpegQuality": 5,
+    "startupTimeoutMs": 10000
+  },
+  "cameraSources": [
+    {
+      "id": "simulator-1",
+      "label": "시뮬레이터 1",
+      "kind": "sim",
+      "protocol": "unity-rpc",
+      "baseUrl": "http://localhost:13110",
+      "username": "admin",
+      "password": "adnub",
+      "rtspUrl": ""
+    },
+    {
+      "id": "simulator-2",
+      "label": "시뮬레이터 2",
+      "kind": "sim",
+      "protocol": "unity-rpc",
+      "baseUrl": "http://localhost:13111",
+      "username": "",
+      "password": "",
+      "rtspUrl": ""
+    },
+    {
+      "id": "real-camera-1",
+      "label": "리얼 카메라 1",
+      "kind": "hucoms",
+      "protocol": "hucoms-v1.22",
+      "baseUrl": "http://192.168.0.153:80",
+      "username": "admin",
+      "password": "admin",
+      "rtspUrl": "rtsp://192.168.0.153:554/stream1"
+    },
+    {
+      "id": "real-camera-2",
+      "label": "리얼 카메라 2",
+      "kind": "hucoms",
+      "protocol": "hucoms-v1.22",
+      "baseUrl": "http://192.168.0.154:80",
+      "username": "admin",
+      "password": "",
+      "rtspUrl": "rtsp://192.168.0.154:554/stream1"
+    }
+  ],
+  "cameraMode": "simulator"
 }

@@ -28,6 +28,9 @@ export function expandPlateTargetsFromSlotSetup(views: SlotSetupView[]): PlateTa
       presetSlotIdx: v.presetSlotIdx,
     });
   }
+  // 주차면번호 asc 결정형 보장(R1 순서). globalIdx=정수 slot_id(항상 존재) → NULL tie-break 불요.
+  // getSlotSetup 의 ORDER BY 는 공유 소비자(뷰어/dbOverlay) blast radius 회피 위해 무접촉 — 여기서만 정렬.
+  targets.sort((a, b) => a.camIdx - b.camIdx || a.presetIdx - b.presetIdx || (a.globalIdx! - b.globalIdx!));
   return targets;
 }
 

@@ -88,7 +88,7 @@ async function main(): Promise<void> {
 
   // 주차면별 번호판 중심정렬·줌 센터라이징(/calibrate/*). PlatePtz 결정형 폐루프 위임 + DB(centering_slot) 미러.
   const calibrator = new PtzCalibrator({
-    camera, lpd, cfg: tools.calibrate, store: sqlite,
+    camera, lpd, cfg: tools.calibrate, store: sqlite, saveStore,
     onFinished: (s) => pipeline?.onCalibrateFinished(s),
   });
 

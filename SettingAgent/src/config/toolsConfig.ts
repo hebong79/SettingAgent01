@@ -106,6 +106,12 @@ const CaptureSchema = z.object({
 const CalibrateSchema = z.object({
   /** 목표 번호판 가로폭(정규화). */
   targetPlateWidth: z.number().min(0).max(1),
+  /**
+   * 1단계 pan/tilt 센터링을 수행할 **넓은 시야 zoom**(기본 1.0=최대광각). 마스터 요구 순서 보장:
+   * 넓은 시야에서 번호판을 화면중앙에 완전 정렬한 뒤 2단계에서 이 zoom 부터 targetPlateWidth 까지 점진 확대.
+   * 너무 넓어 LPD 미검이면 상향(프리셋 zoom 근처). 미지정 시 코드 기본 1.0(PtzCalibrator).
+   */
+  centerZoom: z.number().min(1).max(36).optional(),
   /** 중심 수렴 허용오차(정규화). */
   centerTol: z.number().min(0).max(1),
   /** 폭 수렴 허용오차(정규화). */
@@ -117,6 +123,11 @@ const CalibrateSchema = z.object({
   /** 1스텝 최대 보정(도, 진동 방지). */
   maxStepDeg: z.number().positive(),
   /**
+   * 2단계 zoom 1스텝 최대 증배([z/r, z·r]). 작을수록 스텝당 중심 드리프트↓ → 줌 중 재중심(pan/tilt) 빈도↓
+   * = "줌 우세"(마스터 순서 요구) + plate_lost↓. 단 목표폭 도달에 반복 더 필요. 미지정 시 PlatePtz 기본 1.5.
+   */
+  maxZoomStepRatio: z.number().min(1).max(3).optional(),
+  /**
    * **zoomRef=1 기준** fallback 게인(°/정규화). PlatePtz 가 시작 zoom 으로 스케일해 사용.
    * cam1 시뮬 실측(−36.6/−21.0 @z1.69341) 유래 — 카메라별(FOV·마운트) 상이 가능하므로
    * 새 장비에서는 diagSweep 로 재실측할 것. 부호가 반대면 P 제어가 역방향 발산한다.
@@ -125,6 +136,16 @@ const CalibrateSchema = z.object({
   fallbackGainTiltDeg: z.number(),
   /** move 후 정착 대기(ms). */
   settleMs: z.number().int().nonnegative(),
+  /**
+   * (방안2) acquire 시작줌이 겨눌 판폭(정규화). "먼저 확대해 찾기"의 확대 정도 — 작은 lpd(실측 0.027)를
+   * 이 폭까지 줌인해 큰 판을 검출·센터한 뒤 targetPlateWidth 로 마감. 미지정 시 코드 기본 0.12(점진).
+   * targetPlateWidth(0.2)로 두면 full-jump(중간 zoom 없이 목표까지 바로 확대).
+   */
+  acquirePlateWidth: z.number().min(0).max(1).optional(),
+  /** (방안3) acquire 미검 시 줌아웃 사다리 1스텝 배율(rungZoom/=step). 미지정 시 코드 기본 1.5. */
+  acquireLadderStep: z.number().min(1).max(3).optional(),
+  /** (방안3) 줌아웃 사다리 최대 rung 수. 0 이면 사다리 없음(acquire 1발만). 미지정 시 코드 기본 5. */
+  acquireLadderMaxSteps: z.number().int().nonnegative().optional(),
   /** 산출물 경로. */
   outFile: z.string().min(1),
 });

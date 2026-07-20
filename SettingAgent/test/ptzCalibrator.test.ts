@@ -108,23 +108,34 @@ describe('PtzCalibrator 수렴 happy path', () => {
   });
 });
 
-describe('PtzCalibrator 순서(중심→줌)', () => {
-  it('zoom 변화는 중심 수렴 이후에만 발생', async () => {
+describe('PtzCalibrator 순서(방안2: 줌인 acquire → 센터 → 폭)', () => {
+  it('첫 명령은 acquireZoom(>presetZoom)으로 줌인, 이후 pan/tilt 센터(zoom 고정), 이후 width 가 Zt 방향 상승', async () => {
     const { cal, moves } = makeCalibrator();
     cal.start();
     await waitDone(cal);
-    // 첫 zoom!=1 명령의 인덱스 vs 마지막 pan/tilt 변화 인덱스 비교.
-    const firstZoomChange = moves.findIndex((m) => Math.abs(m.zoom - 1) > 1e-9);
-    // 중심정렬 단계의 마지막 pan/tilt 변화(=중심 수렴 직전)는 firstZoomChange 이전이어야 함.
-    let lastPanTiltChange = -1;
-    for (let i = 1; i < moves.length; i++) {
-      if (Math.abs(moves[i].pan - moves[i - 1].pan) > 1e-9 || Math.abs(moves[i].tilt - moves[i - 1].tilt) > 1e-9) {
-        if (firstZoomChange === -1 || i < firstZoomChange) lastPanTiltChange = i;
+    // 방안2 계약: 첫 명령은 acquireZoom(= presetZoom×acquirePlateWidth/lpdWidth = 1×0.12/0.05 = 2.4)으로 줌인.
+    //   넓은시야(presetZoom=1)에서 센터 후 줌인하던 구 계약(중심→줌)이 반전됐다(줌인이 센터보다 먼저).
+    const acquireZoom = 2.4;
+    expect(moves[0].zoom).toBeCloseTo(acquireZoom, 5);
+    expect(moves[0].zoom).toBeGreaterThan(1); // presetZoom(1) 초과 = 줌인 우선(acquire).
+
+    // width 구간 진입점: zoom 이 acquireZoom 을 초과로 상승하기 시작하는 첫 명령(=마감 zoomToPlateWidth).
+    const firstAboveAcquire = moves.findIndex((m) => m.zoom > acquireZoom + 1e-6);
+    expect(firstAboveAcquire).toBeGreaterThan(0); // 줌 상승(폭 마감)은 존재.
+
+    // acquire 구간(width 진입 이전): 모든 명령이 acquireZoom 에 고정(centerOnPlate 는 zoom 불변)이고,
+    //   그 사이 pan/tilt 센터링(변화)이 일어난다 = 센터가 폭보다 먼저.
+    let panTiltCenteredBeforeWidth = false;
+    for (let i = 0; i < firstAboveAcquire; i++) {
+      expect(moves[i].zoom).toBeCloseTo(acquireZoom, 5);
+      if (i > 0 && (Math.abs(moves[i].pan - moves[i - 1].pan) > 1e-9 || Math.abs(moves[i].tilt - moves[i - 1].tilt) > 1e-9)) {
+        panTiltCenteredBeforeWidth = true;
       }
     }
-    expect(firstZoomChange).toBeGreaterThan(0);
-    expect(lastPanTiltChange).toBeGreaterThan(0);
-    expect(lastPanTiltChange).toBeLessThan(firstZoomChange);
+    expect(panTiltCenteredBeforeWidth).toBe(true);
+
+    // 최종 zoom 은 targetZoom(=1×0.2/0.05=4.0) 방향으로 acquireZoom 을 넘어 상승.
+    expect(moves[moves.length - 1].zoom).toBeGreaterThan(acquireZoom);
   });
 });
 

@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SaveStore, defaultSaveName } from '../src/store/SaveStore.js';
+import { SaveStore, defaultSaveName, setupSaveName } from '../src/store/SaveStore.js';
 import { logger } from '../src/util/logger.js';
 import type { SetupArtifact } from '../src/domain/types.js';
 
@@ -198,6 +198,87 @@ describe('SaveStore reports/ 미러 저장', () => {
     } finally {
       warnSpy.mockRestore();
     }
+  });
+});
+
+// ── B-1.7 / R3: saveSnapshot(임의 payload · stringify5 · reports 미러 · sanitize) ──
+describe('SaveStore.saveSnapshot(센터라이징 최종 셋업 스냅샷)', () => {
+  it('save/{name}.json 에 stringify5 직렬화(수치 소수점 5자리) 기록', () => {
+    const dir = tmp();
+    const saveDir = join(dir, 'save');
+    const store = new SaveStore(saveDir);
+    // SetupArtifact 아닌 임의 payload(센터링 병합 뷰 형태) — 6자리 이상 수치는 round5 로 절삭돼야 함.
+    const safe = store.saveSnapshot('Setup_20260720_130507', { createdAt: 'T', v: 1.123456789, slots: [{ pan: 9.999999999999995 }] });
+    expect(safe).toBe('Setup_20260720_130507');
+    const path = join(saveDir, 'Setup_20260720_130507.json');
+    expect(existsSync(path)).toBe(true);
+    const back = JSON.parse(readFileSync(path, 'utf-8'));
+    expect(back.v).toBe(1.12346);      // ★ 5자리 반올림(stringify5)
+    expect(back.slots[0].pan).toBe(10); // 9.999999999999995 → round5 → 10
+    expect(back.createdAt).toBe('T');
+  });
+
+  it('reportsDir 주입 → save/ 와 reports/ 에 동일 바이트 미러', () => {
+    const dir = tmp();
+    const saveDir = join(dir, 'save');
+    const reportsDir = join(dir, 'reports');
+    const store = new SaveStore(saveDir, reportsDir);
+    store.saveSnapshot('Setup_x', { a: 1, b: [1, 2, 3] });
+    const sp = join(saveDir, 'Setup_x.json');
+    const rp = join(reportsDir, 'Setup_x.json');
+    expect(existsSync(sp)).toBe(true);
+    expect(existsSync(rp)).toBe(true);
+    expect(readFileSync(rp, 'utf-8')).toBe(readFileSync(sp, 'utf-8')); // 동일 바이트
+  });
+
+  it('reportsDir 미주입 → save/ 만(하위호환)', () => {
+    const dir = tmp();
+    const saveDir = join(dir, 'save');
+    const reportsDir = join(dir, 'reports');
+    const store = new SaveStore(saveDir); // 1인자
+    store.saveSnapshot('Setup_y', { ok: true });
+    expect(existsSync(join(saveDir, 'Setup_y.json'))).toBe(true);
+    expect(existsSync(reportsDir)).toBe(false);
+  });
+
+  it('reports 미러 실패 → throw 안 함, save/ 정상, logger.warn 1회', () => {
+    const dir = tmp();
+    const saveDir = join(dir, 'save');
+    const blocker = join(dir, 'blocker');
+    writeFileSync(blocker, 'x', 'utf-8'); // 부모를 파일로 → mkdirSync(recursive) ENOTDIR 결정적 실패.
+    const reportsDir = join(blocker, 'reports');
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => undefined as never);
+    try {
+      const store = new SaveStore(saveDir, reportsDir);
+      let safe: string | undefined;
+      expect(() => { safe = store.saveSnapshot('Setup_z', { n: 3.141592653 }); }).not.toThrow();
+      expect(safe).toBe('Setup_z');
+      expect(existsSync(join(saveDir, 'Setup_z.json'))).toBe(true);
+      expect(JSON.parse(readFileSync(join(saveDir, 'Setup_z.json'), 'utf-8')).n).toBe(3.14159); // round5
+      expect(existsSync(reportsDir)).toBe(false);
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('sanitize: traversal·경로구분자 이름 → throw(파일 미생성)', () => {
+    const store = new SaveStore(tmp());
+    expect(() => store.saveSnapshot('../evil', { x: 1 })).toThrow();
+    expect(() => store.saveSnapshot('a/b', { x: 1 })).toThrow();
+    expect(() => store.saveSnapshot('..', { x: 1 })).toThrow();
+  });
+});
+
+describe('setupSaveName', () => {
+  it('Setup_YYYYMMDD_HHMMSS 포맷(고정 Date)', () => {
+    const name = setupSaveName(new Date(2026, 6, 20, 13, 5, 7)); // 2026-07-20 13:05:07 (월 0-based)
+    expect(name).toBe('Setup_20260720_130507');
+  });
+
+  it('안전화 통과(파일명으로 유효)', () => {
+    const store = new SaveStore('unused');
+    expect(store.sanitizeName(setupSaveName())).not.toBeNull();
   });
 });
 

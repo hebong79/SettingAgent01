@@ -8,7 +8,8 @@ import type { LpdClient, PlateBox } from '../src/clients/LpdClient.js';
 import type { ToolsConfig } from '../src/config/toolsConfig.js';
 import type { SetupArtifact } from '../src/domain/types.js';
 import type { SlotSetupRow, SlotSetupView } from '../src/capture/types.js';
-import { rectToQuad, quadBoundingRect } from '../src/domain/geometry.js';
+import { rectToQuad, quadBoundingRect, center } from '../src/domain/geometry.js';
+import { scaleGainForZoom, panTiltCorrection } from '../src/calibrate/controlMath.js';
 import { round5 } from '../src/util/round.js';
 import type { SlotPtzArtifact, Ptz } from '../src/calibrate/types.js';
 import type { PlatePtzOpts, PlatePtzResult } from '../src/calibrate/platePtz.js';
@@ -42,6 +43,18 @@ function artifact(): SetupArtifact {
 
 /** 신 소스(slot_setup) 센터라이징 대상의 LPD OBB 시드(quadBoundingRect → 0.62/0.62). */
 const LPD_QUAD = rectToQuad({ x: 0.62, y: 0.62, w: 0.05, h: 0.03 });
+
+/**
+ * 구현(PtzCalibrator.preAimPtz)과 동일한 선조준(pre-aim) 계산 미러 — 첫 캡처 명령 기대값 산출용.
+ * 슬롯 LPD 박스 중심(LPD_QUAD)→화면중앙으로 base PTZ 를 결정형 1스텝 보정(zoom 불변). PREAIM_MAX_STEP=90.
+ * 게인 상수(cfg.fallbackGain*)가 바뀌면 구현·기대값이 함께 움직여 회귀를 감지한다(01_architect_plan §A-1/§B-1).
+ */
+function preAimOf(base: Ptz): Ptz {
+  const g = scaleGainForZoom({ gainPan: cfg.fallbackGainPanDeg, gainTilt: cfg.fallbackGainTiltDeg, zoomRef: 1 }, base.zoom);
+  const c = center(quadBoundingRect(LPD_QUAD));
+  const pt = panTiltCorrection({ errX: c.cx - 0.5, errY: c.cy - 0.5 }, g, base.pan, base.tilt, 90);
+  return { pan: pt.pan, tilt: pt.tilt, zoom: base.zoom };
+}
 
 /** lpd 보유 slot_setup 뷰 1건(globalIdx=slotId). PtzCalibrator 센터라이징 소스. */
 function viewRow(slotId: number, presetSlotIdx: number): SlotSetupView {
@@ -157,15 +170,18 @@ describe('T1 gain 체이닝 · zoom 단계 prior 갱신', () => {
     await waitDone(cal);
 
     expect(f.opts).toHaveLength(2);
-    expect(f.opts[0].plateRoi!.x).toBeCloseTo(0.62, 6);
-    expect(f.opts[0].plateRoi!.y).toBeCloseTo(0.62, 6);
+    // ★ pre-aim 도입(01_architect_plan §A-1/§B-1.2): 센터링 단계는 plateRoi 미전달
+    //   (= PlatePtz 기본 {0.5,0.5,0,0} 화면중앙 최근접). 슬롯별 선조준 startPtz 가 대상을 중앙 근처로
+    //   끌어오므로 prior ROI(0.62)를 넘기지 않는다 — 이웃 판 latch 차단(anti-latch).
+    expect(f.opts[0].plateRoi).toBeUndefined();
     expect(f.opts[0].gain).toBeUndefined();
 
     expect(f.opts[1].gain).toBe(okCenter.gain);
     expect(f.opts[1].plateRoi).toEqual(quadBoundingRect(CENTERED_PLATE.quad));
     expect(f.opts[1].plateRoi!.x).toBeCloseTo(0.47, 3);
     expect(f.opts[1].plateRoi!.y).toBeCloseTo(0.48, 3);
-    expect(f.opts[1].plateRoi!.x).not.toBeCloseTo(f.opts[0].plateRoi!.x, 3);
+    // zoom 단계 plateRoi(센터링 후 관측 0.47) 는 센터링 단계 prior(0.62)와 별개 좌표.
+    expect(f.opts[1].plateRoi!.x).not.toBeCloseTo(0.62, 3);
 
     expect(f.zoomCalls).toHaveLength(1);
     expect(f.zoomCalls[0].startPtz).toBe(okCenter.ptz);
@@ -203,7 +219,15 @@ describe('T3 시작 PTZ = 프리셋 정본(resolvePresetPtz)', () => {
     const { cal, moves } = makeCalibrator({ camera, lpd: m.lpd });
     cal.start();
     await waitDone(cal);
-    expect(m.moves[0]).toEqual({ pan: 22, tilt: 6.8, zoom: 1.69341 });
+    // ★ pre-aim: 첫 캡처 명령의 pan/tilt = 프리셋 정본에서 슬롯 LPD 중심을 화면중앙으로 끄는 선조준 1스텝.
+    //   프리셋 base 는 여전히 resolvePresetPtz 로 해석되며(정본), 그 위에 선조준 오프셋이 얹힌다.
+    const pre = preAimOf({ pan: 22, tilt: 6.8, zoom: 1.69341 });
+    expect(m.moves[0].pan).toBeCloseTo(pre.pan, 6);
+    expect(m.moves[0].tilt).toBeCloseTo(pre.tilt, 6);
+    // ★ 방안2(줌인 acquire): 첫 캡처 zoom 은 프리셋 base(1.69341)가 아니라 acquireZoom(=1.69341×0.12/0.05=4.064).
+    expect(m.moves[0].zoom).toBeCloseTo(1.69341 * 0.12 / 0.05, 4);
+    expect(m.moves[0].zoom).toBeGreaterThan(1.69341); // 줌인(acquire) 우선.
+    expect(m.moves[0].pan).toBeGreaterThan(22); // 우하단 박스(cx>0.5) → pan↑(우향).
     void moves;
   });
 });
@@ -213,7 +237,12 @@ describe('T4 시작 PTZ 폴백', () => {
     const { cal, moves } = makeCalibrator();
     cal.start();
     await waitDone(cal);
-    expect(moves[0]).toEqual({ pan: 0, tilt: 0, zoom: 1 });
+    // ★ pre-aim: 폴백 base(0/0/1)에서도 첫 캡처 pan/tilt 는 선조준된 시작점(박스중심 오프셋).
+    const pre = preAimOf({ pan: 0, tilt: 0, zoom: 1 });
+    expect(moves[0].pan).toBeCloseTo(pre.pan, 6);
+    expect(moves[0].tilt).toBeCloseTo(pre.tilt, 6);
+    // ★ 방안2(줌인 acquire): 첫 캡처 zoom 은 presetZoom(1)이 아니라 acquireZoom(=1×0.12/0.05=2.4).
+    expect(moves[0].zoom).toBeCloseTo(2.4, 4);
     expect(cal.getStatus().state).toBe('done');
   });
 
@@ -250,7 +279,10 @@ describe('T5 reason 매핑 4종', () => {
     const lpd = {
       detect: async (jpg: Buffer): Promise<PlateBox[]> => (n++ === 0 ? m.lpd.detect(jpg) : []),
     } as unknown as LpdClient;
-    const { cal, getSaved } = makeCalibrator({ camera: m.camera, lpd });
+    // ★ 방안3(줌아웃 사다리)는 실패 rung 마다 재검출하는데 이 모킹은 최초 1회만 검출(이후 전무) →
+    //   사다리가 켜지면 하위 rung 은 no_plate 로 소진돼 plate_lost 가 no_plate 로 묻힌다.
+    //   plate_lost 전파(단일 rung 에서 초기검출 후 소실) 자체를 검증하려면 사다리를 끈다(maxSteps=0).
+    const { cal, getSaved } = makeCalibrator({ camera: m.camera, lpd, cfg: { ...cfg, acquireLadderMaxSteps: 0 } });
     cal.start();
     await waitDone(cal);
     const it0 = getSaved()!.items[0];
@@ -296,7 +328,9 @@ describe('T6 center 실패 → zoom 미시도', () => {
       plateWidth: null, gain: GAIN, iterations: 15, reason: 'max_iterations',
     };
     const f = stubFactory(failCenter, okZoom);
-    const { cal, getSaved } = makeCalibrator({ makePlatePtz: f.make });
+    // ★ 사다리(방안3) 끄고(maxSteps=0) center→zoom 게이트만 격리 검증 — center 실패면 width(zoom) 미시도.
+    //   사다리 ON 이면 실패 rung 마다 centerOnPlate 재호출(makePlatePtz 다회)이라 opts 길이가 rung 수가 된다.
+    const { cal, getSaved } = makeCalibrator({ makePlatePtz: f.make, cfg: { ...cfg, acquireLadderMaxSteps: 0 } });
     cal.start();
     await waitDone(cal);
     expect(f.zoomCalls).toHaveLength(0);

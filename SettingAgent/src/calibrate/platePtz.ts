@@ -14,9 +14,10 @@
 
 import type { ICameraClient } from '../clients/CameraClient.js';
 import type { LpdClient, PlateBox } from '../clients/LpdClient.js';
-import type { NormalizedRect } from '../domain/types.js';
+import type { NormalizedPoint, NormalizedRect } from '../domain/types.js';
 import { logger } from '../util/logger.js';
 import { quadBoundingRect } from '../domain/geometry.js';
+import { pickOwnedPlate } from './plateDiscovery.js';
 import {
   plateCenterError,
   pickNearestPlate,
@@ -83,6 +84,12 @@ export interface PlatePtzOpts {
   matchRadiusNorm?: number;
   /** 1스텝 zoom 증배 상한(대칭: [z/r, z·r]). 기본 1.5 — 큰 점프는 중심 오차를 같은 배율로 확대해 대상을 날린다. */
   maxZoomStepRatio?: number;
+  /**
+   * (소유권 선정 전용) 같은 프리셋 타 슬롯 판중심 − 자기 판중심(원본 정규화 프레임 상대 오프셋, 설계 §A-1).
+   * pan/tilt 강체평행이동 불변이라 현재 프레임에서 자기중심 prior 에 더하면 peer 앵커가 된다.
+   * 미전달 → 기존 화면중앙 최근접(`pickNearestPlate`, 하위호환). 전달 시 자기 Voronoi 셀 소유 후보만 선정.
+   */
+  peerOffsets?: NormalizedPoint[];
 }
 
 export type PlatePtzFailReason = 'no_plate' | 'plate_lost' | 'max_iterations' | 'zoom_saturated';
@@ -115,6 +122,7 @@ interface ResolvedOpts {
   matchRadiusNorm: number;
   maxZoomStepRatio: number;
   gain?: PtzGain;
+  peerOffsets?: NormalizedPoint[];
 }
 
 /** 개선 정체 판정 임계(PtzCalibrator.ts 와 동일 값 — 그쪽은 module-private 라 import 불가). */
@@ -172,6 +180,7 @@ export class PlatePtz {
       matchRadiusNorm: opts.matchRadiusNorm ?? 0.08,
       maxZoomStepRatio: opts.maxZoomStepRatio ?? 1.5,
       ...(opts.gain ? { gain: opts.gain } : {}),
+      ...(opts.peerOffsets ? { peerOffsets: opts.peerOffsets } : {}),
     };
   }
 
@@ -391,7 +400,10 @@ export class PlatePtz {
     this.onFrame?.(cap.jpg, camIdx, presetIdx);
     await this.sleep(this.opts.settleMs);
     const plates = await this.lpd.detect(cap.jpg);
-    const picked = pickNearestPlate(plates, prior);
+    // 대상선정: peerOffsets 전달 시 자기 Voronoi 셀 소유 판만(이웃 latch 불가), 미전달 시 기존 화면중앙 최근접(하위호환).
+    const picked = this.opts.peerOffsets
+      ? pickOwnedByOffsets(plates, prior, this.opts.peerOffsets)
+      : pickNearestPlate(plates, prior);
     if (!picked || radius === null) return picked;
     const c = centerOfRect(quadBoundingRect(picked.quad));
     const t = centerOfRect(prior);
@@ -403,4 +415,20 @@ export class PlatePtz {
 function improvement(before: { errX: number; errY: number }, after: { errX: number; errY: number }): number {
   const mag = (e: { errX: number; errY: number }) => Math.hypot(e.errX, e.errY);
   return mag(before) - mag(after);
+}
+
+/**
+ * 소유권(Voronoi) 기반 대상선정 — 이웃 판 latch 차단(설계 이터2 §A-1).
+ * self 기준점 = prior 중심(예측 자기중심). peer 앵커 = self + 오프셋(원본 프레임 상대 오프셋, 강체평행이동 불변).
+ * 검출 후보 중 자기 앵커가 모든 peer 앵커보다 엄격 최근접인 판만 자기 소유 → 그 중 최근접 1개(없으면 null).
+ * ★ 점 형태는 반드시 {x,y}(pickOwnedPlate 규약) — platePtz 내부 {cx,cy}(centerOfRect)와 혼용 금지.
+ */
+function pickOwnedByOffsets(plates: PlateBox[], prior: NormalizedRect, offsets: readonly NormalizedPoint[]): PlateBox | null {
+  const selfRef: NormalizedPoint = { x: prior.x + prior.w / 2, y: prior.y + prior.h / 2 };
+  const cands = plates.map((p) => {
+    const r = quadBoundingRect(p.quad);
+    return { plate: p, centerOrig: { x: r.x + r.w / 2, y: r.y + r.h / 2 } as NormalizedPoint };
+  });
+  const peerAnchors = offsets.map((o) => ({ x: selfRef.x + o.x, y: selfRef.y + o.y }));
+  return pickOwnedPlate(cands, selfRef, peerAnchors);
 }

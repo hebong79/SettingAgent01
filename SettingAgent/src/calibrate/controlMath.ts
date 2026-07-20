@@ -84,6 +84,22 @@ export function zoomCorrection(
   return clampZoom(curZoom * Math.sqrt(targetWidth / plateWidth));
 }
 
+/**
+ * 폭 ∝ zoom 선형 **직접 목표**(게인무관): targetZoom = curZoom × targetWidth/curWidth.
+ * `zoomCorrection` 의 sqrt 는 반복 감쇠 스텝(진동 안정용)이라 별개 — 이건 감쇠 없는 1발 목표산출.
+ * curWidth≈0(퇴화 lpd) 가드 → clampZoom(curZoom). clampZoom 로 zoom 상한(1~36) 적용.
+ * ★ 시그니처에 gain 부재 = 게인 무의존을 구조적으로 보장(설계 §A-1). "먼저 확대해 찾기"의 목표 zoom 산출.
+ */
+export function zoomForWidth(
+  curZoom: number,
+  curWidth: number,
+  targetWidth: number,
+  clampZoom: (z: number) => number,
+): number {
+  if (curWidth <= GAIN_EPS) return clampZoom(curZoom);
+  return clampZoom(curZoom * (targetWidth / curWidth));
+}
+
 /** 중심 수렴 판정. */
 export function isCentered(err: { errX: number; errY: number }, centerTol: number): boolean {
   return Math.abs(err.errX) <= centerTol && Math.abs(err.errY) <= centerTol;
