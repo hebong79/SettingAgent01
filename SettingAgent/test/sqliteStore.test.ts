@@ -349,6 +349,52 @@ describe('SqliteStore upsertSlotLpd (부분 UPDATE · 타 컬럼·타 슬롯 불
     expect(rows.find((r) => r.slotId === 2)!.lpd).toEqual(lpdQuad);
     expect(rows.find((r) => r.slotId === 2)!.updatedAt).toBe('T-b');
   });
+
+  // ── occupy_range 조건부 부분 UPDATE(이터레이션 2, plan §I) ──
+  const newOccupy: NormalizedQuad = [
+    { x: 0.60, y: 0.60 }, { x: 0.72, y: 0.60 }, { x: 0.72, y: 0.70 }, { x: 0.60, y: 0.70 },
+  ];
+
+  it('occupyRange 제공 행 → occupy_range 갱신(+lpd_obb) · 타 컬럼(ptz/센터링/roi/front_center) 불변', () => {
+    store = seedEnriched(); // slot1 occupy_range = roi(기존값)
+    const newQuad: NormalizedQuad = [
+      { x: 0.61, y: 0.62 }, { x: 0.67, y: 0.61 }, { x: 0.68, y: 0.65 }, { x: 0.62, y: 0.66 },
+    ];
+    store.upsertSlotLpd([
+      { slotId: 1, lpdObb: JSON.stringify(newQuad), occupyRange: JSON.stringify(newOccupy), updatedAt: 'T-occ' },
+    ]);
+    const [v] = store.getSlotSetup();
+    // ★ occupy_range 가 discovery 판 quad 로 갱신됨.
+    expect(v.occupyRange).toEqual(newOccupy);
+    expect(v.lpd).toEqual(newQuad);
+    expect(v.updatedAt).toBe('T-occ');
+    // 그 외 컬럼 불변(wipe-safety).
+    expect(v.vpd).toEqual({ x: 0.3, y: 0.3, w: 0.1, h: 0.1 });
+    expect([v.pan, v.tilt, v.zoom]).toEqual([51.5, 9.3, 14.4]);
+    expect(v.centered).toBe(true);
+    expect(v.img1).toBe('shots/c1.jpg');
+    expect(v.slot3dFrontCenter).toEqual({ x: 0.4, y: 0.55 });
+    expect(v.roi).toEqual(roi);
+  });
+
+  it('occupyRange 미제공(undefined) 행 → occupy_range 보존(무접촉) · lpd 만 갱신', () => {
+    // ★ wipe-safety 불변: 수동 /capture/slots/lpd 경로(occupyRange 미전달)가 discovery 점유영역을 파괴하지 않는다.
+    store = seedEnriched(); // slot1 occupy_range = roi
+    store.upsertSlotLpd([lpdRow({ slotId: 1, lpdObb: JSON.stringify(lpdQuad), updatedAt: 'T-noocc' })]);
+    const [v] = store.getSlotSetup();
+    expect(v.lpd).toEqual(lpdQuad); // lpd 는 갱신
+    expect(v.occupyRange).toEqual(roi); // ★ occupy_range 는 기존값 그대로 보존(wipe 없음)
+    expect(v.updatedAt).toBe('T-noocc');
+  });
+
+  it('occupyRange=null 명시 제공 → occupy_range 를 null 로 클리어(undefined 와 구분)', () => {
+    store = seedEnriched(); // slot1 occupy_range = roi
+    store.upsertSlotLpd([
+      { slotId: 1, lpdObb: JSON.stringify(lpdQuad), occupyRange: null, updatedAt: 'T-nullocc' },
+    ]);
+    const [v] = store.getSlotSetup();
+    expect(v.occupyRange).toBeNull(); // 명시 null → 클리어(제공됨이므로 무접촉 아님)
+  });
 });
 
 // ── 파일경로 · 재오픈 ───────────────────────────────────────

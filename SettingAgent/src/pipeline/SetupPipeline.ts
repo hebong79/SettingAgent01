@@ -1,6 +1,7 @@
 import type { CaptureJob, CaptureSnapshot } from '../capture/CaptureJob.js';
 import type { Finalizer } from '../capture/Finalizer.js';
 import type { PtzCalibrator } from '../calibrate/PtzCalibrator.js';
+import type { PlateDiscoveryJob } from '../calibrate/PlateDiscoveryJob.js';
 import type { SqliteStore } from '../capture/SqliteStore.js';
 import { expandPlateTargetsFromSlotSetup } from '../calibrate/slotPtzWriter.js';
 import { logger } from '../util/logger.js';
@@ -12,12 +13,13 @@ import { logger } from '../util/logger.js';
 export interface SetupPipelineDeps {
   job: Pick<CaptureJob, 'getSnapshot'>;
   finalizer: Pick<Finalizer, 'finalize'>;
+  discovery: Pick<PlateDiscoveryJob, 'start' | 'getStatus'>; // 앞면중심 앵커 loop LPD 탐색(finalize→centering 사이)
   calibrator: Pick<PtzCalibrator, 'start' | 'getStatus'>;
   store: Pick<SqliteStore, 'getSlotSetup'>; // 커버리지 요약(전체 슬롯 수)용
   now?: () => string;
 }
 
-export type PipelineStage = 'idle' | 'capturing' | 'finalizing' | 'calibrating' | 'done' | 'failed';
+export type PipelineStage = 'idle' | 'capturing' | 'finalizing' | 'discovering' | 'calibrating' | 'done' | 'failed';
 
 /** GET /capture/pipeline 응답 shape(설계서 §3.4). 인메모리 status 전용 — 영속화·좌표수치 없음(round5 비대상). */
 export interface PipelineStatus {
@@ -25,7 +27,7 @@ export interface PipelineStatus {
   stage: PipelineStage;
   startedAt?: string;
   endedAt?: string;
-  failure?: { stage: 'capture' | 'finalize' | 'calibrate'; reason: string };
+  failure?: { stage: 'capture' | 'finalize' | 'discover' | 'calibrate'; reason: string };
   finalize?: { slots: number; globalCount: number }; // finalize 성공 시
   /** LPD 홀 정직 리포트(§6): 대상 targets / 전체 totalSlots / 미대상 uncovered. */
   coverage?: { targets: number; totalSlots: number; uncovered: number };
@@ -34,7 +36,7 @@ export interface PipelineStatus {
 
 /**
  * 원버튼 셋업 파이프라인(신규, 인메모리 상태머신 — 설계서 §3).
- * idle→capturing→finalizing→calibrating→done|failed. 이 3단계 체인 전용(범용 워크플로 엔진 아님, 단계 하드코딩).
+ * idle→capturing→finalizing→discovering→calibrating→done|failed. 이 체인 전용(범용 워크플로 엔진 아님, 단계 하드코딩).
  *
  * **비무장(수동 수집) 시 모든 콜백은 no-op** — 수동 3버튼 흐름 회귀 0의 구조적 보장.
  * 실패는 그 단계에서 정지한다(재시도·자동복구 없음 — 위장 성공 금지). 3종 가드:
@@ -49,7 +51,7 @@ export class SetupPipeline {
   private stage: PipelineStage = 'idle';
   private startedAt?: string;
   private endedAt?: string;
-  private failure?: { stage: 'capture' | 'finalize' | 'calibrate'; reason: string };
+  private failure?: { stage: 'capture' | 'finalize' | 'discover' | 'calibrate'; reason: string };
   private finalizeSummary?: { slots: number; globalCount: number };
   private coverage?: { targets: number; totalSlots: number; uncovered: number };
   private note?: string;
@@ -101,47 +103,17 @@ export class SetupPipeline {
     void this.runFinalizeThenCalibrate(snapshot);
   }
 
-  /** PtzCalibrator 완료 콜백(신규 옵셔널 dep 로 배선). 비무장/비-calibrating 이면 no-op. */
-  onCalibrateFinished(state: 'done' | 'error'): void {
-    if (!this.armed || this.stage !== 'calibrating') return;
-    if (state === 'done') this.finish('done');
-    else this.fail('calibrate', 'calibrate error');
-  }
-
-  /** finalizing/calibrating 중이면 true — /capture/start 409 가드 소스. */
-  isBusy(): boolean {
-    return this.stage === 'finalizing' || this.stage === 'calibrating';
-  }
-
-  getStatus(): PipelineStatus {
-    return {
-      armed: this.armed,
-      stage: this.stage,
-      ...(this.startedAt ? { startedAt: this.startedAt } : {}),
-      ...(this.endedAt ? { endedAt: this.endedAt } : {}),
-      ...(this.failure ? { failure: this.failure } : {}),
-      ...(this.finalizeSummary ? { finalize: this.finalizeSummary } : {}),
-      ...(this.coverage ? { coverage: this.coverage } : {}),
-      ...(this.note ? { note: this.note } : {}),
-    };
-  }
-
   /**
-   * finalize(동기 계약) → 성공 시 커버리지 산출 → 센터라이징 발화. finalizing 진입 후 비동기로 1회 진행.
-   * finalize throw → failed{finalize}(calibrate 미발화). LPD 타깃 0 → done+note(calibrator.start 미호출, F6).
+   * PlateDiscoveryJob 완료 콜백(신규 옵셔널 dep 로 배선). 비무장/비-discovering 이면 no-op.
+   * error → 정직 실패(centering 오발화 금지, F6). done → 이제 discovery 가 채운 lpd 로 커버리지 재계산 후 센터라이징.
    */
-  private async runFinalizeThenCalibrate(snapshot: CaptureSnapshot): Promise<void> {
-    let result: Awaited<ReturnType<Finalizer['finalize']>>;
-    try {
-      // logicOccupancy 미전달(헤드리스 체인엔 프론트 점유 스냅샷 없음 — occupancyAgreement 미부착이 정상, §3.5).
-      result = await this.deps.finalizer.finalize(snapshot, {});
-    } catch (err) {
-      this.fail('finalize', err instanceof Error ? err.message : String(err));
+  onDiscoverFinished(state: 'done' | 'error'): void {
+    if (!this.armed || this.stage !== 'discovering') return;
+    if (state === 'error') {
+      this.fail('discover', 'discover error');
       return;
     }
-    this.finalizeSummary = { slots: result.slots, globalCount: result.globalCount };
-
-    // 커버리지 요약(§3.6): 방금 새로 써진 slot_setup 에서 lpd 판정 재사용(slotPtzWriter 기존 export).
+    // done — 커버리지 산출(§3.6): discovery 가 방금 slot_setup.lpd 를 부분 UPDATE 한 뒤의 상태를 읽는다.
     const views = this.deps.store.getSlotSetup();
     const targets = expandPlateTargetsFromSlotSetup(views);
     this.coverage = { targets: targets.length, totalSlots: views.length, uncovered: views.length - targets.length };
@@ -162,7 +134,58 @@ export class SetupPipeline {
     }
   }
 
-  private fail(stage: 'capture' | 'finalize' | 'calibrate', reason: string): void {
+  /** PtzCalibrator 완료 콜백(신규 옵셔널 dep 로 배선). 비무장/비-calibrating 이면 no-op. */
+  onCalibrateFinished(state: 'done' | 'error'): void {
+    if (!this.armed || this.stage !== 'calibrating') return;
+    if (state === 'done') this.finish('done');
+    else this.fail('calibrate', 'calibrate error');
+  }
+
+  /** finalizing/discovering/calibrating 중이면 true — /capture/start 409 가드 소스. */
+  isBusy(): boolean {
+    return this.stage === 'finalizing' || this.stage === 'discovering' || this.stage === 'calibrating';
+  }
+
+  getStatus(): PipelineStatus {
+    return {
+      armed: this.armed,
+      stage: this.stage,
+      ...(this.startedAt ? { startedAt: this.startedAt } : {}),
+      ...(this.endedAt ? { endedAt: this.endedAt } : {}),
+      ...(this.failure ? { failure: this.failure } : {}),
+      ...(this.finalizeSummary ? { finalize: this.finalizeSummary } : {}),
+      ...(this.coverage ? { coverage: this.coverage } : {}),
+      ...(this.note ? { note: this.note } : {}),
+    };
+  }
+
+  /**
+   * finalize(동기 계약) → 성공 시 discovery(앞면중심 앵커 loop) 발화. finalizing 진입 후 비동기로 1회 진행.
+   * finalize throw → failed{finalize}(discovery 미발화). 커버리지·센터라이징은 discovery 완료(onDiscoverFinished)로 이월:
+   * 최종 slot_setup.lpd 는 이제 finalize 가 아니라 discovery 앵커 loop 가 채우기 때문(후보 C).
+   */
+  private async runFinalizeThenCalibrate(snapshot: CaptureSnapshot): Promise<void> {
+    let result: Awaited<ReturnType<Finalizer['finalize']>>;
+    try {
+      // logicOccupancy 미전달(헤드리스 체인엔 프론트 점유 스냅샷 없음 — occupancyAgreement 미부착이 정상, §3.5).
+      result = await this.deps.finalizer.finalize(snapshot, {});
+    } catch (err) {
+      this.fail('finalize', err instanceof Error ? err.message : String(err));
+      return;
+    }
+    this.finalizeSummary = { slots: result.slots, globalCount: result.globalCount };
+
+    // finalize 가 front_center 를 부트스트랩했으니 discovery 앵커 loop 로 전 프리셋 lpd 를 채운다(→ onDiscoverFinished).
+    this.stage = 'discovering';
+    try {
+      this.deps.discovery.start({}); // 전 프리셋 백그라운드 발화 — 완료는 onDiscoverFinished 로 회귀.
+    } catch (err) {
+      // 수동 discovery 경합('discover already running') 등 → 정직 실패.
+      this.fail('discover', err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  private fail(stage: 'capture' | 'finalize' | 'discover' | 'calibrate', reason: string): void {
     this.failure = { stage, reason };
     logger.warn({ stage, reason }, '자동 셋업 체인 중단');
     this.finish('failed');

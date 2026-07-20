@@ -289,15 +289,22 @@ export class SqliteStore {
   }
 
   /**
-   * 번호판 디스커버리 결과를 slot_id 키로 부분 UPDATE(lpd_obb/updated_at 만).
+   * 번호판 디스커버리/수동추가 결과를 slot_id 키로 부분 UPDATE(lpd_obb/updated_at, occupyRange 제공 시 occupy_range 도).
    * ★ 전량 delete 금지(메모리 노트 "finalize slot_setup wipe fragility") — 키 단위 UPDATE 로
    *   타깃 외 슬롯·타 컬럼(slot_roi/vpd/pan/tilt/센터링) 불변. slot_id 미존재 행은 조용히 무시.
-   * lpdObb 는 이미 stringify5 직렬화된 정규화 OBB JSON TEXT(호출측 규약).
+   * lpdObb·occupyRange 는 이미 stringify5 직렬화된 정규화 OBB JSON TEXT(호출측 규약).
+   * ★ occupyRange 미제공(undefined) 행은 occupy_range 컬럼 무접촉(기존 값 보존) — 수동 /capture/slots/lpd
+   *   경로(occupyRange 없음)가 finalize·discovery 산출 occupy_range 를 덮어쓰지 않게 한다(wipe 방지).
+   *   discovery(found 판 quad)만 occupyRange 를 동봉해 결정형 점유영역을 갱신한다.
    */
   upsertSlotLpd(rows: SlotLpdRow[]): void {
-    const stmt = this.db.prepare(`UPDATE slot_setup SET lpd_obb = ?, updated_at = ? WHERE slot_id = ?`);
+    const stmtLpd = this.db.prepare(`UPDATE slot_setup SET lpd_obb = ?, updated_at = ? WHERE slot_id = ?`);
+    const stmtLpdOccupy = this.db.prepare(`UPDATE slot_setup SET lpd_obb = ?, occupy_range = ?, updated_at = ? WHERE slot_id = ?`);
     const tx = this.db.transaction((list: SlotLpdRow[]) => {
-      for (const r of list) stmt.run(r.lpdObb ?? null, r.updatedAt, r.slotId);
+      for (const r of list) {
+        if (r.occupyRange === undefined) stmtLpd.run(r.lpdObb ?? null, r.updatedAt, r.slotId);
+        else stmtLpdOccupy.run(r.lpdObb ?? null, r.occupyRange ?? null, r.updatedAt, r.slotId);
+      }
     });
     tx(rows);
   }

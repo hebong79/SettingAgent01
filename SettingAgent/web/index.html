@@ -184,7 +184,7 @@
               <label class="field" id="cap-ckint-field" hidden>체크포인트 간격(초) <input id="cap-ckint" type="number" min="1" value="60" /></label>
               <label class="field check"><input id="cap-floor-llm" type="checkbox" /><span><strong>바닥 LLM 사용</strong></span></label>
               <label class="field check"><input id="cap-vpd-onplace" type="checkbox" checked /><span><strong>주차면 위 차량만 검출</strong><small>(번호판 포함)</small></span></label>
-              <label class="field check cap-autochain"><input id="cap-autochain" type="checkbox" /><span><strong>완료 후 자동 최종화</strong><small>+ 센터라이징</small></span></label>
+              <label class="field check cap-autochain" title="시작(수집) 완료 후 자동 연쇄: 최종화 → LPD 탐색(앞면중심 앵커 loop)·점유영역 생성 → 센터라이징. 각 단계가 slot_setup(DB)·파일에 저장된다."><input id="cap-autochain" type="checkbox" /><span><strong>완료 후 자동 최종화</strong><small>+ LPD탐색·점유영역 + 센터라이징</small></span></label>
             </div>
             <div class="cap-actions toolbar capture-actions" aria-label="정밀 수집 실행">
               <button id="cap-start" class="primary">시작</button>

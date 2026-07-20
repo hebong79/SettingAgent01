@@ -92,13 +92,17 @@ async function main(): Promise<void> {
     onFinished: (s) => pipeline?.onCalibrateFinished(s),
   });
 
-  // 파이프라인 조립(dep 완비 후). captureJob/calibrator 의 완료콜백이 위 클로저로 이 인스턴스에 회귀한다.
-  pipeline = new SetupPipeline({ job: captureJob, finalizer, calibrator, store: sqlite });
-
   // 번호판 탐색·확대반복·역계산(/discover/*). 앞면중심 기준 디지털 크롭-줌 → slot_setup.lpd 부분 UPDATE.
-  // 센터라이징 상류 별개 잡(과업 A2 해소) — 파이프라인 자동연쇄엔 미포함(수동 실행).
+  // 원버튼 셋업 자동연쇄에 discovering 단계로 포함(finalize→discovery→centering). 수동 /discover/ptz 도 동일 인스턴스.
+  // pipeline 보다 먼저 생성(pipeline 이 dep 로 필요). onFinished 는 위 클로저 전방참조로 이 파이프라인에 회귀한다.
   const discoverOutFile = 'data/plate_discovery.json';
-  const plateDiscovery = new PlateDiscoveryJob({ camera, lpd, store: sqlite, outFile: discoverOutFile });
+  const plateDiscovery = new PlateDiscoveryJob({
+    camera, lpd, store: sqlite, outFile: discoverOutFile,
+    onFinished: (s) => pipeline?.onDiscoverFinished(s),
+  });
+
+  // 파이프라인 조립(dep 완비 후). captureJob/calibrator/plateDiscovery 의 완료콜백이 위 클로저로 이 인스턴스에 회귀한다.
+  pipeline = new SetupPipeline({ job: captureJob, finalizer, discovery: plateDiscovery, calibrator, store: sqlite });
 
   const app = buildServer({
     orchestrator, repo, camera, vpd, lpd, brain, mapFiles: tools.map, discovery: tools.discovery,

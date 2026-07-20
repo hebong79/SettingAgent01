@@ -14,6 +14,8 @@ import type { SlotLpdRow } from '../capture/types.js';
 import { logger } from '../util/logger.js';
 import { stringify5 } from '../util/round.js';
 import { resolvePresetPtz } from '../capture/detectPipeline.js';
+import { buildPlateAnchoredQuad } from '../capture/floorRoi.js';
+import { quadBoundingRect } from '../domain/geometry.js';
 import { PlateDiscovery, type PlateDiscoveryOpts } from './plateDiscovery.js';
 import { expandDiscoveryTargets, writePlateDiscovery } from './plateDiscoveryWriter.js';
 import type {
@@ -45,6 +47,8 @@ export interface PlateDiscoveryJobDeps {
   opts?: PlateDiscoveryOpts;
   sleep?: (ms: number) => Promise<void>;
   now?: () => string;
+  /** 종단 완료 콜백(옵셔널) — 파이프라인 자동연쇄 배선용. 미주입 시 no-op(수동 /discover/ptz 회귀 0). */
+  onFinished?: (state: 'done' | 'error') => void;
 }
 
 /**
@@ -67,6 +71,7 @@ export class PlateDiscoveryJob {
   private readonly writer: (artifact: PlateDiscoveryArtifact, outFile: string) => void;
   private readonly opts: PlateDiscoveryOpts;
   private readonly now: () => string;
+  private readonly onFinished?: (state: 'done' | 'error') => void;
   /** 프리셋 PTZ 조회 캐시(`${cam}:${preset}` → PTZ) — PtzCalibrator ptzByKey 패턴. */
   private readonly ptzByKey = new Map<string, Ptz | null>();
   /** 최근 탐색 캡처 프레임(뷰어 /discover/frame 용) — PtzCalibrator.getLastFrame 패턴. */
@@ -85,6 +90,7 @@ export class PlateDiscoveryJob {
       deps.makeDiscovery ?? ((opts) => new PlateDiscovery({ camera: deps.camera, lpd: deps.lpd, sleep, onFrame }, opts));
     this.writer = deps.writer ?? writePlateDiscovery;
     this.now = deps.now ?? (() => new Date().toISOString());
+    this.onFinished = deps.onFinished;
   }
 
   /** 최근 탐색 캡처 프레임(없으면 undefined). 뷰어 /discover/frame 용. 잡 종료 후에도 유지. */
@@ -176,10 +182,21 @@ export class PlateDiscoveryJob {
       this.endedAt = this.now();
       this.state = 'done';
       logger.info({ total: this.total, found: this.found }, '번호판 디스커버리 잡 완료');
+      this.notifyFinished('done');
     } catch (e) {
       logger.error({ err: e }, '번호판 디스커버리 잡 예외 → error');
       this.endedAt = this.now();
       this.state = 'error';
+      this.notifyFinished('error');
+    }
+  }
+
+  /** 종단 완료 콜백 통지(옵셔널). throw 흡수 — 콜백이 잡을 죽이지 않는다(PtzCalibrator 미러). */
+  private notifyFinished(state: 'done' | 'error'): void {
+    try {
+      this.onFinished?.(state);
+    } catch (e) {
+      logger.warn({ err: e, state }, '번호판 디스커버리 완료 콜백 예외(흡수)');
     }
   }
 
@@ -208,7 +225,14 @@ export class PlateDiscoveryJob {
         logger.warn({ slot: it.slotId, cam: it.camIdx, preset: it.presetIdx }, 'globalIdx 부재 → slot_setup.lpd 매핑 불가(스킵)');
         continue;
       }
-      rows.push({ slotId: it.globalIdx, lpdObb: stringify5(it.lpdOrig), updatedAt });
+      // 점유영역(발자국) = 발견된 판 quad 로 결정형 생성(Finalizer 판-only 경로와 동일 재사용). 계산 실패 시 생략(lpd 는 저장).
+      let occupyRange: string | undefined;
+      try {
+        occupyRange = stringify5(buildPlateAnchoredQuad(quadBoundingRect(it.lpdOrig), it.lpdOrig));
+      } catch (e) {
+        logger.warn({ err: e, slot: it.slotId, cam: it.camIdx, preset: it.presetIdx }, '점유영역 생성 실패(occupy_range 생략, lpd 는 저장)');
+      }
+      rows.push({ slotId: it.globalIdx, lpdObb: stringify5(it.lpdOrig), occupyRange, updatedAt });
     }
     if (rows.length === 0) return;
     try {

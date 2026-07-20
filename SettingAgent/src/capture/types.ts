@@ -160,6 +160,8 @@ export interface SlotCenteringRow {
 export interface SlotLpdRow {
   slotId: number;
   lpdObb: string | null;
+  /** 판 quad 로 결정형 생성한 점유영역(발자국) OBB — found 슬롯만 세팅, 미검출은 undefined(기존 값 보존). */
+  occupyRange?: string | null;
   updatedAt: string;
 }
 

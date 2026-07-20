@@ -43,6 +43,8 @@ interface MakeOpts {
   finalizeResult?: { slots: number; globalCount: number };
   finalizeImpl?: (s: CaptureSnapshot, o?: unknown) => Promise<FinalizeResult>;
   startImpl?: () => { total: number };
+  /** discovery.start 동작 오버라이드. 미지정 시 진입 즉시 onDiscoverFinished('done') 자동 통지(기존 동작). */
+  discoverStartImpl?: (pipeline: SetupPipeline) => { total: number };
 }
 
 function makePipeline(opts: MakeOpts = {}) {
@@ -58,14 +60,25 @@ function makePipeline(opts: MakeOpts = {}) {
   const start = vi.fn(opts.startImpl ?? (() => ({ total: 1 })));
   const getStatus = vi.fn((): CalibrateStatus => ({ state: 'idle', done: 0, total: 0 }));
   const getSlotSetup = vi.fn((): SlotSetupView[] => opts.views ?? [view(1, true)]);
+  // discovery 스텁: finalize→discovering 진입 후 곧바로 done 을 통지한다(전 프리셋 앵커 loop 를 투명 통과).
+  // → 기존 finalize→calibrating 전이 단언은 discovery 를 통과해 그대로 성립(회귀 0). qa-tester 가 pending/error 분기를 추가.
+  let pipeline!: SetupPipeline;
+  const discoverStart = vi.fn(() =>
+    opts.discoverStartImpl
+      ? opts.discoverStartImpl(pipeline)
+      : (pipeline.onDiscoverFinished('done'), { total: 1 }),
+  );
+  const discoverStatus = vi.fn(() => ({ state: 'idle' as const, done: 0, total: 0, found: 0 }));
   const deps: SetupPipelineDeps = {
     job: { getSnapshot },
     finalizer: { finalize },
+    discovery: { start: discoverStart, getStatus: discoverStatus },
     calibrator: { start, getStatus },
     store: { getSlotSetup },
     now: () => 'T',
   };
-  return { pipeline: new SetupPipeline(deps), getSnapshot, finalize, start, getStatus, getSlotSetup };
+  pipeline = new SetupPipeline(deps);
+  return { pipeline, getSnapshot, finalize, start, getStatus, getSlotSetup, discoverStart, discoverStatus };
 }
 
 /** finalize 의 void 비동기 발화(runFinalizeThenCalibrate)를 소진하기 위한 microtask flush. */
@@ -319,5 +332,126 @@ describe('SetupPipeline 콜백 가드(비-대응 stage 에서 no-op)', () => {
     await flush();
     expect(h.finalize).toHaveBeenCalledTimes(1); // 재실행 안 됨.
     expect(h.pipeline.getStatus().stage).toBe('done');
+  });
+});
+
+// ── discovering 단계(신규, 이터레이션 1) — 전이 순서·에러/타깃0 분기·isBusy ──
+describe('SetupPipeline D-1 전체 전이 시퀀스 (capturing→finalizing→discovering→calibrating→done)', () => {
+  it('discovery.start 는 finalize 이후·calibrator.start 이전, 각 단계 관측', async () => {
+    // discovery 를 수동 통지로 잡아 discovering 상태를 관측(자동완료 미사용).
+    const h = makePipeline({ discoverStartImpl: () => ({ total: 1 }) });
+
+    h.pipeline.onCaptureStart(true);
+    expect(h.pipeline.getStatus().stage).toBe('capturing');
+
+    h.pipeline.onCaptureFinished('done');
+    expect(h.pipeline.getStatus().stage).toBe('finalizing'); // 동기 진입(finalize 는 아직 미해결)
+    expect(h.discoverStart).not.toHaveBeenCalled();
+
+    await flush(); // finalize 해결 → discovering 진입 + discovery.start 발화
+    expect(h.pipeline.getStatus().stage).toBe('discovering');
+    expect(h.discoverStart).toHaveBeenCalledTimes(1);
+    expect(h.start).not.toHaveBeenCalled(); // ★ discovery 완료 전엔 센터라이징 미발화
+
+    // 경계면 순서: finalize < discovery.start (아직 calibrator 미발화)
+    expect(h.finalize.mock.invocationCallOrder[0]).toBeLessThan(h.discoverStart.mock.invocationCallOrder[0]);
+
+    h.pipeline.onDiscoverFinished('done'); // discovery 완료 → 커버리지 재계산 → calibrating
+    expect(h.pipeline.getStatus().stage).toBe('calibrating');
+    expect(h.start).toHaveBeenCalledTimes(1);
+    // 경계면 순서: discovery.start < calibrator.start
+    expect(h.discoverStart.mock.invocationCallOrder[0]).toBeLessThan(h.start.mock.invocationCallOrder[0]);
+
+    h.pipeline.onCalibrateFinished('done');
+    expect(h.pipeline.getStatus().stage).toBe('done');
+  });
+});
+
+describe('SetupPipeline D-2 discovery error → failed{discover} (F6 위장 성공 금지)', () => {
+  it('onDiscoverFinished("error") → failed{discover} · calibrator.start 미호출', async () => {
+    const h = makePipeline({ discoverStartImpl: () => ({ total: 1 }) });
+    h.pipeline.onCaptureStart(true);
+    h.pipeline.onCaptureFinished('done');
+    await flush();
+    expect(h.pipeline.getStatus().stage).toBe('discovering');
+
+    h.pipeline.onDiscoverFinished('error');
+    const st = h.pipeline.getStatus();
+    expect(st.stage).toBe('failed');
+    expect(st.failure).toEqual({ stage: 'discover', reason: 'discover error' });
+    expect(h.start).not.toHaveBeenCalled(); // ★ 센터라이징 오발화 금지
+  });
+
+  it('discovery.start throw(수동 경합) → failed{discover} · calibrator.start 미호출', async () => {
+    const h = makePipeline({
+      discoverStartImpl: () => { throw new Error('discover already running'); },
+    });
+    h.pipeline.onCaptureStart(true);
+    h.pipeline.onCaptureFinished('done');
+    await flush();
+    const st = h.pipeline.getStatus();
+    expect(st.stage).toBe('failed');
+    expect(st.failure).toEqual({ stage: 'discover', reason: 'discover already running' });
+    expect(h.start).not.toHaveBeenCalled();
+  });
+});
+
+describe('SetupPipeline D-3 discovery done + 커버리지 0 → 센터라이징 스킵 (F6)', () => {
+  it('discovery 완료 후 전 슬롯 lpd=null → done+note · calibrator.start 미호출', async () => {
+    const h = makePipeline({
+      views: [view(1, false), view(2, false)],
+      discoverStartImpl: () => ({ total: 0 }),
+    });
+    h.pipeline.onCaptureStart(true);
+    h.pipeline.onCaptureFinished('done');
+    await flush();
+    expect(h.pipeline.getStatus().stage).toBe('discovering');
+
+    h.pipeline.onDiscoverFinished('done'); // 커버리지 재계산 → targets 0
+    const st = h.pipeline.getStatus();
+    expect(st.stage).toBe('done');
+    expect(st.note).toBe('센터라이징 스킵 — LPD 보유 슬롯 0');
+    expect(st.coverage).toEqual({ targets: 0, totalSlots: 2, uncovered: 2 });
+    expect(h.start).not.toHaveBeenCalled(); // ★ 빈 slot_ptz.json 덮어쓰기 방지
+  });
+
+  it('커버리지는 discovery 완료 직후의 slot_setup 을 읽는다(getSlotSetup 호출 시점)', async () => {
+    // getSlotSetup 은 discovery 완료(onDiscoverFinished) 시점에만 호출돼야 한다(finalize 직후 아님).
+    const h = makePipeline({ discoverStartImpl: () => ({ total: 1 }) });
+    h.pipeline.onCaptureStart(true);
+    h.pipeline.onCaptureFinished('done');
+    await flush();
+    expect(h.getSlotSetup).not.toHaveBeenCalled(); // ★ discovering 중엔 커버리지 미산출
+    h.pipeline.onDiscoverFinished('done');
+    expect(h.getSlotSetup).toHaveBeenCalledTimes(1); // discovery 반영본 위에서 1회 산출
+  });
+});
+
+describe('SetupPipeline D-4 isBusy — discovering 도 409 가드', () => {
+  it('discovering 중 isBusy()=true', async () => {
+    const h = makePipeline({ discoverStartImpl: () => ({ total: 1 }) });
+    h.pipeline.onCaptureStart(true);
+    h.pipeline.onCaptureFinished('done');
+    await flush();
+    expect(h.pipeline.getStatus().stage).toBe('discovering');
+    expect(h.pipeline.isBusy()).toBe(true); // ★ discovering 진행 중 신규 /capture/start 409
+  });
+});
+
+describe('SetupPipeline D-5 discovery 콜백 가드(비-discovering stage 에서 no-op)', () => {
+  it('capturing 중 onDiscoverFinished 는 no-op(stage 불변, calibrator 미발화)', () => {
+    const h = makePipeline({ discoverStartImpl: () => ({ total: 1 }) });
+    h.pipeline.onCaptureStart(true);
+    h.pipeline.onDiscoverFinished('done'); // stage=capturing → 무시
+    expect(h.pipeline.getStatus().stage).toBe('capturing');
+    expect(h.start).not.toHaveBeenCalled();
+  });
+
+  it('비무장(autoChain=false) 시 onDiscoverFinished no-op', () => {
+    const h = makePipeline({ discoverStartImpl: () => ({ total: 1 }) });
+    h.pipeline.onCaptureStart(false);
+    h.pipeline.onDiscoverFinished('done');
+    expect(h.pipeline.getStatus()).toEqual({ armed: false, stage: 'idle' });
+    expect(h.start).not.toHaveBeenCalled();
   });
 });

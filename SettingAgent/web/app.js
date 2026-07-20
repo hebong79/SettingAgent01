@@ -2100,7 +2100,7 @@ async function capPoll() {
   prevCapState = st;
   // 원버튼 셋업 파이프라인 병행 조회(무장 시에만 렌더). capture 가 done 이어도 체인이 진행 중이면 폴을 유지한다.
   const pl = await pollPipeline();
-  const chainBusy = pl && pl.armed && (pl.stage === 'capturing' || pl.stage === 'finalizing' || pl.stage === 'calibrating');
+  const chainBusy = pl && pl.armed && (pl.stage === 'capturing' || pl.stage === 'finalizing' || pl.stage === 'discovering' || pl.stage === 'calibrating');
   const plan = pollPlan(st);
   if (capPollTimer) {
     clearTimeout(capPollTimer);
@@ -2139,6 +2139,8 @@ async function pollPipeline() {
   // 상태 메시지(무장 중 cap-msg 는 파이프라인이 소유).
   if (stage === 'finalizing') {
     $('cap-msg').textContent = '자동 최종화 중…';
+  } else if (stage === 'discovering') {
+    $('cap-msg').textContent = '번호판 탐색 중…';
   } else if (stage === 'calibrating') {
     $('cap-msg').textContent = '자동 센터라이징 중…';
   } else if (stage === 'failed') {
