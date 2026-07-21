@@ -2340,6 +2340,44 @@ async function calStart() {
   calPoll();
 }
 
+// 동시 클릭 방지 락(개별 센터라이징 진행 중 중복 발화 차단).
+let calPointBusy = false;
+
+// 개별(클릭) 센터라이징 발화(설계서 §3.4) — calStart 축소판. 저장 없음(POST /calibrate/point).
+// mode='plate'=클릭 최근접 번호판 center / 'plate-zoom'=center+zoom. 진행 프레임은 startCalFramePolling 재사용.
+async function calPointCenter(nx, ny, mode) {
+  if (calPointBusy) return;
+  calPointBusy = true;
+  const cam = state.capFrameKey2?.cam ?? state.cam;
+  const preset = state.capFrameKey2?.preset ?? state.preset;
+  $('cal-msg').textContent = mode === 'plate-zoom' ? '번호판 센터+줌 중…' : '클릭 위치 번호판으로 센터라이징 중…';
+  $('cal-summary').innerHTML = '';
+  startCalFramePolling(); // 진행 프레임 실시간 표시(라이브 중지·상호배타).
+  let data = null;
+  let res = null;
+  try {
+    res = await fetch('/calibrate/point', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ cam, preset, point: { x: nx, y: ny }, mode }),
+    });
+    data = await res.json().catch(() => ({}));
+  } catch (err) {
+    data = { error: String(err) };
+  }
+  stopCalFramePolling();
+  if (res && res.status === 409) {
+    $('cal-msg').textContent = '센터라이징(전체) 진행 중 — 잠시 후 다시 시도하세요';
+  } else if (res && res.ok && data && data.ok) {
+    $('cal-msg').textContent = '개별 센터라이징 완료';
+  } else {
+    const why = (data && (data.reason || data.error)) ?? (res ? res.status : 'error');
+    $('cal-msg').textContent = `종료(${why})`;
+  }
+  startLive(); // 얼어붙은 마지막 프레임을 라이브 스트림으로 대체.
+  calPointBusy = false;
+}
+
 async function calPoll() {
   let status = null;
   try {
@@ -3230,6 +3268,17 @@ function wirePanelResize() {
 function wireOverlayEditing() {
   // mousedown: floor 정점 위면 정점 드래그 시작, 아니면 슬롯 선택/해제.
   overlay.addEventListener('mousedown', (e) => {
+    // [개별 센터라이징] 콤보 선택 시 클릭을 최우선 소비 → 클릭 지점 최근접 번호판으로 센터라이징(저장 안 함).
+    // 미선택(off)이면 이 분기를 건너뛰어 기존 편집 동작 100% 보존. Ctrl 은 기존 편집 제스처라 제외.
+    const clickMode = $('cal-click-mode')?.value;
+    if (clickMode && clickMode !== 'off' && !e.ctrlKey) {
+      const { nx, ny } = eventToNorm(e);
+      e.preventDefault();
+      // center(개별 center)=클릭 최근접 번호판 center('plate'), center-zoom=번호판 center+zoom('plate-zoom').
+      const mode = clickMode === 'center-zoom' ? 'plate-zoom' : 'plate';
+      void calPointCenter(nx, ny, mode);
+      return;
+    }
     const { nx, ny } = eventToNorm(e);
     // [기능2] 검출 박스 편집(임시): 차량/번호판 레이어 중 하나라도 표시 중 + Ctrl 아님(슬롯 편집과 물리 배타). mapping/roiHidden 가드 이전.
     if (($('roi-vehicle').checked || $('roi-plate').checked) && !e.ctrlKey) {
@@ -3376,6 +3425,10 @@ function wire() {
   }
   $('cap-finalize').addEventListener('click', capFinalize);
   $('cal-start').addEventListener('click', calStart);
+  // 개별 센터라이징 콤보: 활성(off 아님) 시 오버레이 커서를 crosshair 로 전환(클릭 조준 피드백).
+  $('cal-click-mode').addEventListener('change', (e) => {
+    overlay.classList.toggle('click-centering', e.target.value !== 'off');
+  });
   $('cap-result-close').addEventListener('click', () => {
     $('cap-result-modal').hidden = true;
   });

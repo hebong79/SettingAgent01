@@ -8,6 +8,7 @@ import { CaptureJob } from '../src/capture/CaptureJob.js';
 import { Finalizer } from '../src/capture/Finalizer.js';
 import { SetupPipeline } from '../src/pipeline/SetupPipeline.js';
 import type { PtzCalibrator } from '../src/calibrate/PtzCalibrator.js';
+import type { PlateDiscoveryJob } from '../src/calibrate/PlateDiscoveryJob.js';
 import { SqliteStore } from '../src/capture/SqliteStore.js';
 import { normalizePtzCamRoi } from '../src/capture/placeRoi.js';
 import { polygonCentroid } from '../src/domain/polygon.js';
@@ -771,7 +772,11 @@ describe('원버튼 셋업 파이프라인 라우트 (autoChain·/capture/pipeli
       start: () => ({ total: 0 }),
       getStatus: () => ({ state: 'idle', done: 0, total: 0 }),
     } as unknown as PtzCalibrator;
-    const pipeline = new SetupPipeline({ job, finalizer, calibrator, store, now: () => 'T' });
+    const discovery = {
+      start: () => ({ total: 0 }),
+      getStatus: () => ({ state: 'idle', done: 0, total: 0, found: 0 }),
+    } as unknown as PlateDiscoveryJob;
+    const pipeline = new SetupPipeline({ job, finalizer, discovery, calibrator, store, now: () => 'T' });
     const orchestrator = new SetupOrchestrator({ camera: fakeCamera(), vpd: fakeVpd(), repo, cfg: setupCfg, sleep: async () => {}, now: () => 'T' });
     const a = buildServer({
       orchestrator, repo, camera: fakeCamera(), vpd: fakeVpd(),

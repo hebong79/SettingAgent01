@@ -67,6 +67,7 @@
           <div class="viewport">
             <img id="frame" alt="camera frame" />
             <canvas id="overlay"></canvas>
+            <div id="center-cross" aria-hidden="true"></div>
           </div>
         </div>
         <div class="stream-controls toolbar">
@@ -205,6 +206,13 @@
                 <p>센터라이징은 번호판 중심을 기준으로 각 주차면의 Pan·Tilt·Zoom을 미세 조정합니다. 완료 결과는 <code>slot_ptz.json</code>과 DB <code>centering_slot</code>에 저장됩니다.</p>
               </div>
               <button id="cal-start" class="primary">센터라이징</button>
+              <label class="field" title="선택 후 라이브뷰에서 차량을 클릭하면 그 번호판으로 센터라이징(저장 안 함)">개별 센터라이징
+                <select id="cal-click-mode">
+                  <option value="off" selected>사용 안 함</option>
+                  <option value="center">개별 center</option>
+                  <option value="center-zoom">개별 center+zoom</option>
+                </select>
+              </label>
               <div class="cap-progress operation-progress centering-progress">
                 <progress id="cal-bar" max="100" value="0"></progress>
                 <span id="cal-label">idle 0/0</span>

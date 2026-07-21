@@ -5,7 +5,7 @@ import type { SlotCenteringRow } from '../capture/types.js';
 import type { ToolsConfig } from '../config/toolsConfig.js';
 import { logger } from '../util/logger.js';
 import { quadBoundingRect, center } from '../domain/geometry.js';
-import type { NormalizedPoint } from '../domain/types.js';
+import type { NormalizedPoint, NormalizedRect } from '../domain/types.js';
 import { resolvePresetPtz } from '../capture/detectPipeline.js';
 import { expandPlateTargetsFromSlotSetup, writeSlotPtz } from './slotPtzWriter.js';
 import { buildSlotPtzJson, scaleGainForZoom, panTiltCorrection, zoomForWidth } from './controlMath.js';
@@ -114,6 +114,8 @@ export class PtzCalibrator {
   private readonly ptzByKey = new Map<string, Ptz>();
   /** 최근 센터라이징 캡처 프레임(없으면 undefined). 뷰어 /calibrate/frame 용 — CaptureJob.getLastFrame 패턴. */
   private lastFrame?: { jpeg: Buffer; camIdx: number; presetIdx: number };
+  /** 개별(클릭) 센터라이징 진행 락. 배치 state==='running' 와 함께 카메라 경합을 막는다(centerOnPoint 상호배타 가드). */
+  private pointBusy = false;
 
   constructor(deps: PtzCalibratorDeps) {
     this.camera = deps.camera;
@@ -144,6 +146,44 @@ export class PtzCalibrator {
       ...(this.startedAt ? { startedAt: this.startedAt } : {}),
       ...(this.endedAt ? { endedAt: this.endedAt } : {}),
     };
+  }
+
+  /**
+   * 개별(클릭) 센터라이징(신규·가산 — 설계서 §3.1). 조작자가 라이브뷰에서 가리킨 지점 최근접 번호판으로
+   * pan/tilt 정렬(+옵션 zoom). 배치 start()/run() 경로·저장(writer·DB·스냅샷)과 **완전 분리** — 어디에도 기록하지 않는다.
+   *
+   * 1. 상호배타 가드: 배치 진행(state==='running')·개별 진행(pointBusy) 중이면 throw(라우트 409 매핑).
+   * 2. startPtzFor 로 프리셋 base PTZ 해석(ptzByKey 캐시 재사용 — cam/preset 만 사용).
+   * 3. plateRoi=클릭점(w/h=0) prior 로 centerOnPlate — peerOffsets 미주입 → pickNearestPlate(클릭 최근접).
+   * 4. center 성공 & zoom!==false 이면 center.gain 체이닝으로 zoomToPlateWidth 1회 마감(성공 시 z, 실패 시 center 반환 — 정직).
+   * 5. 저장 호출 없음(writer/saveCenteringSlots/saveSetupSnapshot/upsertSlotCentering 미호출).
+   *    onFrame 은 makePlatePtz 생성자에 이미 배선되어 진행 중 lastFrame 갱신(/calibrate/frame 폴링 자동).
+   */
+  async centerOnPoint(
+    camIdx: number,
+    presetIdx: number,
+    point: NormalizedPoint,
+    opts?: { zoom?: boolean },
+  ): Promise<{ ok: boolean; ptz: Ptz; plateWidth: number | null; reason?: string }> {
+    if (this.state === 'running') throw new Error('calibrate already running');
+    if (this.pointBusy) throw new Error('point centering busy');
+    this.pointBusy = true;
+    try {
+      const startPtz = await this.startPtzFor({ camIdx, presetIdx } as PlateTarget);
+      const prior: NormalizedRect = { x: point.x, y: point.y, w: 0, h: 0 };
+      const centered = await this.makePlatePtz({ ...this.baseOpts(), plateRoi: prior }).centerOnPlate(camIdx, presetIdx, startPtz);
+      if (centered.ok && opts?.zoom !== false) {
+        const z = await this.makePlatePtz({
+          ...this.baseOpts(),
+          plateRoi: quadBoundingRect(centered.plate!.quad),
+          gain: centered.gain,
+        }).zoomToPlateWidth(camIdx, presetIdx, centered.ptz);
+        if (z.ok) return { ok: z.ok, ptz: z.ptz, plateWidth: z.plateWidth, ...(z.reason ? { reason: z.reason } : {}) };
+      }
+      return { ok: centered.ok, ptz: centered.ptz, plateWidth: centered.plateWidth, ...(centered.reason ? { reason: centered.reason } : {}) };
+    } finally {
+      this.pointBusy = false;
+    }
   }
 
   /**

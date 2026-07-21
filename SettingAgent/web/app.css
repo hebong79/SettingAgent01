@@ -401,6 +401,36 @@ input[type="radio"] {
   pointer-events: auto; /* 오버레이에서 슬롯 선택·크기조정(코너/변) 드래그 수신 — none 이면 img 로 통과되어 편집 불가 */
 }
 
+/* 스트리밍 화면 중앙 십자 마크(연하게). 클릭·드래그 방해 금지(pointer-events:none). 두 선을 ::before(가로)/::after(세로)로. */
+#center-cross {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+  z-index: 2;
+}
+#center-cross::before,
+#center-cross::after {
+  content: '';
+  position: absolute;
+  background: rgba(255, 255, 255, 0.35);
+  box-shadow: 0 0 1px rgba(0, 0, 0, 0.4); /* 밝은 배경에서도 최소 대비 */
+}
+#center-cross::before { /* 가로선 */
+  left: -14px;
+  top: -0.5px;
+  width: 28px;
+  height: 1px;
+}
+#center-cross::after { /* 세로선 */
+  left: -0.5px;
+  top: -14px;
+  width: 1px;
+  height: 28px;
+}
+
 .stream-controls {
   justify-content: flex-start;
   min-height: 42px;
@@ -1805,4 +1835,9 @@ body.resizing {
   .rpc-actions button {
     flex: 1 1 0;
   }
+}
+
+/* 개별(클릭) 센터라이징 활성 시 오버레이 조준 커서. */
+#overlay.click-centering {
+  cursor: crosshair;
 }
