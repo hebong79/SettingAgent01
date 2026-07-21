@@ -1,28 +1,26 @@
-# 00 GOAL — 센터라이징 근본재설계: lpd 신원 기반 배타성 (이터레이션 2)
+# Goal — 개별 center = 클릭 위치점을 화면 중앙으로 (pan/tilt only)
 
-> B-mode(goal/loop) 이터레이션 2. 이터레이션 1(pre-aim, `_workspace_prev_20260720_preaim/`)은 시작점만 옮겨
-> 근본해결 실패. 마스터 진단 승인: **lpd 필드값이 최종 수렴을 지배하지 못하는 "재검출 nearest" 방식이 원인.**
+브랜치: `feat/click-center-pantilt` · 실행모드: **B(goal/loop, 관찰형 성공기준)**
 
-## 확정 근본원인 (실제 DB setting.sqlite slot_id 순회 실증)
-- 각 slot_id 의 lpd 중심은 **모두 뚜렷이 구별**됨(preset2 cx=0.097/0.212/0.325/**0.464**/0.62/**0.766**). 순회는 실제로 slot_id 1:1(반복/누락 없음 — 마스터 구조 논리 맞음).
-- 그런데 결과 PTZ: slot11(lpd cx0.464)·slot13(lpd cx0.766)이 **둘 다 pan≈55.5 로 수렴**(완전히 다른 판인데 겹침), slot12 미검. = "같은 주차면 반복 + 건너뛰기"의 정체.
-- **핵심 결함**: `PtzCalibrator.calibrateSlot`→`PlatePtz` 는 lpd 를 "목표"가 아니라 "초기 검출 힌트"로만 쓰고, 최종 수렴 대상을 매 프레임 **화면중앙 최근접 재검출(`pickNearestPlate`)** 로 정함. → "몇 번 슬롯 처리 중"(순회 1:1)과 "화면 어느 판으로 수렴"(재검출 nearest)이 **분리**. 밀집 프리셋(간격 0.11)에서 줌인 중 이웃 판으로 갈아탐(latch).
-- pre-aim 이 불충분한 이유: 시작점만 옮기고 수렴은 여전히 nearest 의존 → pre-aim 오차 > 판 간격이면 즉시 이웃 latch(비-cam1 게인 부정확 시 특히).
+## Goal (관찰 가능한 성공)
+라이브뷰에서 `개별 center` 모드로 임의의 지점을 클릭하면, **그 지점이 화면 중앙**으로 온다.
+- pan/tilt 만 변한다. **zoom 은 변하지 않는다.**
+- 번호판/차량 검출에 의존하지 않는다(클릭점 자체가 목표).
+- 어디에도 저장하지 않는다(slot_ptz.json / DB centering_slot / Setup 스냅샷 미기록).
 
-## Goal (관찰 가능한 성공기준)
-1. **lpd 신원이 수렴을 지배**: 각 슬롯 센터링이 그 슬롯의 lpd 필드값이 가리키는 **바로 그 판**으로만 수렴한다. 이웃 판으로 갈아타지 않는다.
-2. **결과 무중복·무누락**: 서로 다른 slot_id 가 (거의) 동일 PTZ 로 수렴하는 중복이 사라진다. lpd 보유 슬롯은 전부 처리(건너뛰기 없음), 이웃절도로 인한 미검이 사라진다.
-3. **저장 3중 유지**(이터1 성과 보존): `save/Setup_*.json`(완전셋업 스냅샷) · DB `slot_setup` · `data/slot_ptz.json`.
+## Requirements (루프 내내 유지되는 불변 제약)
+1. `개별 center+zoom` 은 **기존 그대로**(번호판 기준 `plate-zoom`) 유지 — 회귀 0.
+2. 휴컴스 네이티브 함수(`ptz_centering setcenter type=point`)를 **실카메라 경로에서 실제로 사용**한다.
+3. 현재 선택 런타임 카메라는 시뮬(`simulator-1`, Unity RPC)이므로 **시뮬 경로가 오늘 동작·검증되어야** 한다.
+4. 저장 경로 무접촉(회귀 가드 테스트 유지).
+5. 배치 센터라이징(`state==='running'`)·개별 진행 중 상호배타 가드 유지(409).
+6. 기존 오버레이 편집 동작(콤보 off 일 때) 100% 보존.
 
-## 해결 방향 (검증된 코드 재사용 — 새 발명 최소)
-- **배타성 게이트 재사용**: `plateDiscovery.pickOwnedPlate(candidates, selfAnchor, peerAnchors)` = Voronoi 소유권(자기 앵커가 모든 peer 앵커보다 엄격 최근접인 판만 자기 소유). 이미 discovery 에서 검증됨.
-- 센터링 재검출 대상 선정을 `pickNearestPlate` → **소유권 기반**으로: selfAnchor=자기 슬롯 lpd 중심, peerAnchors=**같은 프리셋 타 슬롯들의 lpd 중심**. 이웃 판은 소유권에서 기각 → latch 불가.
-- lpd → 목표 PTZ 직접 산출(pre-aim 유지·강화 가능)로 대상을 화면중앙 근처에 두되, **최종 수렴 신원은 소유권 게이트가 보증**.
+## 성공 확인 방법 (경험적)
+1. 스냅샷 A 촬영 → 특징점(차량 모서리 등) 픽셀 좌표 선택.
+2. `POST /calibrate/point {mode:'point'}` 발화.
+3. 스냅샷 B 촬영 → 그 특징점이 **중앙 십자(#center-cross) 근처**인지 육안 대조.
+4. 응답 ptz 의 zoom 이 발화 전 zoom 과 동일한지 수치 확인.
 
-## 제약(불변 · Requirements)
-- VPD off 유지 · 결정론(LLM 무) · 부분 UPDATE(slot_setup wipe 금지) · stringify5/round5 · 외과적 최소.
-- 이번엔 PlatePtz 대상선정(재검출) 코어 변경이 **불가피** — 단 폐루프 제어수식(gain/predict/zoom)은 무접촉, 선정 로직에만 소유권 주입. 최소 침습.
-- 양 진입점(수동 `/calibrate/ptz` · auto-chain SetupPipeline) 모두 반영. 이터1 저장 3중 회귀 0.
-
-## 검증 한계(은닉 금지)
-- 시뮬 13100 DOWN → 라이브 PTZ 물리 수렴은 검증 불가. 소유권 선정 로직·peerAnchors 산출·이웃기각은 vitest 결정형으로 확정하고, 실카메라 수렴은 한계로 명시.
+## 검증 한계(은닉 금지 대상)
+- 실카메라(192.168.0.153) 네이티브 경로는 장비 미선택 상태라 **라이브 검증 불가** → 유닛(모킹)까지만.

@@ -2344,15 +2344,17 @@ async function calStart() {
 let calPointBusy = false;
 
 // 개별(클릭) 센터라이징 발화(설계서 §3.4) — calStart 축소판. 저장 없음(POST /calibrate/point).
-// mode='plate'=클릭 최근접 번호판 center / 'plate-zoom'=center+zoom. 진행 프레임은 startCalFramePolling 재사용.
+// mode='point'=클릭 지점을 화면중앙으로(검출없음·zoom 불변) / 'plate-zoom'=번호판 center+zoom.
+// 진행 프레임은 startCalFramePolling 재사용 — 단 point 는 캡처를 하지 않으므로 폴링 없이 라이브 유지.
 async function calPointCenter(nx, ny, mode) {
   if (calPointBusy) return;
   calPointBusy = true;
   const cam = state.capFrameKey2?.cam ?? state.cam;
   const preset = state.capFrameKey2?.preset ?? state.preset;
-  $('cal-msg').textContent = mode === 'plate-zoom' ? '번호판 센터+줌 중…' : '클릭 위치 번호판으로 센터라이징 중…';
+  $('cal-msg').textContent = mode === 'point' ? '클릭 지점을 화면 중앙으로 이동 중…' : '번호판 센터+줌 중…';
   $('cal-summary').innerHTML = '';
-  startCalFramePolling(); // 진행 프레임 실시간 표시(라이브 중지·상호배타).
+  // point 는 프레임 캡처가 없어 /calibrate/frame 이 갱신되지 않는다 → 폴링 생략하고 라이브 스트림 유지.
+  if (mode !== 'point') startCalFramePolling(); // 진행 프레임 실시간 표시(라이브 중지·상호배타).
   let data = null;
   let res = null;
   try {
@@ -2374,7 +2376,7 @@ async function calPointCenter(nx, ny, mode) {
     const why = (data && (data.reason || data.error)) ?? (res ? res.status : 'error');
     $('cal-msg').textContent = `종료(${why})`;
   }
-  startLive(); // 얼어붙은 마지막 프레임을 라이브 스트림으로 대체.
+  if (mode !== 'point') startLive(); // 얼어붙은 마지막 프레임을 라이브 스트림으로 대체(point 는 라이브를 끊은 적 없음).
   calPointBusy = false;
 }
 
@@ -3274,8 +3276,8 @@ function wireOverlayEditing() {
     if (clickMode && clickMode !== 'off' && !e.ctrlKey) {
       const { nx, ny } = eventToNorm(e);
       e.preventDefault();
-      // center(개별 center)=클릭 최근접 번호판 center('plate'), center-zoom=번호판 center+zoom('plate-zoom').
-      const mode = clickMode === 'center-zoom' ? 'plate-zoom' : 'plate';
+      // center(개별 center)=클릭 지점 자체를 화면중앙으로('point'), center-zoom=번호판 center+zoom('plate-zoom').
+      const mode = clickMode === 'center-zoom' ? 'plate-zoom' : 'point';
       void calPointCenter(nx, ny, mode);
       return;
     }

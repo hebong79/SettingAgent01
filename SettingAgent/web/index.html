@@ -206,11 +206,11 @@
                 <p>센터라이징은 번호판 중심을 기준으로 각 주차면의 Pan·Tilt·Zoom을 미세 조정합니다. 완료 결과는 <code>slot_ptz.json</code>과 DB <code>centering_slot</code>에 저장됩니다.</p>
               </div>
               <button id="cal-start" class="primary">센터라이징</button>
-              <label class="field" title="선택 후 라이브뷰에서 차량을 클릭하면 그 번호판으로 센터라이징(저장 안 함)">개별 센터라이징
+              <label class="field" title="선택 후 라이브뷰를 클릭 — center: 클릭 지점을 화면 중앙으로(pan/tilt만, zoom 불변) / center+zoom: 클릭 최근접 번호판 center+zoom. 둘 다 저장 안 함">개별 센터라이징
                 <select id="cal-click-mode">
                   <option value="off" selected>사용 안 함</option>
-                  <option value="center">개별 center</option>
-                  <option value="center-zoom">개별 center+zoom</option>
+                  <option value="center" title="클릭 지점을 화면 중앙으로(pan/tilt만·zoom 불변·검출 없음)">개별 center</option>
+                  <option value="center-zoom" title="클릭 최근접 번호판을 center + zoom">개별 center+zoom</option>
                 </select>
               </label>
               <div class="cap-progress operation-progress centering-progress">

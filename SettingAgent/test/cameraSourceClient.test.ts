@@ -49,4 +49,28 @@ describe('CameraSourceClient', () => {
     const client = new CameraSourceClient(fakeSource({ health: async () => { throw new Error('offline'); } }), DEFAULT_TOOLS_CONFIG.camera);
     expect(await client.health()).toBe(false);
   });
+
+  /**
+   * 능력 협상(설계서 §1-c): centerOnPoint 는 소스가 지원할 때만 프로퍼티로 존재해야 한다.
+   * 무조건 메서드로 두면 미지원 소스(시뮬 RpcCameraSource)까지 "네이티브 지원"으로 보여
+   * PtzCalibrator.aimPointToCenter 의 native/geometric 판정이 무너진다.
+   */
+  it('centerOnPoint 미지원 소스 → 값이 undefined(시뮬 오판 방지, 호출측 truthy 판정 기준)', () => {
+    const client = new CameraSourceClient(fakeSource(), DEFAULT_TOOLS_CONFIG.camera);
+    expect(client.centerOnPoint).toBeUndefined();
+    // ★ 주의(실측 확인): target ES2022 → useDefineForClassFields=true 이므로 `centerOnPoint?: …` 필드 선언이
+    //   생성자 이전에 프로퍼티를 undefined 로 **정의**한다. 즉 `'centerOnPoint' in client` 는 미지원 소스에서도
+    //   true 다. 능력 판정은 반드시 값 truthy(현 구현: PtzCalibrator 의 `const native = this.camera.centerOnPoint`)로
+    //   해야 하며, `in`/Object.keys 로 판정하면 시뮬을 네이티브로 오판한다. 이 계약을 여기서 못 박는다.
+    expect('centerOnPoint' in client).toBe(true);
+    expect(Boolean(client.centerOnPoint)).toBe(false);
+  });
+
+  it('centerOnPoint 지원 소스 → 정규화 지점 그대로 위임(zoom clamp 등 가공 없음)', async () => {
+    const centerOnPoint = vi.fn(async () => ({ pan: 40, tilt: 1, zoom: 1.6934098 }));
+    const client = new CameraSourceClient(fakeSource({ centerOnPoint }), DEFAULT_TOOLS_CONFIG.camera);
+    expect(typeof client.centerOnPoint).toBe('function');
+    await expect(client.centerOnPoint!(2, { x: 0.117, y: 0.69 })).resolves.toEqual({ pan: 40, tilt: 1, zoom: 1.6934098 });
+    expect(centerOnPoint).toHaveBeenCalledWith(2, { x: 0.117, y: 0.69 });
+  });
 });
