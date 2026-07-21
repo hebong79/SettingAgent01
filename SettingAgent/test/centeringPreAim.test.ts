@@ -10,7 +10,7 @@ import type { SlotSetupView, SlotCenteringRow } from '../src/capture/types.js';
 import type { ToolsConfig } from '../src/config/toolsConfig.js';
 import type { NormalizedRect } from '../src/domain/types.js';
 import type { PlatePtz, PlatePtzOpts, PlatePtzResult } from '../src/calibrate/platePtz.js';
-import type { Ptz, SlotPtzArtifact, SlotPtzItem } from '../src/calibrate/types.js';
+import type { Ptz, SlotPtzArtifact } from '../src/calibrate/types.js';
 
 /**
  * 검증자(qa-tester): 정밀수집 센터라이징 pre-aim(anti-latch)·anti-duplication·순서·R2 게이트·R3 스냅샷.
@@ -274,34 +274,32 @@ describe('B-1.4 saveCenteringSlots 게이트(centered-only)', () => {
   });
 });
 
-// ── B-1.5: R3 스냅샷 — done 시 아카이브+최종결과물 2회, error 미호출, 미주입 no-op ──
+// ── B-1.5: R3 최종결과물 — done 시 동일 내용 2벌(이력본+고정본), error 미호출, 미주입 no-op ──
 describe('B-1.5 saveSetupSnapshot(R3)', () => {
   const box: NormalizedRect = { x: 0.62, y: 0.62, w: 0.05, h: 0.03 };
 
-  it('done 경로: saveSnapshot 2회 — Setup_ 아카이브 + setup_result 최종결과물', async () => {
+  it('done 경로: saveSnapshot 2회 — Setup_ 이력본 + setup_result 고정본, 내용 동일', async () => {
     const snap: Array<{ name: string; data: unknown }> = [];
     const saveStore = { saveSnapshot: (name: string, data: unknown) => { snap.push({ name, data }); return name; } };
     const s = captureStub();
     const views = [view(7, box)];
-    const { cal, getSaved } = makeCal({ makePlatePtz: s.make, saveStore, store: storeWith(views) }, views);
+    const { cal } = makeCal({ makePlatePtz: s.make, saveStore, store: storeWith(views) }, views);
     cal.start();
     await waitDone(cal);
     expect(cal.getStatus().state).toBe('done');
-    expect(snap).toHaveLength(2); // ★ 아카이브 1 + 최종결과물 1(잡당 각 1회)
+    expect(snap).toHaveLength(2); // ★ 이력본 1 + 고정본 1(잡당 각 1회)
     expect(snap[0].name).toMatch(/^Setup_\d{8}_\d{6}$/); // Setup_YYYYMMDD_HHMMSS
-    const payload = snap[0].data as { createdAt: string; slots: SlotSetupView[]; centering: SlotPtzItem[] };
-    expect(payload.createdAt).toBe('T'); // now() 주입값
-    expect(payload.slots).toBe(views); // getSlotSetup() 재조회 결과(PTZ 반영 뷰)
-    expect(payload.centering).toBe(getSaved()!.items); // 센터링 상세(items) 그대로
+    expect(snap[1].name).toBe('setup_result'); // 고정 이름
+    expect(snap[0].data).toBe(snap[1].data); // ★ 동일 payload 참조 — 두 벌의 내용이 갈릴 수 없다
 
-    // 최종결과물: 고정 이름 setup_result + 샘플 스키마(slots[])
-    expect(snap[1].name).toBe('setup_result');
-    const result = snap[1].data as { slots: Array<{ slotId: number; floor_roi: unknown; occupy_roi: unknown; centering: unknown }> };
+    // payload = buildSetupResult(getSlotSetup()) 결과(최종결과물 스키마)
+    const result = snap[0].data as { slots: Array<{ slotId: number; floor_roi: unknown; occupy_roi: unknown; centering: unknown }> };
     expect(result.slots).toHaveLength(1);
     expect(result.slots[0].slotId).toBe(7);
+    expect(Object.keys(result.slots[0])).toEqual(['slotId', 'camId', 'presetId', 'presetSlotIdx', 'floor_roi', 'occupy_roi', 'centering']);
   });
 
-  it('아카이브 저장이 실패해도 setup_result 는 기록(각자 best-effort·독립)', async () => {
+  it('이력본 저장이 실패해도 setup_result 는 기록(각자 best-effort·독립)', async () => {
     const names: string[] = [];
     const saveStore = {
       saveSnapshot: (name: string) => {

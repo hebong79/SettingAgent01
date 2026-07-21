@@ -84,8 +84,8 @@ export interface PtzCalibratorDeps {
   /** slot_ptz.json writer 주입(테스트는 캡처 stub). 기본=writeSlotPtz. */
   writer?: (artifact: ReturnType<typeof buildSlotPtzJson>, outFile: string) => void;
   /**
-   * 최종 셋업 스냅샷 writer(옵셔널·가산). 미주입 시 스냅샷 no-op(수동 흐름/테스트 회귀 0).
-   * 잡 done 경로에서 아카이브(save/Setup_*.json)와 최종결과물(save/setup_result.json)을 각 1회 기록한다.
+   * 최종 결과물 writer(옵셔널·가산). 미주입 시 기록 no-op(수동 흐름/테스트 회귀 0).
+   * 잡 done 경로에서 동일 내용을 이력본(save/Setup_*.json)과 고정본(save/setup_result.json)으로 각 1회 기록한다.
    */
   saveStore?: Pick<SaveStore, 'saveSnapshot'>;
   sleep?: (ms: number) => Promise<void>;
@@ -343,7 +343,7 @@ export class PtzCalibrator {
       }
       this.writer(buildSlotPtzJson(items, this.now()), this.cfg.outFile);
       this.saveCenteringSlots(items); // DB UPDATE 먼저 — 아래 스냅샷이 PTZ 반영된 최신 slot_setup 을 읽도록.
-      this.saveSetupSnapshot(items); // done 경로에서만 best-effort 스냅샷 1회(error 경로는 미기록 — 부분·불신).
+      this.saveSetupSnapshot(); // done 경로에서만 best-effort 기록(error 경로는 미기록 — 부분·불신).
       this.current = undefined;
       this.endedAt = this.now();
       this.state = 'done';
@@ -357,28 +357,23 @@ export class PtzCalibrator {
   }
 
   /**
-   * 최종 셋업 스냅샷 기록(옵셔널·best-effort). done 경로에서만 호출. 산출물 2종:
-   *   1) save/Setup_YYYYMMDD_HHMMSS.json — 시각 아카이브(원시 뷰 + 센터링 상세)
-   *   2) save/setup_result.json — 최종 결과물(소비측 계약 스키마, 고정 이름·덮어쓰기)
-   * payload = 완전한 최종 결과: 기하+LPD+점유+PTZ 반영된 slot_setup 뷰(정본) + 센터링 상세(converged/reason).
+   * 최종 결과물 기록(옵셔널·best-effort). done 경로에서만 호출. **동일 내용 2벌**:
+   *   1) save/Setup_YYYYMMDD_HHMMSS.json — 타임스탬프 이력본(덮어쓰기 없음)
+   *   2) save/setup_result.json — 소비측이 읽는 고정 경로(매 실행 덮어쓰기)
+   * payload = buildSetupResult(slot_setup 정본): 기하+점유+PTZ 반영된 최종 슬롯 목록.
    * saveCenteringSlots(DB UPDATE) 이후 getSlotSetup() 을 재조회하므로 PTZ 반영된 최신 뷰를 담는다.
-   * saveStore 미주입·기록 실패는 격리(잡·JSON 정본 무영향).
+   * saveStore 미주입·기록 실패는 격리(잡·JSON 정본 무영향). 두 기록은 각자 best-effort(한쪽 실패가 다른쪽을 막지 않음).
    */
-  private saveSetupSnapshot(items: SlotPtzItem[]): void {
+  private saveSetupSnapshot(): void {
     if (!this.saveStore) return;
-    const slots = this.store.getSlotSetup(); // 1회 조회 → 아카이브·최종결과물 공용(같은 시점 뷰 보장).
+    const result = buildSetupResult(this.store.getSlotSetup()); // 1회 변환 → 2벌 동일 내용 보장.
     try {
-      this.saveStore.saveSnapshot(setupSaveName(new Date()), {
-        createdAt: this.now(),
-        slots,
-        centering: items,
-      });
+      this.saveStore.saveSnapshot(setupSaveName(new Date()), result);
     } catch (e) {
-      logger.warn({ err: e }, 'Setup 스냅샷 저장 실패(격리 — slot_ptz.json·DB 는 정상)');
+      logger.warn({ err: e }, 'Setup_* 이력본 저장 실패(격리 — slot_ptz.json·DB 는 정상)');
     }
-    // 최종 결과물 save/setup_result.json(고정 이름·덮어쓰기). 아카이브 실패와 독립(각자 best-effort).
     try {
-      this.saveStore.saveSnapshot(SETUP_RESULT_NAME, buildSetupResult(slots));
+      this.saveStore.saveSnapshot(SETUP_RESULT_NAME, result);
     } catch (e) {
       logger.warn({ err: e }, 'setup_result.json 저장 실패(격리 — slot_ptz.json·DB 는 정상)');
     }

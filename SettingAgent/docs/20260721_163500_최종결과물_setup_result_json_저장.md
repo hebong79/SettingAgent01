@@ -42,36 +42,48 @@
 
 ### 수정 `src/calibrate/PtzCalibrator.ts` — `saveSetupSnapshot()`
 
-센터라이징 잡 **done 경로**의 최종 저장 지점에 산출물 1종을 가산했다.
+센터라이징 잡 **done 경로**에서 최종결과물을 **동일 내용 2벌**로 기록한다.
 
 ```ts
-const slots = this.store.getSlotSetup();       // 1회 조회 → 아카이브·최종결과물 공용(동일 시점 뷰 보장)
-try { this.saveStore.saveSnapshot(setupSaveName(new Date()), { createdAt, slots, centering: items }); } catch { warn }
-try { this.saveStore.saveSnapshot(SETUP_RESULT_NAME, buildSetupResult(slots)); } catch { warn }   // ★ 신규
+const result = buildSetupResult(this.store.getSlotSetup());   // 1회 변환 → 2벌 동일 내용 보장
+try { this.saveStore.saveSnapshot(setupSaveName(new Date()), result); } catch { warn }  // 이력본 Setup_YYYYMMDD_HHMMSS.json
+try { this.saveStore.saveSnapshot(SETUP_RESULT_NAME, result); } catch { warn }          // 고정본 setup_result.json
 ```
 
-- 두 저장은 **각자 best-effort**(try 분리) — 아카이브 실패가 최종결과물 기록을 막지 않는다.
+| 파일 | 성격 |
+|---|---|
+| `save/Setup_YYYYMMDD_HHMMSS.json` | **이력본** — 실행마다 새 파일, 덮어쓰기 없음 |
+| `save/setup_result.json` | **고정본** — 소비측이 읽는 고정 경로, 매 실행 덮어쓰기 |
+
+- 두 기록은 **각자 best-effort**(try 분리) — 한쪽 실패가 다른쪽을 막지 않는다.
+- 동일 `result` 객체를 두 번 쓰므로 두 벌의 내용이 갈릴 수 없다(테스트에서 참조 동일성으로 고정).
 - 기존 불변식 유지: `error` 경로는 미기록(부분·불신), `saveStore` 미주입 시 no-op, 기록 실패는 격리되어 잡은 `done`.
 - 저장 순서: DB UPDATE(`saveCenteringSlots`) → `getSlotSetup()` 재조회 → 기록. 즉 **PTZ 가 반영된 최신 뷰**가 담긴다.
 
-저장 산출물은 이제 4종: `data/slot_ptz.json`(정본) · DB `slot_setup` · `save/Setup_*.json`(아카이브) · **`save/setup_result.json`(최종결과물)**.
+**★ 이전 동작에서 바뀐 점:** `Setup_*.json` 의 내용이 기존 `{createdAt, slots(원시 slot_setup 뷰), centering(센터링 상세 items)}` 에서
+최종결과물 스키마(`{slots:[...]}`)로 **교체**되었다. 이력본을 그대로 갖다 쓸 수 있게 하기 위함이며,
+센터링 상세(`converged`/`reason`/`iterations`)는 정본 `data/slot_ptz.json` 에 그대로 남는다.
+
+저장 산출물은 4종: `data/slot_ptz.json`(센터링 정본) · DB `slot_setup` · `save/Setup_*.json`(이력본) · `save/setup_result.json`(고정본).
 
 ## 3. 검증
 
 - 신규 `test/setupResult.test.ts` 7건 — 샘플 파일과 키 집합 교차 비교, `centering`/`occupy_roi` null 규칙, 부분 PTZ 방출 금지, 순서 보존, 빈 입력, 파일명 안전화 통과.
-- `test/centeringPreAim.test.ts` B-1.5 갱신 — done 시 `saveSnapshot` **2회**(아카이브 + `setup_result`), 아카이브 실패해도 `setup_result` 기록됨을 추가 검증.
-- 회귀: `ptzCalibrator{,.point,AimPoint,Ladder}` · `saveStore` · `setupPipeline` 포함 **101 tests 통과**, `tsc --noEmit` 클린.
-- 실 파일 기록 확인(E2E): `SaveStore` 로 실제 기록 → `save/setup_result.json` 이 샘플과 동일한 구조로 생성되고, `stringify5` 규약대로 소수점 5자리로 반올림됨(`0.0298512345` → `0.02985`)을 확인.
+- `test/centeringPreAim.test.ts` B-1.5 갱신 — done 시 `saveSnapshot` **2회**(`Setup_*` 이력본 + `setup_result` 고정본), 두 payload 참조 동일(내용 분기 불가), 슬롯 키 순서, 이력본 실패해도 고정본 기록됨.
+- 회귀: `ptzCalibrator{,.point,AimPoint,Ladder}` · `saveStore` · `setupPipeline` 포함 **123 tests 통과**, `tsc --noEmit` 클린.
+- 실 파일 기록 확인(E2E): `SaveStore` 로 실제 기록 → `Setup_20260721_170245.json` 과 `setup_result.json` 두 파일 생성, **바이트 단위 동일**, 샘플과 같은 구조, `stringify5` 규약대로 소수점 5자리 반올림(`0.0298512345` → `0.02985`).
 
 ## 4. 영향도 분석
 
 | 대상 | 영향 |
 |---|---|
-| `PtzCalibrator` | 저장 단계에 쓰기 1건 가산. 상태머신·제어루프·기존 산출물 로직 불변 |
+| `PtzCalibrator` | 저장 단계에 쓰기 1건 가산 + 기존 `Setup_*.json` **payload 스키마 교체**. 상태머신·제어루프·`slot_ptz.json`/DB 로직 불변 |
 | `SaveStore` | **무변경**(기존 `saveSnapshot` 재사용) |
 | DB / `slot_ptz.json` | **무변경** — 소스로만 읽음 |
 | REST 라우트 / 뷰어 | **무변경**. `GET /capture/saves` 목록에 `setup_result` 항목이 추가로 노출됨(이름 고정이라 매 실행 덮어쓰기, 목록 증가 없음) |
 | `reports/` 미러 | `SaveStore` 에 `reportsDir` 가 주입돼 있으면 `reports/setup_result.json` 에도 동일 JSON 이 미러됨(기존 규약) |
 | 수동 저장(`POST /capture/save`) | **무변경** — 이번 변경은 센터라이징 done 경로 자동 저장에만 적용 |
 
-주의: `save/setup_result.json` 은 고정 이름이라 **센터라이징 잡이 done 될 때마다 덮어쓰인다.** 이력이 필요하면 기존 `Setup_YYYYMMDD_HHMMSS.json` 아카이브를 사용한다.
+주의:
+- `save/setup_result.json` 은 고정 이름이라 **센터라이징 잡이 done 될 때마다 덮어쓰인다.** 이력은 같은 내용의 `Setup_YYYYMMDD_HHMMSS.json` 에 실행마다 쌓인다.
+- `Setup_*.json` 을 기존 payload(`createdAt`/`centering` 키)로 파싱하던 외부 소비자가 있다면 스키마 교체의 영향을 받는다. 코드베이스 내에는 해당 소비자가 없다(뷰어 "열기"는 `SetupArtifact` 형만 다루며 `Setup_*.json` 은 이전에도 그 형이 아니었다).
