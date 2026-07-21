@@ -22,7 +22,7 @@ import type { ToolsConfig } from '../src/config/toolsConfig.js';
 const captureCfg: ToolsConfig['capture'] = {
   defaultCount: 50, intervalMs: 1000, moveIntervalMs: 1000, checkpointEvery: 10,
   checkpointTriggerMode: 'rounds', checkpointIntervalMs: 60000, dbFile: ':memory:',
-  clusterDist: 0.06, clusterMinSupport: 3, minConfidence: 0.5, moveBeforeCapture: true,
+  clusterDist: 0.06, clusterMinSupport: 3, minConfidence: 0.5, slotAssignGate: 0.12, moveBeforeCapture: true,
 };
 const setupCfg = {
   presetSettleMs: 0, betweenPresetMs: 0, minConfidence: 0.5, roiPadding: 0, yBandTolerance: 0.1,
@@ -46,7 +46,7 @@ function makeServer(opts: { placeRoiFile?: string; cameraposFile?: string; groun
   const store = new SqliteStore(':memory:');
   const queue: Array<() => void> = [];
   const job = new CaptureJob({
-    camera: fakeCamera(), vpd: fakeVpd(), store, cfg: captureCfg, lpdEnabled: false,
+    camera: fakeCamera(), vpd: fakeVpd(), cfg: captureCfg, lpdEnabled: false,
     setTimer: (fn) => { queue.push(fn); return queue as unknown as NodeJS.Timeout; },
     clearTimer: () => {}, sleep: async () => {}, now: () => 'T',
   });

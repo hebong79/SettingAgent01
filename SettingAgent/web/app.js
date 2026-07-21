@@ -7,6 +7,7 @@ import {
   slotLabel,
   clampZoom,
   stepPtz,
+  resolveAbsPtz, // 절대이동 입력 → PTZ(빈 칸=현재값 유지, 순수).
   createStreamLoop,
   moveRenderDirective, // 이동 시 렌더 경로 결정(순수). 루프3: stream=재연결 / poll·off=tick.
   captureProgress,
@@ -16,6 +17,7 @@ import {
   mapAdvisory,
   pollPlan,
   captureUiState, // 상태→버튼/안내 UI 의도(순수, 백엔드 거부조건 대칭).
+  discoverView, // /discover/status → 진행바·라벨·버튼disable·프레임폴 여부(순수, calPoll 미러).
   capFrameKey,
   clampPanelWidth,
   analyzeArtifact,
@@ -43,7 +45,6 @@ import {
   occupancyAverage, // 전체 평균 점유율(순수)
   normalizePtzCamRoi, // PtzCamRoi.json raw → 프리셋별 정규화 폴리곤 + 검수(순수)
   selectFloorRoi, // 바닥 ROI 소스 선택(LLM/파일 토글, 순수)
-  computeOccupancy, // 로직 점유 판정(파일 바닥ROI × LPD 번호판 중심, 순수, R4/R5)
   buildFlatSlotRows, // 전체 주차면 평면 목록(전역 인덱스 오름차순, 순수, R2)
   normalizeGlobalIdx, // 전역 인덱스 정규화·재부여(순수, R3)
   reindexPlaceSpace, // 전역 인덱스 재지정(밀어내기, 순수, R4)
@@ -57,17 +58,26 @@ import {
   nextPresetId, // 해당 카메라의 다음 presetIdx(순수)
   hitTestDetections, // [기능2] 검출 박스 히트테스트(순수)
   removeDetection, // [기능2] 검출 박스 삭제(순수, 불변)
+  dedupeVehicles, // VPD 차량 중복 제거(IoU 연결요소, 차량당 1개=마지막 검지, 순수)
   transformPlaceRoiPreset, // [기능3] 프리셋 주차면 폴리곤 변환(순수, applyTranslateScale 내부 사용)
   projectCuboid, // 바닥 quad + 지면모델 + 높이 → 육면체 8점·12모서리(순수, 투영만)
+  frontFaceCenter, // 육면체 앞면(근접면) 중심점(정규화, 순수) — 2D 위치표시 원
   formatGroundBadge, // 지면모델 소스 배지 문자열(순수)
   groundModelsByKey, // ground-model 응답 models[] → cam:preset 맵(순수)
 } from './core.js';
+import { OccupancyJudge } from './occupancy.js'; // 번호판 우선·bbox 폴백 점유 판정(순수 컴포넌트).
+import { computeOccupancyRegions } from './occupancyRegion.js'; // 번호판 기준 점유영역 사다리꼴(겹침 회피 자동 배율, 순수).
+
+const occupancyJudge = new OccupancyJudge(); // 임계값 기본(groundBandRatio=0.25, minBandOverlap=0.15). 매 프레임 재사용.
 
 const $ = (id) => document.getElementById(id);
 const api = (path) => `/viewer/api${path}`;
 
 const state = {
   source: '',
+  sourceDetails: {}, // source id → { kind, streamTransport }. 실카메라 RTSP 재생과 시뮬레이터 PTZ 렌더 분기 근거.
+  ptzBusy: false, // 실카메라를 포함한 PTZ 명령 직렬화. 연속 클릭으로 장비에 명령이 누적되지 않게 한다.
+  ptzStateReady: true, // 실카메라는 장비에서 현재 PTZ를 읽은 뒤에만 상대 이동을 허용한다.
   cam: 1,
   preset: 1,
   ptz: { pan: 0, tilt: 0, zoom: 1 }, // 현재 카메라 위치(명령 기준: 프리셋 이동·PTZ 제어로 갱신)
@@ -89,9 +99,10 @@ const state = {
   selectedPlaceIdx: null, // 선택된 주차면 전역 인덱스(PtzCamRoi, 없으면 null).
   placeRoiDirty: false, // 주차면 전역번호/삭제 편집 미저장 여부('저장'으로 확정).
   detectByKey: {}, // cam:preset → 라이브 VPD/LPD 검출({vehicles,plates}). 프리셋별 보존(전환 시 유지, POST /capture/detect). drawDetectOverlay 근거.
+  discoverByKey: {}, // cam:preset → discovery(앞면중심 LOOP) 결과 LPD OBB quad[](GET /discover/result found 분). 매 완료 시 대체. drawDetectOverlay 근거.
   selectedDetect: null, // [기능2] 선택된 검출 박스 { kind:'vehicle'|'plate', index } | null(임시 편집·메모리만).
   placeRoiBackup: null, // [기능3] 자동보정 직전 스냅샷 { key, spaces }(되돌리기용).
-  parkingSlotsByKey: null, // 최종화 후 DB parking_slots(cam:preset → 행배열, GET /capture/runs/:id/slots). renderSlotList 소스(§06 H7).
+  parkingSlotsByKey: null, // 최종화 후 slot_setup(cam:preset → 행배열, GET /capture/slots). renderSlotList 소스(§06 H7).
   dbTablesLoaded: false, // DB 탭 콤보 1회 채움 가드.
   dbTable: '', // 현재 선택된 DB 테이블명.
   dbSearch: '', // DB 뷰어 검색어(전 컬럼 LIKE).
@@ -99,6 +110,9 @@ const state = {
   dbTotal: 0, // 최근 조회 total(prev/next 활성화 판정).
   groundByKey: {}, // cam:preset → 지면모델(GET /capture/ground-model). 육면체 투영의 유일한 근거(추정은 서버 소유).
   groundLoaded: false, // 지면모델 1회 로드 가드(실패해도 세션 1회).
+  vcuboidByKey: {}, // cam:preset → 차량 육면체(정밀수집 job-cuboids / 검출 응답 인라인 / 수동 라이브 촬영).
+  vcuboidLoading: new Set(), // 중복 요청 가드(프리셋 키 단위).
+  vcuboidRound: {}, // cam:preset → 마지막으로 받아온 잡 라운드. status 인덱스가 바뀔 때만 전문을 재요청(폴링 비용 0).
 };
 
 const DB_LIMIT = 200; // DB 뷰어 페이지 크기(서버 clamp 상한 1000 내).
@@ -108,12 +122,31 @@ const HANDLE_PX = 8; // 핸들 사각형 반경(px).
 // { kind:'floorVertex', index, ... } | { kind:'vpdResize', handle, ... } | { kind:'vpdMove', ... } | null
 let dragState = null;
 
-/** 화면에 그려진 주차면 ROI·선택 표시를 초기화(데이터는 보존 — 표시만 끔). */
+/** 슬롯 ROI·선택 표시만 숨김(데이터 보존). 수집 시작(capStart) 전용 — 검출/점유/육면체 등 라이브 레이어는 유지한다. */
 function clearRoiDisplay() {
   state.roiHidden = true;
   state.selectedSlotId = null;
   drawRoiOverlay();
   renderSelectionInfo();
+}
+
+/**
+ * [표시 초기화 버튼] 바닥 ROI(파일 기반 state.placeRoi)만 남기고 나머지 오버레이 **데이터를 삭제**한다.
+ * Hide(토글 off)가 아니라 실제 삭제 — 재토글로도 복원되지 않는다(다음 검출/수집 때 새로 채워짐).
+ * 바닥은 파일 소스(placeRoi)와 #roi-floor 토글을 건드리지 않아 그대로 표시된다.
+ */
+function resetOverlayDisplay() {
+  state.detectByKey = {};        // 검출 차량/번호판 삭제.
+  state.occComputeByKey = {};    // 로직 점유(원) 삭제.
+  state.occByKey = {};           // 점유율 요약 삭제.
+  state.vcuboidByKey = {};       // 차량 육면체 + seg 마스크 삭제.
+  state.selectedSlotId = null;   // 슬롯 선택 해제.
+  state.selectedPlaceIdx = null; // 바닥 선택 하이라이트 해제.
+  state.selectedDetect = null;   // [기능2] 검출 박스 선택 해제.
+  renderDetectSelection();       // #det-delete 버튼 비활성 동기화.
+  drawRoiOverlay();
+  renderSelectionInfo();
+  renderSlotList();              // 목록(검출 count·점유) 삭제 반영.
 }
 
 const frame = $('frame');
@@ -165,9 +198,9 @@ const CONN_POLL_MS = 4000;
 let simConnected = null; // null=미상 | true | false
 let connInflight = false; // 폴 중복 방지 가드
 
-/** 정밀수집(캡처 프레임 폴) 진행 중이면 연결 폴을 건너뛴다(뱃지는 마지막 상태 유지). */
+/** 정밀수집·센터라이징(프레임 폴) 진행 중이면 연결 폴을 건너뛴다(뱃지는 마지막 상태 유지). */
 function captureActive() {
-  return capFrameTimer !== null;
+  return capFrameTimer !== null || calFrameTimer !== null;
 }
 
 async function connectionTick() {
@@ -232,11 +265,68 @@ function syncPtzFromPreset() {
   }
 }
 
+function selectedSourceIsReal() {
+  return state.sourceDetails[state.source]?.kind === 'hucoms';
+}
+
+/** 선택 소스별 PTZ 제어 대상·로그인·상태 조회 UI를 동기화한다. */
+function updatePtzControlUi() {
+  const real = selectedSourceIsReal();
+  state.ptzStateReady = !real;
+  $('ptz-control-mode').textContent = real ? '실카메라 · Hucoms PTZF' : '시뮬레이터 · Unity PTZ';
+  $('ptz-control-mode').classList.toggle('real', real);
+  $('ptz-control-note').textContent = real
+    ? 'RTSP 영상과 별개로 Hucoms HTTP PTZF 명령으로 Pan·Tilt·Zoom을 제어합니다.'
+    : 'Unity cam.getPTZ로 현재 위치를 읽고 Unity PTZ를 제어합니다.';
+  $('btn-ptz-refresh').hidden = false;
+  $('login-box').hidden = !real;
+  $('ptz-control-status').textContent = real ? '실카메라 현재 PTZ를 불러오거나 로그인해 주세요.' : '';
+  updatePtzControlEnabled();
+}
+
+function updatePtzControlEnabled() {
+  const canMove = !state.ptzBusy && (!selectedSourceIsReal() || state.ptzStateReady);
+  document.querySelectorAll('[data-dir], #btn-abs').forEach((button) => { button.disabled = !canMove; });
+  $('btn-ptz-refresh').disabled = state.ptzBusy;
+}
+
+function setPtzBusy(busy) {
+  state.ptzBusy = busy;
+  updatePtzControlEnabled();
+}
+
+/** 선택한 실카메라·시뮬레이터가 보고하는 현재 PTZ를 UI에 동기화한다. */
+async function refreshCurrentPtz({ quiet = false } = {}) {
+  const real = selectedSourceIsReal();
+  const sourceName = real ? '실카메라' : '시뮬레이터';
+  try {
+    const p = new URLSearchParams({ source: state.source, cam: state.cam });
+    const res = await fetch(api(`/ptz?${p.toString()}`), { cache: 'no-store' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ptz) throw new Error(data.error ?? `HTTP ${res.status}`);
+    state.ptz = data.ptz;
+    state.ptzStateReady = true;
+    updatePtzControlEnabled();
+    updatePtzDisplay();
+    if (!quiet) $('ptz-control-status').textContent = `${sourceName} 현재 PTZ를 불러왔습니다.`;
+    return true;
+  } catch (err) {
+    // 실카메라는 이전 시뮬레이터 상태로 움직이면 안 되므로 조회 실패 시 이동을 잠근다. 시뮬레이터는 기존 제어를 유지한다.
+    state.ptzStateReady = !real;
+    updatePtzControlEnabled();
+    $('ptz-control-status').textContent = `${sourceName} PTZ 조회 실패: ${err instanceof Error ? err.message : err}`;
+    return false;
+  }
+}
+
 async function loadSources() {
-  // health 응답의 sources 목록으로 소스 셀렉트 구성.
+  // health 응답의 sources/sourceDetails로 소스 셀렉트와 스트림 전송방식을 함께 구성.
   try {
     const res = await fetch(api('/health'), { cache: 'no-store' });
     const data = res.ok ? await res.json() : { sources: [] };
+    state.sourceDetails = Object.fromEntries(
+      (data.sourceDetails ?? []).map((detail) => [detail.id, detail]),
+    );
     const sel = $('sel-source');
     sel.innerHTML = '';
     for (const id of data.sources ?? []) {
@@ -247,7 +337,9 @@ async function loadSources() {
     }
     if ((data.sources ?? []).length) {
       state.source = data.sources[0];
+      state.isHucoms = state.sourceDetails[state.source]?.kind === 'hucoms';
       sel.value = state.source;
+      updatePtzControlUi();
     }
   } catch {
     /* ignore */
@@ -265,7 +357,11 @@ function drawRoiOverlay() {
   drawFileFloorRoi(ctx); // 파일 기반 바닥 ROI(PtzCamRoi.json) — 파일 모드 바닥 레이어 → mapping 가드 이전.
   drawDetectOverlay(ctx); // 라이브 VPD/LPD 검출 오버레이(§04) — 수집 중/미최종화에도 표시 → mapping 가드 이전.
   drawCuboidOverlay(ctx); // 3D 육면체(가산 레이어) — 산출물 없이도(수집 중/파일 모드) 그린다 → mapping 가드 이전.
+  drawVehicleCuboidOverlay(ctx); // 차량 3D 육면체(det 권위 + seg 마스크 접지선) — 토글 off 면 기존 렌더와 픽셀 동일.
+  drawMaskOverlay(ctx); // VPD seg 마스크 반투명 오버레이(#roi-mask, 기본 off) — 지면 가드 이전(수집 중에도 표시).
   updateGroundBadge(); // 어느 지면모델이 표시 중인지 항상 안다(소스 배지).
+  updateAnchorBadge(); // 2 DOF 앵커 지표(차량 접지선 vs 슬롯 격자).
+  updateVehicleCuboidBadge(); // ⚠️ 화면이 거짓말하지 않게 — "미검증 추정" + 정합 요약을 **항상** 드러낸다.
   if (state.roiHidden || !state.mapping) return; // 초기화/수집 중엔 ROI(차량/번호판/바닥) 표시 안 함.
   const key = presetKey(state.cam, state.preset);
   const showVehicle = $('roi-vehicle').checked;
@@ -335,11 +431,30 @@ function updateLogicOccupancy() {
   }));
   if (!floorPolys.length) return;
   const detect = state.detectByKey[key]; // 프리셋 키로 조회 → 항상 그 프리셋 검출(일치 판정 불요).
-  const plates = [...(detect?.plates ?? []), ...(detect?.vehicles ?? []).map((v) => v.plate).filter(Boolean)];
+  // OccupancyJudge: 1단계 차량 접지밴드 argmax 귀속 → 2단계 비점유 슬롯 번호판 폴백. 후보 조립은 judge 내부.
+  const rows = occupancyJudge.judge(floorPolys, detect);
+  // 점유영역 사다리꼴: plate 점유분만 모집단(bbox 폴백은 축 소스가 없어 미생성 — 기존 주황 원 유지).
+  const region = computeOccupancyRegions(
+    rows.filter((o) => o.source === 'plate' && o.plateQuad).map((o) => ({ idx: o.idx, quad: o.plateQuad })),
+  );
+  if (region.overlapPairs.length && !occRegionOverlapWarned.has(key)) {
+    occRegionOverlapWarned.add(key);
+    console.warn(`[OccupancyRegion] ${key} 겹침 잔존:`, region.overlapPairs);
+  }
+  const polyByIdx = new Map(region.regions.map((g) => [g.idx, g.polygon]));
   state.occComputeByKey[key] = {
-    spaces: computeOccupancy(floorPolys, plates).map((o) => ({ id: o.idx, occupied: o.occupied, center: o.center })),
+    spaces: rows.map((o) => ({
+      id: o.idx,
+      occupied: o.occupied,
+      source: o.source,
+      center: o.center,
+      vehicleRect: o.vehicleRect,
+      region: polyByIdx.get(o.idx),
+    })),
   };
 }
+
+const occRegionOverlapWarned = new Set(); // 점유영역 겹침 잔존 프리셋별 console.warn 1회 가드(렌더 스팸 방지).
 
 /**
  * 점유율 오버레이(R5: LPD 번호판 중심 = 점유 판정 근거, 작은 원으로 표시). 로직 점유(state.occComputeByKey)
@@ -349,9 +464,55 @@ function updateLogicOccupancy() {
  */
 function drawOccupancyOverlay(ctx) {
   if (!$('roi-occupancy').checked) return;
-  const occ = state.occComputeByKey[currentFrameKey()];
+  const key = currentFrameKey();
+  const occ = state.occComputeByKey[key];
+  const hasLive = (occ?.spaces ?? []).length > 0; // 라이브 로직 점유 유무 판단.
+  if (!hasLive) {
+    // 라이브 점유 없음 → DB(slot_setup) occupyRange 폴백. 'DB 보기'(#roi-db) 체크 시에만. 이중 렌더 회피.
+    if ($('roi-db').checked) {
+      for (const row of state.parkingSlotsByKey?.[key] ?? []) {
+        if (!row.occupyRange) continue;
+        const pts = toPixelQuad(row.occupyRange, overlay.width, overlay.height);
+        ctx.beginPath();
+        pts.forEach((p, i) => (i ? ctx.lineTo(p.px, p.py) : ctx.moveTo(p.px, p.py)));
+        ctx.closePath();
+        ctx.fillStyle = 'rgba(255, 77, 77, 0.18)';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(255, 77, 77, 0.9)';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+    }
+    return;
+  }
+  // 점유영역 사다리꼴 먼저(면 레이어) → 아래 원/라벨이 그 위에 남는다.
   for (const sp of occ?.spaces ?? []) {
-    if (!sp.occupied || !sp.center) continue; // 점유+중심 보유분만 원 표시(R5).
+    if (!sp.occupied || !sp.region) continue;
+    const pts = toPixelQuad(sp.region, overlay.width, overlay.height); // 클램프 후 3~8각형.
+    ctx.beginPath();
+    pts.forEach((p, i) => (i ? ctx.lineTo(p.px, p.py) : ctx.moveTo(p.px, p.py)));
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(255, 77, 77, 0.18)'; // 점유=빨강 계열 반투명 채움(중심 원과 동색).
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255, 77, 77, 0.9)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+  for (const sp of occ?.spaces ?? []) {
+    if (!sp.occupied) continue;
+    if (sp.source === 'bbox' && sp.vehicleRect) {
+      // 점유·번호 미인식(bbox 폴백): 차량 bbox 하단 중심(접지 근사)에 주황 원 + '번호미인식' 배지.
+      const r = sp.vehicleRect;
+      const bx = (r.x + r.w / 2) * overlay.width;
+      const by = (r.y + r.h) * overlay.height;
+      ctx.beginPath();
+      ctx.arc(bx, by, 5, 0, Math.PI * 2);
+      ctx.fillStyle = '#ff9f1a'; // 점유·번호미인식=주황 소원(bbox 근거).
+      ctx.fill();
+      ctx.fillText(`${sp.id} 번호미인식`, bx + 7, by + 4);
+      continue;
+    }
+    if (!sp.center) continue; // 번호판 점유+중심 보유분만 원 표시(R5, 기존과 동일).
     const px = sp.center.x * overlay.width;
     const py = sp.center.y * overlay.height;
     ctx.beginPath();
@@ -437,11 +598,237 @@ function drawCuboidOverlay(ctx) {
       ctx.lineTo(pts[b].px, pts[b].py);
     }
     ctx.stroke();
+    // 앞면 중심점(위치표시 원). 라이브 슬라이더 높이(cuboidHeight)로 그려진 육면체와 함께 이동.
+    const fc = frontFaceCenter(cub);
+    if (fc && Number.isFinite(fc.x) && Number.isFinite(fc.y)) {
+      const cxp = fc.x * overlay.width;
+      const cyp = fc.y * overlay.height;
+      ctx.beginPath();
+      ctx.arc(cxp, cyp, 4, 0, Math.PI * 2);
+      ctx.fillStyle = selected ? '#ff4d4d' : '#b47cff'; // 육면체 보라 채움.
+      ctx.fill();
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = '#ffffff'; // 흰 테두리로 보라 모서리선과 구분.
+      ctx.stroke();
+    }
   }
   ctx.restore();
   if (skipped && !cuboidWarned.has(key)) {
     cuboidWarned.add(key);
     console.warn(`[Cuboid] ${key}: ${skipped}개 면이 퇴화(지평선 위/모델 부적합) — 육면체 미표시`);
+  }
+}
+
+// --- 차량 3D 육면체(VPD seg 접지선) + 2 DOF 앵커 --------------------------
+/**
+ * 차량 육면체 오버레이 — **가산 레이어**(#roi-vcuboid off 면 기존 렌더와 픽셀 동일).
+ * 바닥 quad·높이는 **서버**가 산출한다(`buildFrameCuboids` — det 권위 + seg 마스크 정합).
+ * 뷰어는 기존 projectCuboid 로 **투영만** 한다(뷰어 수학 신규 0줄 — 주차면 육면체와 같은 함수).
+ *
+ * 데이터 출처 3종(전부 **같은 서버 함수**의 산출물 — "두 개의 진실" 없음):
+ *   · 정밀수집 중 → `GET /capture/job-cuboids`(status 인덱스의 round 가 바뀔 때만. 카메라 호출 0)
+ *   · 검출 실행   → `POST /capture/detect` 응답 **인라인**(추가 왕복 0)
+ *   · 수동 토글   → `GET /capture/vehicle-cuboids`(라이브 촬영 1회 — 잡이 안 돌 때만 쓴다)
+ *
+ * ⚠️ 그려지는 상자는 **미검증 추정**이다 — `#vcuboid-badge` tooltip 참조. 미정합 차량은 **안 그린다**(빈 자리).
+ */
+function drawVehicleCuboidOverlay(ctx) {
+  if (!$('roi-vcuboid').checked) return;
+  const key = currentFrameKey();
+  const ground = state.groundByKey[key];
+  const data = state.vcuboidByKey[key];
+  if (!ground || !data) return; // 모델/데이터 없음 → 미표시.
+  ctx.save();
+  for (const c of data.cuboids ?? []) {
+    const cub = projectCuboid(c.floorQuad, ground, c.heightM);
+    if (!cub) continue; // 퇴화 → 이 차량만 skip.
+    const pts = toPixelQuad(cub.corners, overlay.width, overlay.height);
+    // 폭(W) prior 강등분은 점선으로 구분 — "무엇이 관측이고 무엇이 prior 인지" 화면에서 보이게.
+    // ⚠️ H 는 **항상 prior** 이므로(차 ≠ 직육면체, 관측 불가) 구분 기준이 될 수 없다 — W 만 본다.
+    const degraded = c.source?.W === 'prior';
+    ctx.setLineDash(degraded ? [5, 4] : []);
+    ctx.strokeStyle = '#ff9f0a'; // 차량 육면체=주황(주차면 육면체 보라·바닥 초록과 구분).
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (const [a, b] of cub.edges) {
+      ctx.moveTo(pts[a].px, pts[a].py);
+      ctx.lineTo(pts[b].px, pts[b].py);
+    }
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// 마스크 인스턴스별 구분색(팔레트 순환). 인접 차량 마스크가 겹쳐도 색으로 분리되게(같은 보라 뭉침 방지).
+const MASK_PALETTE = [
+  [175, 82, 222], [255, 159, 10], [48, 209, 88], [10, 132, 255],
+  [255, 55, 95], [90, 200, 250], [255, 214, 10], [191, 90, 242],
+];
+
+/**
+ * VPD seg 마스크 반투명 오버레이(#roi-mask, 기본 off). 육면체와 동일 소스(state.vcuboidByKey)에서 masks 를 읽는다.
+ * "seg 가 무엇을 봤나" 육안 검증용 — 정합/필터 무관, seg 마스크 유효분 전량 표시. 지면모델 미배선/강등 → masks 부재 → 조용히 skip.
+ * 마스크마다 팔레트 색을 순환 적용 — 인접 인스턴스가 겹쳐도 색으로 구분된다.
+ */
+function drawMaskOverlay(ctx) {
+  if (!$('roi-mask').checked) return;
+  const data = state.vcuboidByKey[currentFrameKey()]; // 육면체와 동일 소스(masks 동승).
+  const masks = data?.masks;
+  if (!masks || !masks.length) return; // 지면모델 미배선/강등 → 미표시(사유는 issues 에).
+  ctx.save();
+  masks.forEach((poly, i) => {
+    if (!poly || poly.length < 3) return;
+    const pts = toPixelQuad(poly, overlay.width, overlay.height); // N 점 정규화 폴리곤 → 픽셀.
+    const [r, g, b] = MASK_PALETTE[i % MASK_PALETTE.length]; // 인스턴스별 순환색.
+    ctx.beginPath();
+    pts.forEach((p, j) => (j ? ctx.lineTo(p.px, p.py) : ctx.moveTo(p.px, p.py)));
+    ctx.closePath();
+    ctx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.30)`; // 반투명 채움.
+    ctx.fill();
+    ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, 0.95)`; // 같은 색 진한 외곽선 — 인스턴스 경계 또렷.
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  });
+  ctx.restore();
+}
+
+/** 2 DOF 앵커 배지. 토글 off 면 숨김. 지표 3종 + 알려진 한계(정수배 침묵)를 tooltip 에 남긴다. */
+function updateAnchorBadge() {
+  const badge = $('anchor-badge');
+  const on = $('roi-vcuboid').checked;
+  badge.hidden = !on;
+  if (!on) return;
+  const data = state.vcuboidByKey[currentFrameKey()];
+  const a = data?.anchor;
+  if (!a) {
+    badge.textContent = '앵커: —';
+    badge.classList.add('warn');
+    badge.title = ANCHOR_LIMIT;
+    return;
+  }
+  const fmt = (v) => (v == null ? '—' : `${v.toFixed(2)}m`);
+  badge.textContent = `앵커 n=${a.n} 깊이 ${fmt(a.depthDevM)} / 위상 ${fmt(a.phaseDevM)}`;
+  const warn =
+    a.depthDevM == null ||
+    Math.abs(a.depthDevM) > ANCHOR_DEPTH_DEV_M ||
+    Math.abs(a.phaseDevM ?? 0) > ANCHOR_PHASE_DEV_M;
+  badge.classList.toggle('warn', warn);
+  const lines = [
+    `표본 ${a.n}대 / 미배정 ${a.unmatchedRate == null ? '—' : `${Math.round(a.unmatchedRate * 100)}%`}`,
+    ...(a.issues ?? []),
+    ...(data.issues ?? []),
+    `강등 ${data.summary?.rejectedCount ?? 0}대 / seg500 ${data.summary?.segDegraded ? 'Y' : 'N'}`,
+  ];
+  badge.title = `${lines.join('\n')}\n\n${ANCHOR_LIMIT}`;
+}
+
+/**
+ * ⚠️ **미검증 추정 배지 — 화면이 거짓말하면 안 된다**(마스터 §7 · 정본 §9-1).
+ * 육면체를 "측정값"으로 오인하면 안 된다: 배치(X,Y)의 정확도를 재는 **정량 지표가 없고**(자기참조 잔차뿐),
+ * L·H 는 **항상 차종 prior** 다. 이 tooltip 이 운영자가 그 사실을 읽는 **유일한 표면**이다(D-2 의 교훈 —
+ * 소스 주석만 고치면 화면은 계속 거짓말한다).
+ */
+const VCUBOID_UNVERIFIED =
+  '[⚠️ 미검증 추정 — 측정값이 아니다]\n' +
+  '· 위치(X,Y): 앞범퍼 접지선 역투영에서 나온 값이나, **그 정확도를 재는 지표가 없다**(자기참조 잔차만 존재).\n' +
+  '            유일한 근거는 육안이며 육안은 오판한 전례가 있다.\n' +
+  '· 길이(L)·높이(H): **항상 차종 prior**(세단 4.7m / 1.45m) — 원리적으로 관측 불가.\n' +
+  '            SUV·트럭이면 육면체가 틀린다.\n' +
+  '· 방향(yaw): 슬롯 폴리곤 prior.\n' +
+  '· 폭(W): 관측(점선 = prior 강등분).\n' +
+  '· 미정합 차량은 **아무것도 그리지 않는다**(빈 자리로 남는다) — 아래 카운트로 드러난다.';
+
+/** 차량 육면체 배지 — 토글이 켜지면 **항상** "추정(미검증)" + 정합 요약을 보인다. */
+function updateVehicleCuboidBadge() {
+  const badge = $('vcuboid-badge');
+  if (!badge) return;
+  const on = $('roi-vcuboid').checked;
+  badge.hidden = !on;
+  if (!on) return;
+  const data = state.vcuboidByKey[currentFrameKey()];
+  const s = data?.summary;
+  if (!s) {
+    badge.textContent = '추정(미검증) · 육면체 —';
+    badge.title = VCUBOID_UNVERIFIED;
+    badge.classList.add('warn');
+    return;
+  }
+  // 정합 요약을 **항상** 드러낸다 — 미정합 차량이 조용히 사라지지 않게(설계 §6-7).
+  badge.textContent =
+    `추정(미검증) · 육면체 ${s.cuboidCount} · 정합 ${s.matched}/${s.kept}` +
+    (s.unmatchedDet ? ` · 미정합 ${s.unmatchedDet}` : '');
+  const detail = [
+    `det ${s.detCount}대(권위) → 주차면필터 통과 ${s.kept} · 제외 ${s.filteredOut}`,
+    `seg ${s.segCount}대 → 정합 ${s.matched} · 미정합 det ${s.unmatchedDet} · seg-only ${s.segOnly}(가림자로만 사용)`,
+    `육면체 ${s.cuboidCount} · 강등 ${s.rejectedCount}${s.segDegraded ? ' · seg 500(검출 0대)' : ''}`,
+    ...(data.segError ? [`⚠️ seg 호출 실패: ${data.segError}`] : []),
+    ...(data.unmatched ?? []).map((u) => `· 미정합 det#${u.detIdx}: ${u.reason}`),
+    ...(data.issues ?? []),
+  ];
+  badge.title = `${VCUBOID_UNVERIFIED}\n\n[이 프레임]\n${detail.join('\n')}`;
+  badge.classList.toggle('warn', s.unmatchedDet > 0 || s.rejectedCount > 0 || !!data.segError);
+}
+
+/**
+ * 정밀수집 잡의 육면체를 가져온다(GET /capture/job-cuboids — **카메라 촬영 0 · VPD 호출 0**).
+ * status 의 경량 인덱스(`cuboid[key].round`)가 **바뀔 때만** 부른다 → 폴링마다 수십 KB 를 끌지 않는다.
+ * ⚠️ 라이브 촬영 라우트(/capture/vehicle-cuboids)를 수집 중에 부르면 **잡에게서 카메라를 뺏는다** — 쓰지 않는다.
+ */
+async function syncJobCuboids(status) {
+  const idx = status?.cuboid;
+  if (!idx) return;
+  for (const [key, meta] of Object.entries(idx)) {
+    if (state.vcuboidRound[key] === meta.round) continue; // 같은 라운드 → 재요청 안 함.
+    state.vcuboidRound[key] = meta.round;
+    try {
+      const [cam, preset] = key.split(':');
+      const res = await fetch(`/capture/job-cuboids?cam=${cam}&preset=${preset}`, { cache: 'no-store' });
+      if (!res.ok) continue;
+      state.vcuboidByKey[key] = await res.json();
+      drawRoiOverlay();
+    } catch {
+      /* 네트워크 실패 → 이전 육면체 유지(수집은 계속된다) */
+    }
+  }
+}
+
+/** 앵커 임계(서버 contactTypes.ts 와 같은 값 — 표시 전용). */
+const ANCHOR_DEPTH_DEV_M = 0.5;
+const ANCHOR_PHASE_DEV_M = 0.4;
+
+/** ★ 앵커 지표의 알려진 한계 — 은닉 금지(설계 §6-3). */
+const ANCHOR_LIMIT =
+  '[2 DOF 앵커 — 1.5 DOF 만 닫힌다]\n' +
+  '깊이축(비주기): 모든 밀림에 반응 ✅\n' +
+  '폭축 위상(주기 2.5m): 비정수배 밀림에만 반응 ✅ / **정확히 k×2.5m 밀림은 원리적으로 침묵** ❌\n' +
+  '(밀린 슬롯 격자가 자기 자신과 겹쳐 차량이 옆 칸 정중앙에 딱 맞게 앉는다.\n' +
+  ' ⚠️ 이때 미배정 비율도 0 이 될 수 있다 — 실측 확인. 폭축 정수배는 **3지표 전부 침묵 가능**하다)';
+
+/**
+ * 차량 육면체 1회 로드(GET /capture/vehicle-cuboids). **토글을 켤 때만** 호출한다 —
+ * 라우트가 카메라를 1회 촬영(requestImage)하므로 렌더 루프에서 자동 재호출하면 안 된다.
+ * 실패(404=seg/ground 미배선, 502)는 조용히 미표시 + console.warn(기존 렌더 무영향).
+ */
+async function loadVehicleCuboids() {
+  const key = currentFrameKey();
+  if (state.vcuboidLoading.has(key)) return;
+  state.vcuboidLoading.add(key);
+  try {
+    const [cam, preset] = key.split(':');
+    const res = await fetch(`/capture/vehicle-cuboids?cam=${cam}&preset=${preset}`, { cache: 'no-store' });
+    if (!res.ok) {
+      console.warn(`[VehicleCuboid] ${key}: HTTP ${res.status} — 미표시`);
+      return;
+    }
+    const data = await res.json();
+    state.vcuboidByKey[key] = data;
+    if ((data.issues ?? []).length) console.warn(`[VehicleCuboid] ${key}:`, data.issues);
+    for (const r of data.rejected ?? []) console.warn(`[VehicleCuboid] ${key} 차량#${r.boxIdx} 강등:`, r.issues);
+    drawRoiOverlay();
+  } catch (err) {
+    console.warn('[VehicleCuboid] 로드 실패:', err);
+  } finally {
+    state.vcuboidLoading.delete(key);
   }
 }
 
@@ -534,47 +921,96 @@ function drawPlateQuad(ctx, quad, recovered) {
 
 /**
  * 라이브 검출 오버레이(§04-D2). VPD rect=청록(#00e5ff) + 귀속/복원 번호판 quad, 매칭 안 된 base LPD 도 표시(R1).
- * 현재 프리셋(currentFrameKey) 결과만. #roi-detect 토글. roiHidden/mapping 무관(수집 중 라이브).
+ * 현재 프리셋(currentFrameKey) 결과만. roiHidden/mapping 무관(수집 중 라이브).
+ * 차량(#roi-vehicle)=차량 박스, 번호판(#roi-plate)=번호판 quad 를 각각 독립 가드(검출 마스터 토글 없음).
  */
 function drawDetectOverlay(ctx) {
-  const d = state.detectByKey[currentFrameKey()]; // 프리셋 키로 조회 → 현재 프레임 프리셋 검출(보존분).
-  if (!$('roi-detect').checked || !d) return;
+  const key = currentFrameKey(); // 프리셋 키.
+  const d = state.detectByKey[key]; // 프리셋 키로 조회 → 현재 프레임 프리셋 검출(보존분, 이미 dedup).
+  // 차량/번호판 토글이 각각 차량 박스·번호판 quad 를 독립 제어(검출 마스터 토글 없음).
+  const showVehicle = $('roi-vehicle').checked;
+  const showPlate = $('roi-plate').checked;
+  const dbOn = $('roi-db').checked; // 'DB 보기' → VPD 소스를 DB(slot_setup) vpd 로 전환(라이브 대체).
+  const rows = state.parkingSlotsByKey?.[key] ?? [];
   const sel = state.selectedDetect; // [기능2] 선택 박스 하이라이트·핸들.
-  (d.vehicles ?? []).forEach((v, i) => {
-    const { px, py, pw, ph } = toPixel(v.rect, overlay.width, overlay.height);
-    const selected = sel?.kind === 'vehicle' && sel.index === i;
-    ctx.strokeStyle = selected ? '#ff4d4d' : '#00e5ff'; // 선택=굵은 대비색 / VPD 차량 bbox=청록.
-    ctx.lineWidth = selected ? 4 : 2;
+
+  // ── VPD: #roi-db 체크 → DB 저장 vpd(읽기표시), 아니면 라이브(dedup 저장분) ──
+  if (showVehicle) {
+    if (dbOn) {
+      drawDbVpd(ctx, rows); // DB vpd 만(청록). 선택·핸들 없음.
+    } else if (d) {
+      (d.vehicles ?? []).forEach((v, i) => {
+        const { px, py, pw, ph } = toPixel(v.rect, overlay.width, overlay.height);
+        const selected = sel?.kind === 'vehicle' && sel.index === i;
+        ctx.strokeStyle = selected ? '#ff4d4d' : '#00e5ff'; // 선택=굵은 대비색 / VPD 차량 bbox=청록.
+        ctx.lineWidth = selected ? 4 : 2;
+        ctx.strokeRect(px, py, pw, ph);
+        if (selected) drawHandles(ctx, px, py, pw, ph); // 8핸들(리사이즈 어포던스).
+      });
+    }
+  }
+
+  // ── LPD: 기존 동작 그대로(라이브 있으면 라이브, 없고 #roi-db 면 DB 폴백) — 회귀 0 ──
+  if (showPlate) {
+    if (d) {
+      (d.vehicles ?? []).forEach((v) => { if (v.plate) drawPlateQuad(ctx, v.plate.quad, v.plate.recovered); }); // 차량 부속 번호판.
+      (d.plates ?? []).forEach((p, i) => {
+        drawPlateQuad(ctx, p.quad, false); // base LPD 전체(R1: LPD 모두).
+        if (sel?.kind === 'plate' && sel.index === i) drawQuadHandles(ctx, toPixelQuad(p.quad, overlay.width, overlay.height));
+      });
+    } else if (dbOn) {
+      for (const row of rows) { if (row.lpd) drawPlateQuad(ctx, row.lpd, false); } // DB 번호판 OBB quad(노랑, 라이브 없을 때만).
+    }
+    // discovery(앞면중심 LOOP) 결과 박스 — #roi-plate 게이트 공유, 현재 프리셋 키만(전환 시 자동 은닉).
+    const disc = state.discoverByKey?.[key];
+    if (disc) for (const q of disc) drawPlateQuad(ctx, q, false);
+  }
+}
+
+/**
+ * DB(slot_setup) 소스 VPD 오버레이 — #roi-db 체크 시 라이브 대신 표시(GET /capture/slots → parkingSlotsByKey 행배열).
+ * 차량 bbox(vpd)=청록 rect. 읽기표시 전용(선택 하이라이트·핸들 없음). null 필드는 skip.
+ */
+function drawDbVpd(ctx, rows) {
+  for (const row of rows) {
+    if (!row.vpd) continue;
+    const { px, py, pw, ph } = toPixel(row.vpd, overlay.width, overlay.height);
+    ctx.strokeStyle = '#00e5ff'; // VPD 차량 bbox=청록(라이브와 동색).
+    ctx.lineWidth = 2;
     ctx.strokeRect(px, py, pw, ph);
-    if (v.plate) drawPlateQuad(ctx, v.plate.quad, v.plate.recovered);
-    if (selected) drawHandles(ctx, px, py, pw, ph); // 8핸들(리사이즈 어포던스).
-  });
-  (d.plates ?? []).forEach((p, i) => {
-    drawPlateQuad(ctx, p.quad, false); // base LPD 전체(R1: LPD 모두).
-    if (sel?.kind === 'plate' && sel.index === i) drawQuadHandles(ctx, toPixelQuad(p.quad, overlay.width, overlay.height));
-  });
+  }
 }
 
 /**
  * 현재 프리셋 1회 라이브 검출(POST /capture/detect). 결과를 state.detectByKey[key] 에 보관 후 재렌더.
  * R2 반복(프리셋 순회·10회)은 리더/프론트 재호출 소유 — 이 액션은 현재 프리셋 1회만.
  */
-async function runLiveDetect() {
+async function runLiveDetect(vpdEnabled = false, ptz) {
   const cam = state.capFrameKey2?.cam ?? state.cam;
   const preset = state.capFrameKey2?.preset ?? state.preset;
+  // 주차면 필터 모드(ON=주차면 위 차량만). 정밀수집 체크박스와 공용 — 진행 중 run 은 시작 시 모드를 유지한다.
+  // vpdEnabled: '검출 실행'=false(LPD 전용) · 'VPD 검출(테스트)'=true(차량+육면체). 자동 경로 VPD 정지(제품 정책).
+  const body = { cam, preset, vpdOnParkingOnly: $('cap-vpd-onplace').checked, vpdEnabled };
+  // ptz 제공(lpd-live) 시에만 오버라이드 전송 — 미제공이면 기존 경로(프리셋 PTZ) 그대로. state.ptz 값이 문자열일 수 있어 Number() 방어.
+  if (ptz) body.ptz = { pan: Number(ptz.pan), tilt: Number(ptz.tilt), zoom: Number(ptz.zoom) };
   const res = await fetch('/capture/detect', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    // 주차면 필터 모드(ON=주차면 위 차량만). 정밀수집 체크박스와 공용 — 진행 중 run 은 시작 시 모드를 유지한다.
-    body: JSON.stringify({ cam, preset, vpdOnParkingOnly: $('cap-vpd-onplace').checked }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) return; // 실패는 조용히 미표시(기존 검출 결과 유지).
   const detect = await res.json();
-  state.detectByKey[presetKey(cam, preset)] = detect; // 프리셋 키별 보존(덮어쓰기 아님).
+  // 수집 시점 dedup: VPD 겹침 박스를 차량당 1개(마지막 검지)로 정제해 저장 — 렌더·선택·목록·점유 소비처를 자동 정합.
+  state.detectByKey[presetKey(cam, preset)] = { ...detect, vehicles: dedupeVehicles(detect.vehicles ?? []) }; // 프리셋 키별 보존(덮어쓰기 아님).
+  // 차량 육면체는 **검출 응답에 인라인**으로 온다(서버가 base 프레임에서 산출 — 추가 왕복 0).
+  // 육면체 기능 off/강등이면 키가 없다 → 이전 값을 지우지 않는다(조용한 소실 방지).
+  if (detect.cuboids) state.vcuboidByKey[presetKey(cam, preset)] = detect.cuboids;
   const s = detect.summary;
   if (s) {
+    // VPD off(제품 정책)면 '차량 0/0' 오해를 막고 'VPD 미실행(번호판 전용)'으로 정직 표기.
+    const vpdPart = s.vpdEnabled === false ? 'VPD 미실행' : `검출 ${s.vpdCount - s.filteredOut}/${s.vpdCount}대`;
     $('cap-msg').textContent =
-      `검출 ${s.vpdCount - s.filteredOut}/${s.vpdCount}대 · 번호판 ${s.lpdCount - s.lpdFilteredOut}/${s.lpdCount} · 주차면필터 ${s.onPlaceOnly ? 'ON' : 'OFF'}` +
+      `${vpdPart} · 번호판 ${s.lpdCount - s.lpdFilteredOut}/${s.lpdCount} · 주차면필터 ${s.onPlaceOnly ? 'ON' : 'OFF'}` +
       (s.onPlaceDegraded ? ` — 강등: ${s.onPlaceDegraded}` : '');
   }
   state.selectedDetect = null; // [기능2] 새 검출 도착 → 인덱스 무효화(임시 편집분 사라짐).
@@ -597,6 +1033,7 @@ function renderSlotList() {
       placeRoi: state.placeRoi,
       detectByKey: state.detectByKey,
       parkingSlotsByKey: state.parkingSlotsByKey,
+      judge: occupancyJudge, // 목록 뱃지를 오버레이와 같은 판정기로 정합(주입 — core.js→occupancy.js 순환 회피).
     });
     for (const r of rows) {
       const div = document.createElement('div');
@@ -941,12 +1378,20 @@ async function openResult() {
 // --- 스트림 루프 ---------------------------------------------------------
 const loop = createStreamLoop({
   makeUrl: (seq) => {
-    // 항상 '현재 PTZ'(state.ptz) 기준으로 캡처. 프리셋은 '이동' 이 state.ptz 를 프리셋 PTZ 로 맞춘다.
-    const p = new URLSearchParams({ cam: state.cam, preset: state.preset, mode: 'manual', t: seq });
+    // 시뮬레이터는 현재 PTZ를 프레임 렌더에 사용한다. 실카메라는 단순 폴백 캡처가 이동 명령이 되지 않게 preset 모드로 읽기만 한다.
+    const realStream = state.sourceDetails[state.source]?.streamTransport === 'rtsp-ffmpeg';
+    const p = new URLSearchParams({
+      cam: state.cam,
+      preset: state.preset,
+      mode: realStream ? 'preset' : 'manual',
+      t: seq,
+    });
     if (state.source) p.set('source', state.source);
-    p.set('pan', state.ptz.pan);
-    p.set('tilt', state.ptz.tilt);
-    p.set('zoom', state.ptz.zoom);
+    if (!realStream) {
+      p.set('pan', state.ptz.pan);
+      p.set('tilt', state.ptz.tilt);
+      p.set('zoom', state.ptz.zoom);
+    }
     return api(`/snapshot?${p.toString()}`);
   },
   fetchFn: (url, opt) => fetch(url, { ...opt, cache: 'no-store' }),
@@ -962,24 +1407,33 @@ const loop = createStreamLoop({
 });
 
 function updatePtzDisplay() {
-  $('ptz-pan').textContent = state.ptz.pan;
-  $('ptz-tilt').textContent = state.ptz.tilt;
-  $('ptz-zoom').textContent = state.ptz.zoom;
+  // 화면 표시는 읽기 쉽게 소수점 이하 최대 7자리로만 제한한다. 내부 제어값은 원본 정밀도를 유지한다.
+  const formatPtz = (value) => {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return '-';
+    const rounded = Number(numeric.toFixed(7));
+    return String(Object.is(rounded, -0) ? 0 : rounded);
+  };
+  $('ptz-pan').textContent = formatPtz(state.ptz.pan);
+  $('ptz-tilt').textContent = formatPtz(state.ptz.tilt);
+  $('ptz-zoom').textContent = formatPtz(state.ptz.zoom);
 }
 
 // --- 라이브 MJPEG 스트림 -------------------------------------------------
-// 라이브 뷰를 <img src="/viewer/api/stream"> 로 연결(백엔드가 Unity /stream 을 SOI/EOI 로 재송신).
-// 스트림 미지원 소스(RealPtzSource)·오류 시 기존 폴링(loop)으로 폴백한다.
+// 라이브 뷰를 <img src="/viewer/api/stream"> 로 연결한다.
+// 백엔드는 시뮬레이터 HTTP MJPEG 또는 실카메라 RTSP→FFmpeg MJPEG를 같은 경로로 제공하고, 오류 시 폴링으로 폴백한다.
 let liveMode = 'off'; // 'off' | 'stream'(MJPEG) | 'poll'(폴백 폴링)
 
-/** 현재 cam/preset/source + 현재 PTZ(state.ptz) 로 스트림 URL 조립(1-based, 루프3). */
+/** 현재 cam/preset/source로 스트림 URL 조립. 시뮬레이터만 렌더용 PTZ override를 전달한다. */
 function streamUrl() {
   const p = new URLSearchParams({ cam: state.cam, preset: state.preset });
   if (state.source) p.set('source', state.source);
-  // pan/tilt/zoom 을 항상 부가 → Unity /stream 이 수동 PTZ·프리셋 PTZ 를 그대로 렌더(폴링 makeUrl 과 동일 값 정책).
-  p.set('pan', state.ptz.pan);
-  p.set('tilt', state.ptz.tilt);
-  p.set('zoom', state.ptz.zoom);
+  // 실카메라는 RTSP 재생 자체가 PTZ 이동을 일으키면 안 된다. 이동은 /move와 프리셋 동작에서만 수행한다.
+  if (state.sourceDetails[state.source]?.streamTransport !== 'rtsp-ffmpeg') {
+    p.set('pan', state.ptz.pan);
+    p.set('tilt', state.ptz.tilt);
+    p.set('zoom', state.ptz.zoom);
+  }
   return api(`/stream?${p.toString()}`);
 }
 
@@ -1023,22 +1477,43 @@ function reconnectLiveIfActive() {
 
 // --- 제어 ---------------------------------------------------------------
 async function move(ptz) {
-  const res = await fetch(api('/move'), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ source: state.source || undefined, cam: state.cam, ...ptz }),
-  });
-  if (!res.ok) return false;
-  state.ptz = ptz;
-  updatePtzDisplay();
-  if (moveRenderDirective(liveMode) === 'stream-reconnect') {
-    // 루프3: 물리 이동(/req_move)은 완료. 새 pan/tilt/zoom 이 실린 streamUrl 로 재연결하면
-    // Unity /stream 이 그 각도를 프레임마다 렌더 → 수동 PTZ 가 라이브에 반영된다(폴링 전환 불필요).
-    frame.src = streamUrl();
-  } else {
-    await loop.tick(); // poll 폴백 지속갱신 / off 1회 스냅샷 override.
+  if (state.ptzBusy || (selectedSourceIsReal() && !state.ptzStateReady)) {
+    if (selectedSourceIsReal()) $('ptz-control-status').textContent = '실카메라 현재 PTZ를 먼저 불러오거나 로그인해 주세요.';
+    return false;
   }
-  return true;
+  setPtzBusy(true);
+  try {
+    const res = await fetch(api('/move'), {
+      method: 'POST',
+      headers: tokenHeaders({ 'content-type': 'application/json' }),
+      body: JSON.stringify({ source: state.source || undefined, cam: state.cam, ...ptz }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) {
+      $('ptz-control-status').textContent = `PTZ 이동 실패: ${data.error ?? res.status}`;
+      return false;
+    }
+    state.ptz = ptz;
+    updatePtzDisplay();
+    if (selectedSourceIsReal()) {
+      $('ptz-control-status').textContent = '실카메라 PTZ 이동 완료. 현재 위치를 확인합니다…';
+      await refreshCurrentPtz({ quiet: true });
+    } else {
+      $('ptz-control-status').textContent = '';
+    }
+    if (moveRenderDirective(liveMode) === 'stream-reconnect') {
+      // 시뮬레이터는 PTZ override로 재렌더하고, 실카메라는 물리 이동 후 RTSP를 다시 연결한다.
+      frame.src = streamUrl();
+    } else {
+      await loop.tick(); // poll 폴백 지속갱신 / off 1회 스냅샷 override.
+    }
+    return true;
+  } catch (err) {
+    $('ptz-control-status').textContent = `PTZ 이동 실패: ${err instanceof Error ? err.message : err}`;
+    return false;
+  } finally {
+    setPtzBusy(false);
+  }
 }
 
 /**
@@ -1433,6 +1908,13 @@ function renderCaptureStatus(status) {
     div.textContent = line;
     $('cap-advisory').appendChild(div);
   }
+  // 이번 run 의 VPD 게이트(제품 정책 — 자동 경로 VPD 정지). 강등 위장 금지: 서버 status 가 진실.
+  if (status?.vpdEnabled === false) {
+    const div = document.createElement('div');
+    div.className = 'adv-line';
+    div.textContent = 'VPD 미실행(번호판 전용) — 차량 검출은 [VPD 검출(테스트)] 버튼으로만';
+    $('cap-advisory').appendChild(div);
+  }
   // 이번 run 에 실제 적용된 VPD 필터 모드(체크박스가 아니라 서버 status 가 진실 — 진행 중 토글과 혼동 방지).
   if (status?.vpdOnParkingOnly !== undefined) {
     const div = document.createElement('div');
@@ -1509,6 +1991,8 @@ async function capFrameTick() {
 
 function startCapFramePolling() {
   if (capFrameTimer) return;
+  stopCalFramePolling(); // 상호배타(불변식3): 센터라이징 폴 잔여 타이머 제거.
+  stopDiscFramePolling(); // 상호배타(불변식3): discovery 프레임폴 잔여 타이머 제거.
   stopLive(); // 라이브 MJPEG 스트림 중지 — 카메라를 캡처와 다투지 않게(폴백 폴링 포함).
   lastCapFrameKey = null; // 프레임 키 초기화(이전 run 잔여 제거).
   lastDetectKey = null; // 자동검출 가드 초기화(이전 run 잔여 제거, R1).
@@ -1525,6 +2009,8 @@ function stopCapFramePolling() {
 }
 
 let prevCapState = 'idle';
+// 원버튼 셋업 파이프라인 전이 추적(finalizing→calibrating/done 전환 감지 · calibrate 폴 재기동 게이트).
+let prevPipelineStage = 'idle';
 // floor ROI LLM 경고 메시지박스 런당 1회 가드(매 폴링 반복 팝업 방지).
 let floorLlmWarnShown = false;
 // 점유율 LLM 경고 메시지박스 런당 1회 가드(floor 대칭).
@@ -1532,11 +2018,10 @@ let occLlmWarnShown = false;
 // 점유율 fetch 과호출 회피: status.round 변화 게이트(직전 라운드).
 let prevCapRound = null;
 
-/** 점유율 조회 → state.occByKey 갱신 → 오버레이 재그림. runId 없으면 no-op. */
-async function fetchOccupancy(runId) {
-  if (runId == null) return;
+/** 점유율 조회 → state.occByKey 갱신 → 오버레이 재그림. run_id 폐기(설계서 §3) — 현재 잡 인메모리 축소 occupancy. LLM off 시 []. */
+async function fetchOccupancy() {
   try {
-    const res = await fetch(`/capture/runs/${runId}/occupancy`, { cache: 'no-store' });
+    const res = await fetch('/capture/occupancy', { cache: 'no-store' });
     if (!res.ok) return;
     const rows = await res.json();
     state.occByKey = occupancyByKey(rows);
@@ -1575,6 +2060,7 @@ function showCaptureResult(status) {
 async function capPoll() {
   const status = await capFetchStatus();
   renderCaptureStatus(status);
+  void syncJobCuboids(status); // 잡 육면체: round 가 바뀐 프리셋만 전문을 가져온다(카메라·VPD 호출 0).
   const st = status?.state ?? 'idle';
   state.lastRunId = status?.runId ?? state.lastRunId; // 점유율 조회 근거(런 유지).
   // floor ROI LLM 동작불가 → 경고 메시지박스 1회 표시(런당 가드).
@@ -1594,7 +2080,7 @@ async function capPoll() {
     const round = status?.round ?? null;
     if (round != null && round !== prevCapRound) {
       prevCapRound = round;
-      fetchOccupancy(state.lastRunId);
+      fetchOccupancy();
     }
   } else {
     stopCapFramePolling();
@@ -1605,16 +2091,69 @@ async function capPoll() {
   // 활성 → 종료 전환 시 결과 메시지 박스를 1회 띄운다(최신 점유율 확보 후 → 요약 라인 포함).
   const wasActive = prevCapState === 'running' || prevCapState === 'stopping' || prevCapState === 'finalizing';
   if (wasActive && (st === 'done' || st === 'stopped' || st === 'error')) {
-    await fetchOccupancy(state.lastRunId);
+    await fetchOccupancy();
     showCaptureResult(status);
+    // 얼어붙은 마지막 프레임을 라이브 배경으로 되돌린다. 검출/점유/육면체 데이터는 보존 —
+    // 종료 후에도 VPD/LPD/점유영역 박스가 오버레이 레이어로 라이브 배경 위에 남는다.
+    startLive();                                       // 라이브 MJPEG 재연결(얼어붙은 마지막 프레임 대체).
   }
   prevCapState = st;
+  // 원버튼 셋업 파이프라인 병행 조회(무장 시에만 렌더). capture 가 done 이어도 체인이 진행 중이면 폴을 유지한다.
+  const pl = await pollPipeline();
+  const chainBusy = pl && pl.armed && (pl.stage === 'capturing' || pl.stage === 'finalizing' || pl.stage === 'discovering' || pl.stage === 'calibrating');
   const plan = pollPlan(st);
   if (capPollTimer) {
     clearTimeout(capPollTimer);
     capPollTimer = null;
   }
-  if (plan.poll) capPollTimer = setTimeout(capPoll, plan.intervalMs);
+  if (plan.poll || chainBusy) capPollTimer = setTimeout(capPoll, plan.intervalMs);
+}
+
+/**
+ * 원버튼 셋업 파이프라인 상태 조회·렌더(GET /capture/pipeline). 비무장/미지원 시 cap-msg 무간섭(수동 흐름 회귀 0).
+ * finalize 완료(finalizing→calibrating|done) 전환에서 주차면 오버레이를 자동 반영(capFinalize 성공 분기와 동일),
+ * 백엔드가 센터라이징을 발화(→calibrating)하면 프론트 calibrate 폴을 재기동한다(프레임 추종·결과 요약은 기존 calPoll 경로).
+ */
+async function pollPipeline() {
+  let pl = null;
+  try {
+    const res = await fetch('/capture/pipeline', { cache: 'no-store' });
+    pl = res.ok ? await res.json() : null;
+  } catch {
+    pl = null;
+  }
+  if (!pl || !pl.armed || pl.stage === 'idle') {
+    prevPipelineStage = pl?.stage ?? 'idle';
+    return pl;
+  }
+  const stage = pl.stage;
+  // finalize 완료(→ calibrating|done): 방금 새로 써진 slot_setup 을 주차면 오버레이에 반영.
+  if (prevPipelineStage === 'finalizing' && (stage === 'calibrating' || stage === 'done')) {
+    await loadParkingSlots();
+    await loadMapping();
+    drawRoiOverlay();
+    renderSlotList();
+  }
+  // 백엔드가 센터라이징을 발화 → calibrate 폴 재기동(idle 에서 멈춰 있던 calPoll 을 running 추종 상태로).
+  if (prevPipelineStage !== 'calibrating' && stage === 'calibrating') calPoll();
+  // 상태 메시지(무장 중 cap-msg 는 파이프라인이 소유).
+  if (stage === 'finalizing') {
+    $('cap-msg').textContent = '자동 최종화 중…';
+  } else if (stage === 'discovering') {
+    $('cap-msg').textContent = '번호판 탐색 중…';
+  } else if (stage === 'calibrating') {
+    $('cap-msg').textContent = '자동 센터라이징 중…';
+  } else if (stage === 'failed') {
+    const f = pl.failure || {};
+    $('cap-msg').textContent = `자동 체인 중단(${f.stage ?? '?'}): ${f.reason ?? ''}`;
+  } else if (stage === 'done') {
+    const c = pl.coverage;
+    let msg = c ? `자동 셋업 완료 — 센터링 대상 ${c.targets} / 전체 ${c.totalSlots} · 미대상 ${c.uncovered}` : '자동 셋업 완료';
+    if (pl.note) msg += ` · ${pl.note}`;
+    $('cap-msg').textContent = msg;
+  }
+  prevPipelineStage = stage;
+  return pl;
 }
 
 async function capStart() {
@@ -1636,7 +2175,10 @@ async function capStart() {
       : { checkpointEvery: Number($('cap-checkpoint').value) || 10 }),
     floorRoiUseLlm: $('cap-floor-llm').checked, // 바닥 ROI 소스 모드(ON=LLM 생성, OFF=파일). 백엔드 floorReviewer 게이트.
     vpdOnParkingOnly: $('cap-vpd-onplace').checked, // VPD 검출 모드(ON=주차면 위 차량만, OFF=모든 차량).
+    vpdEnabled: false, // 제품 정책: 정밀수집 자동 경로 VPD(차량) 정지 — 체크박스 없이 고정 OFF. VPD 는 테스트 버튼만.
+    autoChain: $('cap-autochain').checked, // 원버튼 셋업: 수집 done 후 자동 최종화+센터라이징 백엔드 연쇄(옵트인).
   };
+  prevPipelineStage = 'idle'; // 새 런 시작 → 파이프라인 전이 추적 재설정.
   const res = await fetch('/capture/start', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -1665,12 +2207,11 @@ function buildFinalizeOccupancy() {
   }));
 }
 
-/** 최종화 후 DB parking_slots 조회 → state.parkingSlotsByKey(cam:preset → 행배열) 구성(§06 H7). 실패 시 조용히 미표시. */
+/** 최종화 후 slot_setup 조회 → state.parkingSlotsByKey(cam:preset → 행배열) 구성(§06 H7). 실패 시 조용히 미표시. */
 async function loadParkingSlots() {
-  const runId = state.lastRunId;
-  if (!runId) return;
   try {
-    const res = await fetch(`/capture/runs/${runId}/slots`, { cache: 'no-store' });
+    // run_id 폐기(설계서 §3) — slot_setup 정본 직접 조회. 응답은 presetKey 파생 포함(SlotSetupView).
+    const res = await fetch('/capture/slots', { cache: 'no-store' });
     if (!res.ok) return;
     const rows = await res.json();
     const byKey = {};
@@ -1702,10 +2243,85 @@ async function capFinalize() {
   }
 }
 
-// --- PTZ 캘리브레이션(주차면별 번호판 중심정렬·줌 → slot_ptz.json) ------
+// 검출·센터링 초기화(수동): slot_setup 의 vpd/lpd/occupy/ptz/centered/img1 만 비움(바닥 ROI/슬롯 보존).
+async function resetSlotSetupDb() {
+  if (!confirm('DB의 검출(VPD/LPD)·점유영역·센터라이징(PTZ)을 모두 초기화합니다. 되돌릴 수 없습니다. 진행할까요?')) return;
+  const res = await fetch('/capture/slots/reset', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) { $('cap-msg').textContent = `초기화 실패: ${data.error ?? res.status}`; return; }
+  resetOverlayDisplay();           // 클라 라이브 오버레이(detect/occ/vcuboid) 정리.
+  await loadParkingSlots();        // DB 재조회 → null 반영(parkingSlotsByKey 갱신).
+  drawRoiOverlay();
+  renderSlotList();
+  $('cap-msg').textContent = `초기화 완료: ${data.cleared ?? 0}개 슬롯`;
+}
+
+// 현재 프리셋의 라이브 LPD 검출(state.detectByKey)을 슬롯 공간배정 → slot_setup.lpd 에 저장("DB에 추가").
+async function saveLpdToDb() {
+  const cam = state.capFrameKey2?.cam ?? state.cam;
+  const preset = state.capFrameKey2?.preset ?? state.preset;
+  const plates = state.detectByKey[presetKey(cam, preset)]?.plates ?? [];
+  if (plates.length === 0) {
+    $('disc-msg').textContent = '검출된 번호판 없음 — 먼저 LPD 실행';
+    return;
+  }
+  const res = await fetch('/capture/slots/lpd', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ cam, preset, plates }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.ok) { $('disc-msg').textContent = `DB 추가 실패: ${data.error ?? res.status}`; return; }
+  $('disc-msg').textContent = `DB 추가: ${data.updated} 슬롯 (미배정 ${data.unassigned})`;
+  await loadParkingSlots(); // #roi-db(slot_setup 소스) 오버레이 정합 갱신.
+  drawRoiOverlay();
+  renderSlotList();
+}
+
+// --- 센터라이징(주차면별 번호판 중심정렬·줌 → slot_ptz.json · DB centering_slot) ------
 // capPoll 패턴 차용(pollPlan 재사용). 절대경로 /calibrate/* 직접 폴링.
 let calPollTimer = null;
 let prevCalState = 'idle';
+
+// 센터라이징 중 Live View 에 '최근 센터라이징 프레임'을 표시(카메라 재명령 없이 잡이 찍은 프레임 추종).
+// /calibrate/frame 은 PlatePtz 가 매 캡처 직후 흘려보낸 최신 JPEG 을 버퍼에서 반환할 뿐 새 촬영을 하지 않는다.
+// capFrameTick 패턴 복제 — 다만 라운드 개념이 없어 매 폴 갱신(500ms, 저비용). 오버레이는 쌓지 않고 순수 프레임만.
+let calFrameTimer = null;
+let calFrameUrl = null;
+
+async function calFrameTick() {
+  try {
+    const res = await fetch('/calibrate/frame', { cache: 'no-store' });
+    if (!res.ok) return; // 404(버퍼 없음) 등 → 갱신 스킵.
+    const url = URL.createObjectURL(await res.blob());
+    frame.src = url;
+    if (frame.decode) await frame.decode().catch(() => {});
+    if (calFrameUrl) URL.revokeObjectURL(calFrameUrl);
+    calFrameUrl = url;
+    const c = res.headers.get('X-Cal-Cam');
+    if (c != null) {
+      $('cal-msg').textContent = `센터라이징 중 — cam${c} 프리셋${res.headers.get('X-Cal-Preset')}`;
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+function startCalFramePolling() {
+  if (calFrameTimer) return;
+  stopCapFramePolling(); // 상호배타(불변식3): 정밀수집 폴 잔여 타이머 제거.
+  stopDiscFramePolling(); // 상호배타(불변식3): discovery 프레임폴 잔여 타이머 제거.
+  stopLive();            // 라이브 MJPEG 스트림 중지 — 카메라를 캡처와 다투지 않게.
+  calFrameTimer = setInterval(calFrameTick, 500);
+  calFrameTick();
+}
+
+function stopCalFramePolling() {
+  if (calFrameTimer) {
+    clearInterval(calFrameTimer);
+    calFrameTimer = null;
+  }
+}
 
 async function calStart() {
   $('cal-msg').textContent = '';
@@ -1716,8 +2332,50 @@ async function calStart() {
     body: '{}',
   });
   const data = await res.json().catch(() => ({}));
-  $('cal-msg').textContent = res.ok ? `시작됨 (대상 ${data.total} 슬롯)` : `시작 실패: ${data.error ?? res.status}`;
+  // total=0 은 코드 실패가 아니라 입력 부재(setup_artifact 에 번호판 ROI 슬롯 0) — 원인을 알려준다.
+  const okMsg = data.total === 0
+    ? '대상 0 — 셋업 산출물에 번호판 ROI 슬롯이 없습니다(최종화 필요)'
+    : `시작됨 (대상 ${data.total} 슬롯)`;
+  $('cal-msg').textContent = res.ok ? okMsg : `시작 실패: ${data.error ?? res.status}`;
   calPoll();
+}
+
+// 동시 클릭 방지 락(개별 센터라이징 진행 중 중복 발화 차단).
+let calPointBusy = false;
+
+// 개별(클릭) 센터라이징 발화(설계서 §3.4) — calStart 축소판. 저장 없음(POST /calibrate/point).
+// mode='plate'=클릭 최근접 번호판 center / 'plate-zoom'=center+zoom. 진행 프레임은 startCalFramePolling 재사용.
+async function calPointCenter(nx, ny, mode) {
+  if (calPointBusy) return;
+  calPointBusy = true;
+  const cam = state.capFrameKey2?.cam ?? state.cam;
+  const preset = state.capFrameKey2?.preset ?? state.preset;
+  $('cal-msg').textContent = mode === 'plate-zoom' ? '번호판 센터+줌 중…' : '클릭 위치 번호판으로 센터라이징 중…';
+  $('cal-summary').innerHTML = '';
+  startCalFramePolling(); // 진행 프레임 실시간 표시(라이브 중지·상호배타).
+  let data = null;
+  let res = null;
+  try {
+    res = await fetch('/calibrate/point', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ cam, preset, point: { x: nx, y: ny }, mode }),
+    });
+    data = await res.json().catch(() => ({}));
+  } catch (err) {
+    data = { error: String(err) };
+  }
+  stopCalFramePolling();
+  if (res && res.status === 409) {
+    $('cal-msg').textContent = '센터라이징(전체) 진행 중 — 잠시 후 다시 시도하세요';
+  } else if (res && res.ok && data && data.ok) {
+    $('cal-msg').textContent = '개별 센터라이징 완료';
+  } else {
+    const why = (data && (data.reason || data.error)) ?? (res ? res.status : 'error');
+    $('cal-msg').textContent = `종료(${why})`;
+  }
+  startLive(); // 얼어붙은 마지막 프레임을 라이브 스트림으로 대체.
+  calPointBusy = false;
 }
 
 async function calPoll() {
@@ -1735,10 +2393,15 @@ async function calPoll() {
   $('cal-bar').value = percent;
   $('cal-label').textContent = `${st} ${done}/${total}` + (status?.current ? ` — ${status.current.slotId}` : '');
 
-  // 활성 → 완료 전환 시 결과 요약 1회 렌더.
+  // 진행 중이면 프레임 폴로 화면 실시간 갱신, 아니면 폴 중지.
+  if (st === 'running') startCalFramePolling();
+  else stopCalFramePolling();
+
+  // 활성 → 완료 전환 시 결과 요약 1회 렌더 + 라이브뷰 복귀(센터라이징은 오버레이를 쌓지 않아 리셋 불요).
   if (prevCalState === 'running' && st !== 'running') {
     if (st === 'done') await renderCalResult();
     else $('cal-msg').textContent = `종료(${st})`;
+    startLive(); // 얼어붙은 마지막 센터라이징 프레임을 라이브 스트림으로 대체.
   }
   prevCalState = st;
 
@@ -1769,6 +2432,152 @@ async function renderCalResult() {
   } catch {
     /* ignore */
   }
+}
+
+// --- 앞면중심 LOOP discovery(모드 b) — calStart/calPoll/calFrameTick 미러 -----
+// 백엔드(/discover/*, PlateDiscoveryJob) 완성분에 UI 만 배선. 상태변수는 disc 접두(cal 대칭).
+let discPollTimer = null;
+let prevDiscState = 'idle';
+let discFrameTimer = null;
+let discFrameUrl = null;
+
+async function discFrameTick() {
+  // calFrameTick 미러: /discover/frame(잡이 방금 찍은 최신 JPEG, 카메라 재명령 없음). 오버레이 미적재·순수 프레임.
+  try {
+    const res = await fetch('/discover/frame', { cache: 'no-store' });
+    if (!res.ok) return; // 404(버퍼 없음) 등 → 갱신 스킵.
+    const url = URL.createObjectURL(await res.blob());
+    frame.src = url;
+    if (frame.decode) await frame.decode().catch(() => {});
+    if (discFrameUrl) URL.revokeObjectURL(discFrameUrl);
+    discFrameUrl = url;
+  } catch {
+    /* ignore */
+  }
+}
+
+function startDiscFramePolling() {
+  if (discFrameTimer) return;
+  stopCapFramePolling(); // 상호배타(불변식3): 정밀수집 폴 잔여 타이머 제거.
+  stopCalFramePolling(); // 상호배타(불변식3): 센터라이징 폴 잔여 타이머 제거.
+  stopLive();            // 라이브 MJPEG 스트림 중지 — 카메라를 잡과 다투지 않게.
+  discFrameTimer = setInterval(discFrameTick, 500);
+  discFrameTick();
+}
+
+function stopDiscFramePolling() {
+  if (discFrameTimer) {
+    clearInterval(discFrameTimer);
+    discFrameTimer = null;
+  }
+}
+
+async function discStart() {
+  $('disc-msg').textContent = '';
+  // 현재 표시 프리셋 한정(runLiveDetect 미러) — 정밀수집 폴 중이면 표시 프레임, 아니면 라이브 선택 프리셋.
+  const cam = state.capFrameKey2?.cam ?? state.cam;
+  const preset = state.capFrameKey2?.preset ?? state.preset;
+  const res = await fetch('/discover/ptz', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ cam, preset }), // 전체 배치 → 현재 프리셋 한정.
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    $('disc-msg').textContent = `시작 실패: ${data.error ?? res.status}`; // 409(이미 실행 중) 포함.
+    return;
+  }
+  // total=0 은 코드 실패가 아니라 입력 부재(현재 프리셋에 앞면중심 보유 슬롯 0) — 원인을 알려준다(calStart 미러).
+  $('disc-msg').textContent = data.total === 0
+    ? '대상 0 — 현재 프리셋에 앞면중심 보유 슬롯 없음(최종화 필요)'
+    : `시작됨 (대상 ${data.total} 슬롯)`;
+  discPoll();
+}
+
+async function discPoll() {
+  let status = null;
+  try {
+    const res = await fetch('/discover/status', { cache: 'no-store' });
+    status = res.ok ? await res.json() : null;
+  } catch {
+    status = null;
+  }
+  const view = discoverView(status ?? {}); // 순수 헬퍼(core.js) — vitest 대상.
+  $('disc-bar').value = view.percent;
+  $('disc-label').textContent = view.label;
+  $('lpd-run').disabled = view.runDisabled;
+
+  // 진행 중이면 프레임 폴로 화면 실시간 갱신, 아니면 폴 중지(startCalFramePolling 미러).
+  if (view.polling) startDiscFramePolling();
+  else stopDiscFramePolling();
+
+  const st = status?.state ?? 'idle';
+  // 활성 → 완료 전환 시 결과 요약 1회 렌더 + 라이브뷰 복귀(discovery 는 오버레이를 쌓지 않아 리셋 불요).
+  if (prevDiscState === 'running' && st !== 'running') {
+    if (st === 'done') await renderDiscResult();
+    else $('disc-msg').textContent = `종료(${st})`;
+    startLive(); // 얼어붙은 마지막 탐색 프레임을 라이브 스트림으로 대체.
+  }
+  prevDiscState = st;
+
+  const plan = pollPlan(st); // 'running' 에서만 poll(discovery 엔 stopping/finalizing 없음 → 부작용 없음).
+  if (discPollTimer) {
+    clearTimeout(discPollTimer);
+    discPollTimer = null;
+  }
+  if (plan.poll) discPollTimer = setTimeout(discPoll, plan.intervalMs);
+}
+
+async function renderDiscResult() {
+  try {
+    const res = await fetch('/discover/status', { cache: 'no-store' }); // 최종 카운트(found/total).
+    const s = res.ok ? await res.json() : {};
+    $('disc-msg').textContent = `완료 — 발견 ${s.found ?? 0}/${s.total ?? 0} 슬롯 (slot_setup.lpd 갱신)`;
+  } catch {
+    /* ignore */
+  }
+  // 검지 박스 표시: result 의 found+lpdOrig 를 프리셋키별 저장(현재 프리셋 한정이라 단일 키). 뒤이은 startLive→drawRoiOverlay 가 렌더.
+  try {
+    const res = await fetch('/discover/result', { cache: 'no-store' });
+    if (!res.ok) return;
+    const data = await res.json();
+    const byKey = {};
+    for (const it of data.items ?? []) {
+      if (!it.found || !it.lpdOrig) continue;
+      (byKey[presetKey(it.camIdx, it.presetIdx)] ??= []).push(it.lpdOrig);
+    }
+    state.discoverByKey = byKey; // 새 결과로 대체(누적 아님 — 이전 프리셋 잔여 정리).
+  } catch {
+    /* ignore */
+  }
+}
+
+// 모드 (a): 순수 LPD 진단(기존 cap-detect-run 본문 이사). 비-LPD 오버레이 off + LPD 전용 검출.
+function runModeLpd() {
+  // 바닥ROI·슬롯 육면체는 검출이 아닌 슬롯 기준 지오메트리라 유지(문맥 참조).
+  $('roi-vehicle').checked = false;   // 차량(VPD) 박스 숨김.
+  $('roi-occupancy').checked = false; // 점유영역 숨김.
+  $('roi-vcuboid').checked = false;   // 차량 육면체(VPD seg) 숨김.
+  $('roi-mask').checked = false;      // VPD seg 마스크 숨김.
+  $('roi-plate').checked = true;      // 번호판(LPD) quad 만 표시.
+  runLiveDetect(false);               // LPD 전용 검출 — VPD 미실행.
+}
+
+// 모드 (d): 현재화면 순수 LPD. runModeLpd 와 동일 오버레이 + 현재 뷰어 PTZ(state.ptz) 로 base 재렌더(프리셋 스냅 없음).
+function runModeLpdLive() {
+  $('roi-vehicle').checked = false;
+  $('roi-occupancy').checked = false;
+  $('roi-vcuboid').checked = false;
+  $('roi-mask').checked = false;
+  $('roi-plate').checked = true;
+  runLiveDetect(false, state.ptz);    // LPD 전용 + 현재 PTZ 오버라이드.
+}
+
+// 모드 (c): VPD→LPD(기존 cap-vpd-test 본문 이사). LPD 진단이 껐던 차량·점유 오버레이 복원 + 검출.
+function runModeVpd() {
+  $('roi-vehicle').checked = true;    // vehicles+육면체 표시.
+  $('roi-occupancy').checked = true;  // 점유영역 복원.
+  runLiveDetect(true);
 }
 
 // --- 분석(최종 셋업 산출물) --------------------------------------------
@@ -1895,29 +2704,15 @@ async function renderAnalysis() {
 }
 
 /**
- * 분석 탭 점유율 표(#an-occupancy) 렌더. runId 는 state.lastRunId 우선, 없으면 GET /capture/runs[0].id 폴백.
+ * 분석 탭 점유율 표(#an-occupancy) 렌더. run_id 폐기(설계서 §3) — 현재 잡 인메모리 축소 occupancy 직접 조회.
  * 데이터 없으면 안내 문구. showAvgCard=true 면 an-summary 에 평균 점유율 카드 1장 append.
  */
 async function renderOccupancyAnalysis(showAvgCard) {
   const box = $('an-occupancy');
   if (!box) return;
   box.innerHTML = '';
-  let runId = state.lastRunId;
-  if (runId == null) {
-    try {
-      const res = await fetch('/capture/runs', { cache: 'no-store' });
-      const runs = res.ok ? await res.json() : [];
-      runId = runs[0]?.id ?? null;
-    } catch {
-      runId = null;
-    }
-  }
-  if (runId == null) {
-    box.textContent = '점유율 데이터 없음 (정밀 수집 후 생성)';
-    return;
-  }
   try {
-    const res = await fetch(`/capture/runs/${runId}/occupancy`, { cache: 'no-store' });
+    const res = await fetch('/capture/occupancy', { cache: 'no-store' });
     const rows = res.ok ? await res.json() : [];
     state.occByKey = occupancyByKey(rows);
   } catch {
@@ -2088,6 +2883,77 @@ function downloadArtifact() {
 // GET /settings 로 폼을 채우고, PUT /settings 로 저장(부분 병합). apiKeyEnv(키 이름)만 표시, 키 값은 서버 env 유지.
 // 저장 성공 시 restartRequired 배너 노출(config 는 nodemon watch 밖 → 런타임 반영 안 됨).
 
+let editableCameraSources = [];
+let renderedCameraSourceId = '';
+
+function captureCameraSourceEdits() {
+  const source = editableCameraSources.find((item) => item.id === renderedCameraSourceId);
+  if (!source) return;
+  source.label = $('opt-camera-label').value.trim();
+  source.baseUrl = $('opt-camera-baseurl').value.trim();
+  source.username = $('opt-camera-username').value.trim();
+  source.rtspUrl = $('opt-camera-rtsp').value.trim();
+  const password = $('opt-camera-password').value;
+  if (password) source.pendingPassword = password;
+}
+
+function renderCameraSource(id) {
+  const source = editableCameraSources.find((item) => item.id === id);
+  renderedCameraSourceId = source?.id ?? '';
+  $('opt-camera-label').value = source?.label ?? '';
+  $('opt-camera-kind').value = source ? (source.kind === 'sim' ? '시뮬레이터' : 'Hucoms 실카메라') : '';
+  $('opt-camera-baseurl').value = source?.baseUrl ?? '';
+  $('opt-camera-username').value = source?.username ?? '';
+  $('opt-camera-password').value = source?.pendingPassword ?? '';
+  $('opt-camera-rtsp').value = source?.rtspUrl ?? '';
+  $('opt-camera-rtsp').disabled = source?.kind !== 'hucoms';
+  const stored = source?.passwordSet ? '저장된 비밀번호 있음 · 새 값을 입력하지 않으면 유지됩니다.' : '저장된 비밀번호 없음';
+  const streaming = source?.kind === 'hucoms'
+    ? '스트리밍: RTSP → FFmpeg → 브라우저 MJPEG'
+    : '스트리밍: 시뮬레이터 URL → HTTP MJPEG';
+  $('opt-camera-note').textContent = source
+    ? `${source.protocol ?? '기본 프로토콜'} · ${streaming} · ${stored} 비밀번호는 GET API와 화면에 노출되지 않습니다.`
+    : 'config에 등록된 카메라가 없습니다.';
+}
+
+function loadCameraSettings(camera) {
+  editableCameraSources = (camera?.sources ?? []).map((source) => ({ ...source }));
+  $('opt-camera-execution').value = camera?.executionMode ?? 'typescript-native';
+  const select = $('opt-camera-selected');
+  select.innerHTML = '';
+  for (const source of editableCameraSources) {
+    const option = document.createElement('option');
+    option.value = source.id;
+    option.textContent = source.label || source.id;
+    select.appendChild(option);
+  }
+  const selected = editableCameraSources.some((source) => source.id === camera?.selectedCameraId)
+    ? camera.selectedCameraId
+    : editableCameraSources[0]?.id ?? '';
+  select.value = selected;
+  renderCameraSource(selected);
+}
+
+function cameraSettingsPatch() {
+  captureCameraSourceEdits();
+  const selectedCameraId = $('opt-camera-selected').value;
+  const source = editableCameraSources.find((item) => item.id === selectedCameraId);
+  if (!source) {
+    return { executionMode: $('opt-camera-execution').value, selectedCameraId, source: undefined };
+  }
+  const patch = {
+    id: source.id,
+    label: source.label,
+    kind: source.kind,
+    protocol: source.protocol,
+    baseUrl: source.baseUrl,
+    username: source.username,
+    rtspUrl: source.rtspUrl,
+  };
+  if (source.pendingPassword) patch.password = source.pendingPassword;
+  return { executionMode: $('opt-camera-execution').value, selectedCameraId, source: patch };
+}
+
 async function loadSettings() {
   const msg = $('opt-msg');
   $('opt-restart-banner').hidden = true;
@@ -2105,6 +2971,7 @@ async function loadSettings() {
     $('opt-vpd-detpath').value = s.vpd?.detPath ?? '';
     $('opt-lpd-endpoint').value = s.lpd?.endpoint ?? '';
     $('opt-lpd-detpath').value = s.lpd?.detPath ?? '';
+    loadCameraSettings(s.camera);
     const keyLabel = (name) => (name ? `API 키 환경변수: ${name} (값은 서버 env 로만 주입 · 편집·표시 안 함)` : '');
     $('opt-llm-keyname').textContent = keyLabel(s.llm?.apiKeyEnv);
     $('opt-vpd-keyname').textContent = keyLabel(s.vpd?.apiKeyEnv);
@@ -2126,6 +2993,7 @@ async function saveSettings() {
     },
     vpd: { endpoint: $('opt-vpd-endpoint').value.trim(), detPath: $('opt-vpd-detpath').value.trim() },
     lpd: { endpoint: $('opt-lpd-endpoint').value.trim(), detPath: $('opt-lpd-detpath').value.trim() },
+    camera: cameraSettingsPatch(),
   };
   const errs = settingsFormErrors(form);
   if (errs.length) {
@@ -2142,6 +3010,13 @@ async function saveSettings() {
     if (res.ok) {
       if (msg) msg.textContent = '저장됨';
       $('opt-restart-banner').hidden = !data.restartRequired;
+      const selected = editableCameraSources.find((source) => source.id === form.camera.selectedCameraId);
+      if (selected?.pendingPassword) {
+        selected.passwordSet = true;
+        delete selected.pendingPassword;
+        $('opt-camera-password').value = '';
+        renderCameraSource(selected.id);
+      }
     } else {
       if (msg) msg.textContent = `저장 실패: ${data.error ?? res.status}`;
     }
@@ -2343,7 +3218,7 @@ function setTab(tab) {
   $('options-view').hidden = !options;
   $('db-view').hidden = !db;
   $('precise-box').hidden = tab !== 'precise';
-  if (tab === 'precise') { capPoll(); calPoll(); loadPlaceRoi(); loadGroundModel(); }
+  if (tab === 'precise') { capPoll(); calPoll(); loadPlaceRoi(); loadGroundModel(); void loadParkingSlots().then(() => drawRoiOverlay()); }
   if (analyze) renderAnalysis();
   if (options) { loadSettings(); loadRpcCatalog(); loadLlmModels(); }
   if (db) loadDbTables();
@@ -2393,9 +3268,20 @@ function wirePanelResize() {
 function wireOverlayEditing() {
   // mousedown: floor 정점 위면 정점 드래그 시작, 아니면 슬롯 선택/해제.
   overlay.addEventListener('mousedown', (e) => {
+    // [개별 센터라이징] 콤보 선택 시 클릭을 최우선 소비 → 클릭 지점 최근접 번호판으로 센터라이징(저장 안 함).
+    // 미선택(off)이면 이 분기를 건너뛰어 기존 편집 동작 100% 보존. Ctrl 은 기존 편집 제스처라 제외.
+    const clickMode = $('cal-click-mode')?.value;
+    if (clickMode && clickMode !== 'off' && !e.ctrlKey) {
+      const { nx, ny } = eventToNorm(e);
+      e.preventDefault();
+      // center(개별 center)=클릭 최근접 번호판 center('plate'), center-zoom=번호판 center+zoom('plate-zoom').
+      const mode = clickMode === 'center-zoom' ? 'plate-zoom' : 'plate';
+      void calPointCenter(nx, ny, mode);
+      return;
+    }
     const { nx, ny } = eventToNorm(e);
-    // [기능2] 검출 박스 편집(임시): roi-detect ON + Ctrl 아님(슬롯 편집과 물리 배타). mapping/roiHidden 가드 이전.
-    if ($('roi-detect').checked && !e.ctrlKey) {
+    // [기능2] 검출 박스 편집(임시): 차량/번호판 레이어 중 하나라도 표시 중 + Ctrl 아님(슬롯 편집과 물리 배타). mapping/roiHidden 가드 이전.
+    if (($('roi-vehicle').checked || $('roi-plate').checked) && !e.ctrlKey) {
       const dkey = currentFrameKey();
       const detect = state.detectByKey[dkey];
       if (detect) {
@@ -2539,6 +3425,10 @@ function wire() {
   }
   $('cap-finalize').addEventListener('click', capFinalize);
   $('cal-start').addEventListener('click', calStart);
+  // 개별 센터라이징 콤보: 활성(off 아님) 시 오버레이 커서를 crosshair 로 전환(클릭 조준 피드백).
+  $('cal-click-mode').addEventListener('change', (e) => {
+    overlay.classList.toggle('click-centering', e.target.value !== 'off');
+  });
   $('cap-result-close').addEventListener('click', () => {
     $('cap-result-modal').hidden = true;
   });
@@ -2561,6 +3451,10 @@ function wire() {
   $('an-manual-auto').addEventListener('click', autoNumberManual); // #7 자동 번호
   $('opt-save').addEventListener('click', saveSettings); // ④ 옵션 저장(PUT /settings)
   $('opt-reload').addEventListener('click', loadSettings); // ④ 옵션 새로고침(GET /settings)
+  $('opt-camera-selected').addEventListener('change', (event) => {
+    captureCameraSourceEdits();
+    renderCameraSource(event.target.value);
+  });
 
   // Unity RPC 콘솔 + LLM 런타임 모델 전환.
   $('rpc-reload').addEventListener('click', loadRpcCatalog);
@@ -2594,9 +3488,11 @@ function wire() {
 
   $('sel-source').addEventListener('change', async (e) => {
     state.source = e.target.value;
-    state.isHucoms = false; // 소스 kind 는 서버만 앎 → login 박스는 시도 후 표시
-    $('login-box').hidden = false;
+    state.isHucoms = state.sourceDetails[state.source]?.kind === 'hucoms';
+    updatePtzControlUi();
     await loadCameras();
+    await refreshCurrentPtz({ quiet: true });
+    reconnectLiveIfActive();
   });
   $('sel-cam').addEventListener('change', (e) => {
     state.cam = Number(e.target.value);
@@ -2633,9 +3529,17 @@ function wire() {
   $('roi-plate').addEventListener('change', drawRoiOverlay);
   $('roi-floor').addEventListener('change', drawRoiOverlay);
   $('roi-occupancy').addEventListener('change', drawRoiOverlay); // 점유 오버레이 토글.
+  $('roi-db').addEventListener('change', drawRoiOverlay); // DB(slot_setup) 소스 오버레이 표시 토글(폴백 vpd/lpd/occupy).
   $('cap-floor-llm').addEventListener('change', drawRoiOverlay); // 바닥 ROI 소스(LLM/파일) 모드 전환 → 즉시 재렌더.
-  $('roi-detect').addEventListener('change', drawRoiOverlay); // 라이브 검출 오버레이 토글(§04).
   $('roi-cuboid').addEventListener('change', drawRoiOverlay); // 3D 육면체 레이어 토글(기본 off → 회귀 0).
+  $('roi-mask').addEventListener('change', drawRoiOverlay); // VPD seg 마스크 오버레이 토글(순수 렌더 — masks 는 detect 응답에 동승, 별도 로드 불필요).
+  // 차량 육면체 토글(**기본 off** — 마스터 요청 2026-07-15: 시작 시 체크 해제).
+  // 렌더 토글일 뿐 점유 판정과 무관하다(회귀 0). 정밀수집·검출이 돌면 데이터는 자동으로 온다;
+  // 켤 때 해당 프리셋 캐시가 없으면 그때만 라이브 촬영 1회(캐시 있으면 재사용).
+  $('roi-vcuboid').addEventListener('change', (e) => {
+    drawRoiOverlay();
+    if (e.target.checked && !state.vcuboidByKey[currentFrameKey()]) loadVehicleCuboids();
+  });
   // 높이 슬라이더: 드래그 틱마다 즉시 재그리기(wirePanelResize 의 연속 재렌더 선례) + localStorage 영속.
   const cuboidH = $('cuboid-h');
   const savedH = Number(localStorage.getItem(CUBOID_H_KEY));
@@ -2647,8 +3551,17 @@ function wire() {
     drawRoiOverlay(); // 서버 왕복 0(뷰어 순수 투영) → 드래그 중에도 매끄럽다.
   });
   cuboidH.addEventListener('change', () => localStorage.setItem(CUBOID_H_KEY, String(cuboidHeight())));
-  $('cap-detect-run').addEventListener('click', runLiveDetect); // 현재 프리셋 1회 검출 실행(§04).
-  $('roi-clear').addEventListener('click', clearRoiDisplay); // #5: 표시 초기화
+  // LPD 검지 3모드: 콤보 선택값으로 디스패치(2버튼 대체). (a)순수LPD (b)앞면중심LOOP discovery (c)VPD→LPD.
+  $('lpd-run').addEventListener('click', () => {
+    const mode = $('lpd-mode').value;
+    if (mode === 'lpd') runModeLpd();
+    else if (mode === 'discover') discStart();
+    else if (mode === 'vpd') runModeVpd();
+    else if (mode === 'lpd-live') runModeLpdLive();
+  });
+  $('lpd-db-add').addEventListener('click', saveLpdToDb); // 라이브 LPD 검출 → slot_setup.lpd 저장.
+  $('roi-clear').addEventListener('click', resetOverlayDisplay); // #5: 표시 초기화 — 모든 오버레이 토글 off(데이터 보존).
+  $('cap-reset-db').addEventListener('click', resetSlotSetupDb); // 검출·센터링 DB 초기화(slot_setup vpd/lpd/occupy/ptz 비움).
   // 산출물(setup_artifact) 편집·결과 파일 도구(분석 탭으로 이관 — 핸들러·id 는 동일).
   $('slot-add').addEventListener('click', addSlot); // 요구 B: 전역 인덱스 중간삽입
   $('roi-delete').addEventListener('click', deleteSelectedSlot); // #2
@@ -2694,12 +3607,17 @@ function wire() {
   );
 
   $('btn-abs').addEventListener('click', () => {
-    move({
-      pan: Number($('abs-pan').value) || 0,
-      tilt: Number($('abs-tilt').value) || 0,
-      zoom: clampZoom(Number($('abs-zoom').value) || 1),
-    });
+    // 빈 칸은 현재 PTZ 유지(0/1 리셋 금지) — zoom 만 채워 이동해도 pan/tilt 프레이밍 보존.
+    move(
+      resolveAbsPtz(state.ptz, {
+        pan: $('abs-pan').value,
+        tilt: $('abs-tilt').value,
+        zoom: $('abs-zoom').value,
+      }),
+    );
   });
+
+  $('btn-ptz-refresh').addEventListener('click', () => refreshCurrentPtz());
 
   $('btn-login').addEventListener('click', async () => {
     const res = await fetch(api('/camera/login'), {
@@ -2714,6 +3632,7 @@ function wire() {
     const data = res.ok ? await res.json() : { ok: false };
     $('login-status').textContent = data.ok ? '로그인 OK' : '로그인 실패';
     $('login-pass').value = '';
+    if (data.ok) await refreshCurrentPtz({ quiet: true });
   });
 
   if (window.ResizeObserver) {
@@ -2728,6 +3647,7 @@ async function init() {
   // 요구사항 5: 페이지 로드 시 기존 결과(ROI 3종)를 자동 표시하지 않는다.
   // → loadMapping() 자동 호출 제거. '결과 열기' 또는 finalize 로만 state.mapping 이 채워진다.
   const [camOk] = await Promise.all([loadCameras(), loadHealth()]);
+  await refreshCurrentPtz({ quiet: true });
   simConnected = camOk; // 초기 연결 상태 확정.
   $('badge-camera').classList.toggle('ok', !!camOk); // badge-camera = Unity 연결(loadCameras 성공).
   drawRoiOverlay();

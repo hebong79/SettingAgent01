@@ -6,6 +6,7 @@ import { runDetect, loadDetectCfg, type DetectDeps, type DetectCfg } from '../sr
 import { buildGroundInputs } from '../src/ground/groundInputs.js';
 import { estimateGroundModels } from '../src/ground/groundModel.js';
 import { parseCameraViews } from '../src/setup/mapTargets.js';
+import { projectBaseToView } from '../src/calibrate/detectMath.js';
 import type { CapturedImage, VehicleBox, NormalizedQuad, NormalizedPoint } from '../src/domain/types.js';
 import type { PlateBox } from '../src/clients/LpdClient.js';
 import type { CameraList } from '../src/viewer/CameraSource.js';
@@ -115,8 +116,8 @@ describe('runDetect — base 매칭 차량(recovered:false)', () => {
     expect(plateOut!.quad).toBe(p.quad); // base 매칭은 원 quad 그대로(클램프 미적용).
     // 매칭됐으므로 zoom 재시도 없음 → base 요청 1회.
     expect(camera.requestImage).toHaveBeenCalledTimes(1);
-    // 3인자 호출(모드 미지정) → 필터 미적용(계약 불변).
-    expect(out.summary).toEqual({ vpdCount: 1, lpdCount: 1, recovered: 0, onPlaceOnly: false, filteredOut: 0, lpdFilteredOut: 0 });
+    // 3인자 호출(모드 미지정) → 필터 미적용(계약 불변). vpdEnabled 미지정 → 라이브러리 기본 true.
+    expect(out.summary).toEqual({ vpdCount: 1, lpdCount: 1, recovered: 0, onPlaceOnly: false, filteredOut: 0, lpdFilteredOut: 0, vpdEnabled: true });
   });
 });
 
@@ -169,6 +170,68 @@ describe('runDetect — 미검출 차량 zoom 재시도 → recovered(inverse+cl
     expect(out.vehicles[0].plate).toBeUndefined();
     expect(camera.requestImage).toHaveBeenCalledTimes(5); // base + 4 뷰
     expect(out.summary.recovered).toBe(0);
+  });
+});
+
+/**
+ * zoom 재시도 중복 회수 가드(설계 09 §논점3·§2C). 진단 08: 재시도는 `matched` 를 한 번도 참조하지 않아
+ * **이미 다른 차량에 배정된 판을 회수**했다(p1 veh6 이 veh0 의 판을 훔침 — 역투영 오차로 좌표가 달라
+ * quadKey 동등성으로는 잡히지 않는다). 가드는 역투영 중심이 배정판과 ε=0.03 이내면 기각하고 **다음 줌 계속**.
+ *
+ * 뷰 판 좌표는 `projectBaseToView`(라운드트립 역방향)로 만든다 — 스텁 카메라 echo(0/0/1)가 viewPtz 이므로
+ * 원하는 base 중심으로 정확히 역투영되는 뷰 좌표를 얻는다(기하 신규 발명 0).
+ */
+describe('runDetect — 재시도 중복 회수 가드(DUP_EPS)', () => {
+  const fovOpts = { fovBaseV: cfg.fovBaseV, zoomRef: cfg.zoomRef, aspect: cfg.aspect };
+  const ECHO_PTZ = { pan: 0, tilt: 0, zoom: 1 }; // makeCamera 스텁의 requestImage echo.
+  /** base 좌표 (cx,cy) 로 역투영되는 뷰 번호판. */
+  const viewPlateAtBase = (cx: number, cy: number): PlateBox => {
+    const v = projectBaseToView({ x: cx, y: cy }, ECHO_PTZ, PRESET_PTZ, fovOpts);
+    return plate(v.x, v.y);
+  };
+
+  const V1 = vehicle(0.4, 0.4, 0.2, 0.2); // rect x 0.4~0.6 — 판 A(0.5,0.5) 귀속.
+  const V2 = vehicle(0.62, 0.42, 0.2, 0.2); // rect x 0.62~0.82 — A 중심 미포함 → 미귀속 → 재시도 진입.
+  const A = plate(0.5, 0.5);
+
+  it('G1 전 줌뷰가 배정판 사본만 반환 → plate undefined(전 시도 기각), requestImage 5회(상한 불변), recovered=0', async () => {
+    const camera = makeCamera({ presetPtz: PRESET_PTZ });
+    // 4개 뷰 전부 A 에서 0.01(p1 실측 중복 거리) 떨어진 판 → 전부 기각되어야 한다.
+    const dup = () => [viewPlateAtBase(0.51, 0.5)];
+    const deps: DetectDeps = { camera, vpd: makeVpd([V1, V2]), lpd: makeLpd([[A], dup(), dup(), dup(), dup()]) };
+    const out = await runDetect(deps, { cam: 1, preset: 1 }, cfg);
+
+    expect(out.vehicles[0].plate!.quad).toBe(A.quad); // V1 은 base 매칭 유지.
+    expect(out.vehicles[1].plate).toBeUndefined(); // ★ 훔친 판 대신 "판 없음"(source:'bbox' 강등).
+    expect(out.summary.recovered).toBe(0);
+    expect(camera.requestImage).toHaveBeenCalledTimes(5); // base + 4 뷰 — 호출 상한 불변.
+  });
+
+  it('G2 1차 뷰=중복 판 / 2차 뷰=신규 판 → 기각 후 **다음 줌 계속**해 신규 판 채택(attempts:2)', async () => {
+    const camera = makeCamera({ presetPtz: PRESET_PTZ });
+    const deps: DetectDeps = {
+      camera,
+      vpd: makeVpd([V1, V2]),
+      lpd: makeLpd([[A], [viewPlateAtBase(0.51, 0.5)], [viewPlateAtBase(0.72, 0.52)], [], []]),
+    };
+    const out = await runDetect(deps, { cam: 1, preset: 1 }, cfg);
+
+    const p = out.vehicles[1].plate;
+    expect(p).toBeDefined();
+    expect(p!.recovered).toBe(true);
+    expect(p!.attempts).toBe(2); // 1차 기각 → 중단이 아니라 계속.
+    expect(out.summary.recovered).toBe(1);
+  });
+
+  it('G3 신규 판이 최근접 배정판에서 0.13 거리(p1 veh2 정상 회수 상응) → 정상 recovered 유지(과차단 방지)', async () => {
+    const camera = makeCamera({ presetPtz: PRESET_PTZ });
+    // p1 실측: 정상 신규 회수점↔최근접 base 판 = 0.1357 ≫ ε=0.03.
+    const deps: DetectDeps = { camera, vpd: makeVpd([V1, V2]), lpd: makeLpd([[A], [viewPlateAtBase(0.63, 0.5)]]) };
+    const out = await runDetect(deps, { cam: 1, preset: 1 }, cfg);
+
+    expect(out.vehicles[1].plate!.recovered).toBe(true);
+    expect(out.vehicles[1].plate!.attempts).toBe(1);
+    expect(out.summary.recovered).toBe(1);
   });
 });
 
@@ -361,20 +424,64 @@ describe('runDetect — 주차면 필터(OnPlaceOpts)', () => {
     const camera = makeCamera({ presetPtz: PRESET_PTZ });
     const deps: DetectDeps = { camera, vpd: makeVpd([PARKED]), lpd: makeLpd([[PARKED_PLATE]]) };
     const out = await runDetect(deps, { cam: 1, preset: 1 }, cfg);
-    expect(out.summary).toEqual({ vpdCount: 1, lpdCount: 1, recovered: 0, onPlaceOnly: false, filteredOut: 0, lpdFilteredOut: 0 });
+    expect(out.summary).toEqual({ vpdCount: 1, lpdCount: 1, recovered: 0, onPlaceOnly: false, filteredOut: 0, lpdFilteredOut: 0, vpdEnabled: true });
     expect(out.summary).not.toHaveProperty('onPlaceDegraded'); // 키 자체가 없다(옵셔널 스프레드).
   });
 });
 
+describe('runDetect — VPD 게이트(vpdEnabled, 설계서 S2)', () => {
+  it('vpdEnabled:false → vpd.detect 미호출(0회) · plates 는 반환 · summary.vpdEnabled=false', async () => {
+    const camera = makeCamera({ presetPtz: PRESET_PTZ });
+    const vpd = makeVpd([vehicle(0.4, 0.5, 0.06, 0.24)]);
+    const lpd = makeLpd([[plate(0.42, 0.62)]]);
+    const deps: DetectDeps = { camera, vpd, lpd };
+    const out = await runDetect(deps, { cam: 1, preset: 1, vpdEnabled: false }, cfg);
+    expect(vpd.detect).toHaveBeenCalledTimes(0); // ★ VPD 정지.
+    expect(out.vehicles).toHaveLength(0); // 차량 없음.
+    expect(out.plates).toHaveLength(1); // LPD 는 계속 — 폴리곤 필터 미요청이라 전량.
+    expect(out.summary.vpdEnabled).toBe(false);
+    expect(out.summary.vpdCount).toBe(0);
+    expect(out.summary.lpdCount).toBe(1);
+  });
+
+  it('vpdEnabled 미지정 → 라이브러리 기본 true(vpd.detect 호출 · 회귀 0)', async () => {
+    const camera = makeCamera({ presetPtz: PRESET_PTZ });
+    const vpd = makeVpd([vehicle(0.4, 0.5, 0.06, 0.24)]);
+    const deps: DetectDeps = { camera, vpd, lpd: makeLpd([[]]) };
+    const out = await runDetect(deps, { cam: 1, preset: 1 }, cfg);
+    expect(vpd.detect).toHaveBeenCalledTimes(1);
+    expect(out.summary.vpdEnabled).toBe(true);
+    expect(out.vehicles).toHaveLength(1);
+  });
+
+  // ★ 보강(qa) — 설계 §3 S2 "seg 호출도 스킵"을 봉인한다: cuboidCtx·segment·canSegment 를 **다 배선**해도
+  //   vpdEnabled:false 면 seg 게이트(`cuboidCtx && vpdEnabled && …`)가 단락돼 vpd.segment 를 0회 부른다.
+  //   개발자 테스트는 vpd.detect=0 만 봉인해 육면체 seg 게이트가 무검증이었다.
+  it('vpdEnabled:false + cuboidCtx·segment·canSegment 배선 → vpd.segment 0회 · cuboids 키 없음', async () => {
+    const camera = makeCamera({ presetPtz: PRESET_PTZ });
+    const segment = vi.fn(async () => { throw new Error('seg 는 호출되면 안 된다'); });
+    const canSegment = vi.fn(() => true);
+    const vpd = { detect: vi.fn(async () => [vehicle(0.4, 0.5, 0.06, 0.24)]), segment, canSegment };
+    const deps: DetectDeps = { camera, vpd, lpd: makeLpd([[plate(0.42, 0.62)]]) };
+    const out = await runDetect(deps, { cam: 1, preset: 1, vpdEnabled: false }, cfg, undefined, {} as never);
+    expect(vpd.detect).toHaveBeenCalledTimes(0);
+    expect(segment).toHaveBeenCalledTimes(0); // ★ 육면체 seg 문맥 미호출(설계 결정 D).
+    expect(out).not.toHaveProperty('cuboids'); // 미산출 → 키 자체가 없다(응답 shape 불변).
+    expect(out.plates).toHaveLength(1); // LPD 는 계속.
+  });
+});
+
 /**
- * 폴백 상수 = **33.1°**(zoom=1 기준 수직 FOV).
+ * 폴백 상수 = **34.6348°**(zoom=1 기준 수직 FOV = CObjCamera.DEFAULT_VERT_FOV).
  * 이전 값 24.017 은 `camera.fov`(zoom=1.4 에서의 fov 스냅샷)를 base 로 오인한 값이라 f 가 +42% 틀렸다.
- * 33.1 은 독립 3자 일치로 고른 값: 라이브 실측 32.6~33.5° / 지면모델 추정 33.102° / 설계 GT 33.167°.
+ * [2026-07-15] Unity 줌↔FOV 를 각도 반비례식에서 **탄젠트 광학 모델**로 전환하면서 base 를 34.6348 로 정합했다
+ *   (수평 58° @ 16:9 의 수직 FOV; Unity 탄젠트 SetZoomByFOV/detectMath.fovV 와 일치).
+ *   종전 33.1 은 각도렌더 이미지에 탄젠트 추정을 피팅한 과도값이었다(레거시 데이터에서만 성립).
  */
-const FALLBACK_FOV = 33.1;
+const FALLBACK_FOV = 34.6348;
 
 describe('loadDetectCfg — 추정 불가 시 폴백 상수', () => {
-  it('placeRoiFile undefined → 폴백(fovBaseV=33.1, aspect=16/9, frontBias/zoomFactors 상수)', async () => {
+  it('placeRoiFile undefined → 폴백(fovBaseV=34.6348, aspect=16/9, frontBias/zoomFactors 상수)', async () => {
     const out = await loadDetectCfg(undefined, 1);
     expect(out.fovBaseV).toBeCloseTo(FALLBACK_FOV, 6);
     expect(out.aspect).toBeCloseTo(16 / 9, 6);
@@ -421,10 +528,11 @@ describe('★ loadDetectCfg C3 — fovBaseV 는 지면모델 추정, camera.fov 
   const load = (path: string) => loadDetectCfg(path, 1, { cameraposFile: CAMPOS, ground: GROUND });
 
   /**
-   * ⚠️ 폴백(33.1)이 추정치(≈33.0)와 **거의 같아졌다** — 이제 **값만으로 두 경로를 구별할 수 없다.**
-   * (폴백이 24.017 이던 시절엔 값 차이가 곧 구별이었다.) 따라서 검출력을 **구조적 단언**으로 옮긴다:
+   * ⚠️ 동결 픽스처(PtzCamRoi.unity.json)는 **레거시 각도모델** 지오메트리라, 탄젠트 추정기가 돌리면 ≈33.19°
+   *   (각도모델 등가 base)를 낸다. 폴백은 이제 탄젠트 base 34.6348° 이므로 두 값이 다시 벌어져 **구별 가능**하다.
+   *   (실운영 데이터를 탄젠트 Unity 로 재생성하면 추정도 34.6° 로 수렴한다.) 검출력은 **구조적 단언**으로 유지:
    *   추정 경로는 estimateGroundModels 의 출력과 **소수 9자리까지 동일**해야 한다 —
-   *   조용히 폴백으로 떨어지면(33.1) 이 단언이 깨진다.
+   *   조용히 폴백으로 떨어지면(34.6348) 이 단언이 깨진다.
    */
   it('추정 fovBaseV 는 폴백 상수와 **다른 값**이다 — 조용한 폴백 강등 검출(공허한 단언 방지)', async () => {
     const out = await load(UNITY_FIXTURE);

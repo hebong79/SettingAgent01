@@ -1,6 +1,11 @@
 import { z } from 'zod';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
-import { VpdSchema, LpdSchema } from './toolsConfig.js';
+import {
+  VpdSchema,
+  LpdSchema,
+  CameraExecutionModeSchema,
+  CameraSourceConfigSchema,
+} from './toolsConfig.js';
 import { LlmSchema } from './llmConfig.js';
 
 /**
@@ -19,8 +24,59 @@ export const SettingsPatchSchema = z
     llm: LlmSchema.pick({ provider: true, model: true, baseUrl: true }).partial().optional(),
     vpd: VpdSchema.pick({ endpoint: true, detPath: true }).partial().optional(),
     lpd: LpdSchema.pick({ endpoint: true, detPath: true }).partial().optional(),
+    camera: z
+      .object({
+        executionMode: CameraExecutionModeSchema.optional(),
+        selectedCameraId: z.string().min(1).optional(),
+        /** 현재 콤보에서 편집한 소스 한 건. 배열 전체 교체를 피해서 ptz 등 미편집 필드를 보존한다. */
+        source: CameraSourceConfigSchema.pick({
+          id: true,
+          label: true,
+          kind: true,
+          protocol: true,
+          baseUrl: true,
+          host: true,
+          port: true,
+          username: true,
+          password: true,
+          rtspUrl: true,
+        })
+          .required({ id: true, kind: true })
+          .optional(),
+      })
+      .strict()
+      .optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((patch, ctx) => {
+    const source = patch.camera?.source;
+    if (source?.kind === 'hucoms' && !source.rtspUrl) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['camera', 'source', 'rtspUrl'],
+        message: '실카메라 RTSP URL이 필요합니다',
+      });
+    } else if (source?.kind === 'hucoms' && source.rtspUrl) {
+      try {
+        const parsedUrl = new URL(source.rtspUrl);
+        const protocol = parsedUrl.protocol;
+        if (!['rtsp:', 'rtsps:'].includes(protocol)) throw new Error('invalid protocol');
+        if (parsedUrl.username || parsedUrl.password) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['camera', 'source', 'rtspUrl'],
+            message: 'RTSP URL 계정은 관리자 ID/Password 입력란에 분리해야 합니다',
+          });
+        }
+      } catch {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['camera', 'source', 'rtspUrl'],
+          message: '실카메라 URL은 rtsp:// 또는 rtsps:// 이어야 합니다',
+        });
+      }
+    }
+  });
 
 export type SettingsPatch = z.infer<typeof SettingsPatchSchema>;
 
@@ -29,6 +85,22 @@ export interface EditableSettings {
   llm: { provider?: string; model?: string; baseUrl?: string; apiKeyEnv?: string };
   vpd: { endpoint?: string; detPath?: string; apiKeyEnv?: string };
   lpd: { endpoint?: string; detPath?: string; apiKeyEnv?: string };
+  camera: {
+    executionMode: 'typescript-native';
+    selectedCameraId: string;
+    sources: Array<{
+      id: string;
+      label: string;
+      kind: 'sim' | 'hucoms';
+      protocol?: 'unity-rpc' | 'unity-rest' | 'hucoms-v1.22';
+      baseUrl?: string;
+      host?: string;
+      port?: number;
+      username?: string;
+      rtspUrl?: string;
+      passwordSet: boolean;
+    }>;
+  };
 }
 
 export interface SettingsPaths {
@@ -47,6 +119,19 @@ function readRaw(path: string): Record<string, any> {
   return JSON.parse(readFileSync(path, 'utf-8')) as Record<string, any>;
 }
 
+/** RTSP URL에 잘못 포함된 userinfo가 있어도 설정 조회 API에는 노출하지 않는다. */
+function editableRtspUrl(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  try {
+    const url = new URL(raw);
+    url.username = '';
+    url.password = '';
+    return url.toString();
+  } catch {
+    return raw;
+  }
+}
+
 /** 두 config 파일에서 편집 대상 값만 추출한다(키 값 미노출). */
 export function readEditableSettings(paths: SettingsPaths = DEFAULT_SETTINGS_PATHS): EditableSettings {
   const rawTools = readRaw(paths.toolsPath);
@@ -54,10 +139,29 @@ export function readEditableSettings(paths: SettingsPaths = DEFAULT_SETTINGS_PAT
   const llm = rawLlm.llm ?? {};
   const vpd = rawTools.vpd ?? {};
   const lpd = rawTools.lpd ?? {};
+  const runtime = rawTools.cameraRuntime ?? {};
+  const rawSources = Array.isArray(rawTools.cameraSources) ? rawTools.cameraSources : [];
+  const sources = rawSources.map((source: Record<string, any>) => ({
+    id: String(source.id ?? ''),
+    label: String(source.label ?? source.id ?? ''),
+    kind: source.kind === 'hucoms' ? ('hucoms' as const) : ('sim' as const),
+    protocol: source.protocol,
+    baseUrl: source.baseUrl,
+    host: source.host,
+    port: source.port,
+    username: source.username,
+    rtspUrl: editableRtspUrl(source.rtspUrl),
+    passwordSet: typeof source.password === 'string' && source.password.length > 0,
+  }));
   return {
     llm: { provider: llm.provider, model: llm.model, baseUrl: llm.baseUrl, apiKeyEnv: llm.apiKeyEnv },
     vpd: { endpoint: vpd.endpoint, detPath: vpd.detPath, apiKeyEnv: vpd.apiKeyEnv },
     lpd: { endpoint: lpd.endpoint, detPath: lpd.detPath, apiKeyEnv: lpd.apiKeyEnv },
+    camera: {
+      executionMode: 'typescript-native',
+      selectedCameraId: String(runtime.selectedCameraId ?? sources[0]?.id ?? ''),
+      sources,
+    },
   };
 }
 
@@ -94,5 +198,24 @@ export function writeEditableSettings(patch: SettingsPatch, paths: SettingsPaths
     const a = mergeSection(rawTools.vpd, patch.vpd, ['endpoint', 'detPath']);
     const b = mergeSection(rawTools.lpd, patch.lpd, ['endpoint', 'detPath']);
     if (a || b) writeFileSync(paths.toolsPath, JSON.stringify(rawTools, null, 2), 'utf-8');
+  }
+  if (patch.camera) {
+    const rawTools = readRaw(paths.toolsPath);
+    if (!rawTools.cameraRuntime || typeof rawTools.cameraRuntime !== 'object') rawTools.cameraRuntime = {};
+    let changed = mergeSection(rawTools.cameraRuntime, patch.camera, ['executionMode', 'selectedCameraId']);
+    if (patch.camera.source) {
+      if (!Array.isArray(rawTools.cameraSources)) rawTools.cameraSources = [];
+      const sourcePatch = patch.camera.source as Record<string, unknown>;
+      const index = rawTools.cameraSources.findIndex((source: Record<string, unknown>) => source?.id === sourcePatch.id);
+      const current = index >= 0 ? rawTools.cameraSources[index] : {};
+      const merged = { ...current } as Record<string, unknown>;
+      for (const key of ['id', 'label', 'kind', 'protocol', 'baseUrl', 'host', 'port', 'username', 'password', 'rtspUrl']) {
+        if (sourcePatch[key] !== undefined) merged[key] = sourcePatch[key];
+      }
+      if (index >= 0) rawTools.cameraSources[index] = merged;
+      else rawTools.cameraSources.push(merged);
+      changed = true;
+    }
+    if (changed) writeFileSync(paths.toolsPath, JSON.stringify(rawTools, null, 2), 'utf-8');
   }
 }

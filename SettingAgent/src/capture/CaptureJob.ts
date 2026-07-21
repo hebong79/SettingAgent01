@@ -1,21 +1,18 @@
 import type { ICameraClient } from '../clients/CameraClient.js';
 import type { VpdClient } from '../clients/VpdClient.js';
 import type { LpdClient } from '../clients/LpdClient.js';
-import type { SqliteStore } from './SqliteStore.js';
-import type { CheckpointReviewer } from './CheckpointReviewer.js';
-import { advisoryLines } from './CheckpointReviewer.js';
-import type { FloorRoiReviewer } from './FloorRoiReviewer.js';
 import type { OccupancyReviewer } from './OccupancyReviewer.js';
-import type { SetupBrain } from '../brain/SetupBrain.js';
+import type { SetupBrain, OccupancyJudgment } from '../brain/SetupBrain.js';
 import { aggregate, type AggregateOptions } from './Aggregator.js';
 import type { SetupTarget } from '../setup/SetupOrchestrator.js';
 import type { ToolsConfig } from '../config/toolsConfig.js';
-import type { CaptureState, CaptureStatus } from './types.js';
+import type { CaptureState, CaptureStatus, DetectionRow, AggregatedSlot } from './types.js';
 import type { NormalizedPoint, NormalizedQuad, VehicleBox } from '../domain/types.js';
 import type { PlateBox } from '../clients/LpdClient.js';
 import { quadBoundingRect } from '../domain/geometry.js';
 import { loadNormalizedPlaceRoi, type NormalizedPlaceRoi } from './placeRoi.js';
 import { filterVehiclesOnPlace, filterPlatesOnPlace } from './onPlaceFilter.js';
+import { buildFrameCuboids, type CuboidContext, type FrameCuboids } from '../ground/frameCuboids.js';
 import { logger } from '../util/logger.js';
 
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -24,11 +21,7 @@ export interface CaptureJobDeps {
   camera: ICameraClient;
   vpd: VpdClient;
   lpd?: LpdClient;
-  store: SqliteStore;
-  reviewer?: CheckpointReviewer;
-  /** 바닥 점유 영역(floor ROI) 체크포인트 계산기(옵셔널 — 미주입 시 기존 동작). */
-  floorReviewer?: FloorRoiReviewer;
-  /** 차량 점유율(LLM 판정) 체크포인트 계산기(옵셔널 — 미주입 시 no-op). */
+  /** 차량 점유율(LLM 판정) 체크포인트 계산기(옵셔널 — 인메모리 occByPreset 축소 보조. 미주입/LLM off 시 no-op). */
   occupancyReviewer?: OccupancyReviewer;
   /** LLM 두뇌(옵셔널 — warm-up 강제 구동용. warmup 미구현/비활성 시 no-op). */
   brain?: SetupBrain;
@@ -45,6 +38,32 @@ export interface CaptureJobDeps {
   expectedByPreset?: Record<string, number>;
   /** 미리 정의된 주차면 폴리곤 파일(PtzCamRoi.json). 모드A(주차면 위 차량만) 필터 소스. 미주입 시 강등(전량 통과). */
   placeRoiFile?: string;
+  /**
+   * ★ 차량 육면체 문맥 해결자(옵셔널·가산). 주입 시 **매 라운드** 프리셋마다 seg 를 1회 더 불러 육면체를 산출한다.
+   * 미주입(또는 `ground.enabled=false` → 라우트가 미주입) → **육면체 전 기능 off**(신규 설정 플래그 0 — 기존 킬스위치 재사용).
+   * 산출물은 **인메모리**에만 둔다(DB 무접촉). 실패는 전부 흡수 — **잡은 절대 죽지 않는다**.
+   */
+  cuboidCtx?: (camIdx: number, presetIdx: number) => Promise<CuboidContext | null>;
+  /**
+   * ★ 잡 종단 완료 콜백(옵셔널·가산 — 원버튼 셋업 파이프라인 배선). done/stopped/error 로 1회 통지.
+   * 미주입 시 no-op(수동 흐름 회귀 0). throw 는 흡수한다 — 콜백이 잡을 죽이지 않는다.
+   */
+  onFinished?: (status: 'done' | 'stopped' | 'error') => void;
+}
+
+/** 잡이 들고 있는 프리셋별 최신 육면체(인메모리 — DB 저장 금지). `GET /capture/job-cuboids` 가 읽는다. */
+export type JobCuboids = FrameCuboids & { camIdx: number; presetIdx: number; roundIdx: number; capturedAt: string };
+
+/**
+ * finalize 로 넘기는 인메모리 런 스냅샷(설계서 §2.3 — DB 중간테이블 폐기 대체).
+ * dets/presetRounds = 결정형 집계 재계산 입력. aggregated = 마지막 체크포인트 집계(status 보존 병합용).
+ * occByPreset = 축소 occupancy 보조(LLM off 시 빈 맵).
+ */
+export interface CaptureSnapshot {
+  dets: DetectionRow[];
+  presetRounds: Map<string, number>;
+  aggregated: AggregatedSlot[];
+  occByPreset: Map<string, OccupancyJudgment>;
 }
 
 export interface CaptureStartParams {
@@ -60,6 +79,11 @@ export interface CaptureStartParams {
   floorRoiUseLlm?: boolean;
   /** VPD 검출 모드(옵셔널). 미지정/true=주차면 위 차량만, false=모든 차량. 기본 true. */
   vpdOnParkingOnly?: boolean;
+  /**
+   * VPD(차량) 검출 게이트(옵셔널). 미지정 시 **라이브러리 기본 true**(기존 완전 검출 동작 보존 → 기존 테스트 무수정).
+   * 라우트(제품 정책)는 false 를 명시해 자동 경로 VPD 를 정지시킨다. false 면 vpd.detect·cuboid seg 미호출.
+   */
+  vpdEnabled?: boolean;
 }
 
 /**
@@ -70,7 +94,19 @@ export interface CaptureStartParams {
  */
 export class CaptureJob {
   private state: CaptureState = 'idle';
+  /** 인메모리 런 식별자(로그·status 표시용만 — DB 무접촉. start 마다 ++runSeq). */
   private runId?: number;
+  private runSeq = 0;
+  /** 검출 원본 인메모리 누적(구 insertDetections 대체). start 에서 clear. */
+  private dets: DetectionRow[] = [];
+  /** 프리셋별 관측 라운드 집합(구 getPresetRounds 대체 — distinct round 카운트 소스). */
+  private roundsByPreset = new Map<string, Set<number>>();
+  /** 최근 체크포인트 집계 결과(구 aggregated_slot 대체 — finalize status 보존 소스). */
+  private aggregated: AggregatedSlot[] = [];
+  /** 프리셋별 축소 occupancy 판정(구 occupancy 테이블 대체 — 인메모리). LLM off 시 빈 맵. */
+  private occByPreset = new Map<string, OccupancyJudgment>();
+  /** 관측 시퀀스(구 observation.id 대체 — DetectionRow.observationId 채움용 카운터). */
+  private obsSeq = 0;
   private round = 0;
   private done = 0;
   private planned = 0;
@@ -94,6 +130,8 @@ export class CaptureJob {
   private floorRoiUseLlm = true;
   /** VPD 검출 모드. true=주차면 위 차량만(기본), false=모든 차량. run 시작 시 고정(진행 중 토글 무시). */
   private vpdOnParkingOnly = true;
+  /** VPD(차량) 검출 게이트. 라이브러리 기본 true, 라우트가 false(제품 정책 OFF)로 정지. run 시작 시 고정. */
+  private vpdEnabled = true;
   /** 이번 run 의 주차면 폴리곤(run 시작 시 1회 로드 — 뷰어에서 편집·저장한 최신 ROI 반영). */
   private placePromise?: Promise<NormalizedPlaceRoi | null>;
   /** 모드A 필터로 제외한 차량 누적 대수. */
@@ -104,6 +142,8 @@ export class CaptureJob {
   private onPlaceDegraded?: string;
   /** 강등 warn 중복 억제(프리셋 키당 1회). */
   private degradeWarned = new Set<string>();
+  /** ★ 프리셋별 최신 차량 육면체(인메모리 — **DB 무접촉**). key=`${camIdx}:${presetIdx}`. start() 에서 clear. */
+  private cuboidsByPreset = new Map<string, JobCuboids>();
 
   private readonly setTimer: (fn: () => void, ms: number) => NodeJS.Timeout;
   private readonly clearTimer: (h: NodeJS.Timeout) => void;
@@ -160,11 +200,30 @@ export class CaptureJob {
       ...(this.latestAdvisory.length > 0 ? { latestAdvisory: [...this.latestAdvisory] } : {}),
       ...(this.llmFloorUnavailable ? { llmFloorUnavailable: true } : {}),
       ...(this.llmOccupancyUnavailable ? { llmOccupancyUnavailable: true } : {}),
+      ...(this.runId !== undefined ? { vpdEnabled: this.vpdEnabled } : {}),
       ...(this.runId !== undefined ? { vpdOnParkingOnly: this.vpdOnParkingOnly } : {}),
       ...(this.vpdFilteredOut > 0 ? { vpdFilteredOut: this.vpdFilteredOut } : {}),
       ...(this.lpdFilteredOut > 0 ? { lpdFilteredOut: this.lpdFilteredOut } : {}),
       ...(this.onPlaceDegraded ? { vpdOnPlaceDegraded: this.onPlaceDegraded } : {}),
+      ...(this.cuboidsByPreset.size > 0 ? { cuboid: this.cuboidIndex() } : {}),
     };
+  }
+
+  /**
+   * ★ status 에는 **경량 인덱스만** 싣는다(프리셋당 숫자 4개). status 는 초당 폴링되므로 전문(수십 KB)을
+   * 매번 실어 보내지 않는다 — 뷰어는 `round` 가 **바뀔 때만** `GET /capture/job-cuboids` 로 전문을 가져간다.
+   */
+  private cuboidIndex(): Record<string, { round: number; cuboidCount: number; unmatched: number; segDegraded: boolean }> {
+    const out: Record<string, { round: number; cuboidCount: number; unmatched: number; segDegraded: boolean }> = {};
+    for (const [key, c] of this.cuboidsByPreset) {
+      out[key] = {
+        round: c.roundIdx,
+        cuboidCount: c.summary.cuboidCount,
+        unmatched: c.summary.unmatchedDet,
+        segDegraded: c.summary.segDegraded,
+      };
+    }
+    return out;
   }
 
   /** 잡 시작. running/stopping/finalizing 중이면 거부(throw). */
@@ -175,6 +234,7 @@ export class CaptureJob {
     this.params = p;
     this.floorRoiUseLlm = p.floorRoiUseLlm ?? true; // 기본 true(기존 캡처 동작 회귀 0).
     this.vpdOnParkingOnly = p.vpdOnParkingOnly ?? true; // 기본 모드A(주차면 위 차량만).
+    this.vpdEnabled = p.vpdEnabled ?? true; // 라이브러리 기본 true(회귀 0). 라우트가 false 로 자동 경로 VPD 정지.
     this.vpdFilteredOut = 0;
     this.lpdFilteredOut = 0;
     this.onPlaceDegraded = undefined;
@@ -188,11 +248,18 @@ export class CaptureJob {
     this.llmFloorUnavailable = false;
     this.llmOccupancyUnavailable = false;
     this.lastFrameByPreset.clear();
+    this.cuboidsByPreset.clear(); // 이전 run 의 육면체 잔여 제거(인메모리 — DB 무접촉).
+    // 인메모리 누적 초기화(구 DB 중간테이블 대체 — 설계서 §2.2).
+    this.dets = [];
+    this.roundsByPreset.clear();
+    this.aggregated = [];
+    this.occByPreset.clear();
+    this.obsSeq = 0;
     // time 모드 첫 체크포인트는 시작 후 intervalMs 경과 시(즉시 발화 방지). rounds 모드는 미사용.
     this.lastCheckpointMs = this.monotonic();
     this.startedAt = this.now();
     this.endedAt = undefined;
-    this.runId = this.deps.store.createRun({ plannedCount: p.count, intervalMs: p.intervalMs, startedAt: this.startedAt });
+    this.runId = ++this.runSeq; // 인메모리 런 식별자(로그·status 표시용 — DB 무접촉).
     this.state = 'running';
     // LLM 강제 구동(warm-up) 비동기 발화 — non-blocking(start 지연 0). best-effort, 라운드1 캡처 동안 모델 로드.
     void this.deps.brain?.warmup?.();
@@ -213,12 +280,15 @@ export class CaptureJob {
     if (!this.roundRunning) this.finishRun('stopped', 'manual');
   }
 
-  private finishRun(status: 'done' | 'stopped' | 'error', reason: 'count' | 'manual' | 'error'): void {
+  private finishRun(status: 'done' | 'stopped' | 'error', _reason: 'count' | 'manual' | 'error'): void {
     this.endedAt = this.now();
-    if (this.runId !== undefined) {
-      this.deps.store.endRun(this.runId, { status, stopReason: reason, endedAt: this.endedAt });
-    }
     this.state = status;
+    // 원버튼 셋업 파이프라인 통지(옵셔널). throw 흡수 — 잡 사망 절대 금지.
+    try {
+      this.deps.onFinished?.(status);
+    } catch (e) {
+      logger.warn({ err: e, status }, '잡 완료 콜백 예외(흡수)');
+    }
   }
 
   private aggOptions(): AggregateOptions {
@@ -243,7 +313,7 @@ export class CaptureJob {
         if (this.currentState() === 'stopping') break;
         const t0 = this.monotonic(); // 이동 시작 시점(captureTarget 진입 직전 ≈ move 직전).
         try {
-          await this.captureTarget(this.runId, roundIdx, t);
+          await this.captureTarget(roundIdx, t);
         } catch (e) {
           // 개별 프리셋 캡처 실패는 경고로 흡수(잡 중단 아님 — detectPlates 패턴).
           logger.warn({ err: e, cam: t.camIdx, preset: t.presetIdx }, '캡처 라운드 프리셋 실패(흡수)');
@@ -258,7 +328,6 @@ export class CaptureJob {
       }
       this.round = roundIdx;
       this.done = roundIdx;
-      this.deps.store.updateRunProgress(this.runId, this.done);
 
       // 트리거(rounds/time)마다 집계 + (LLM 체크포인트). 단, 정지 중이면 수 분짜리 checkpoint 스킵.
       if (this.shouldCheckpoint() && this.currentState() !== 'stopping') {
@@ -286,7 +355,7 @@ export class CaptureJob {
     this.timer = this.setTimer(() => void this.runRound(), this.params.intervalMs);
   }
 
-  private async captureTarget(runId: number, roundIdx: number, t: SetupTarget): Promise<void> {
+  private async captureTarget(roundIdx: number, t: SetupTarget): Promise<void> {
     // 캡처 전 카메라를 프리셋 PTZ 로 실제 이동(/req_move) → 시뮬/실 카메라 활성 화면이 프리셋마다 물리적으로 이동.
     // ptz 가 완전(pan/tilt/zoom)할 때만. 이동 실패는 흡수(스냅샷은 /req_img 로 계속).
     if (this.deps.cfg.moveBeforeCapture && t.ptz?.pan !== undefined && t.ptz.tilt !== undefined && t.ptz.zoom !== undefined) {
@@ -299,20 +368,17 @@ export class CaptureJob {
     const cap = await this.deps.camera.requestImage(t.camIdx, t.presetIdx, t.ptz);
     this.lastFrame = { jpeg: cap.jpg, camIdx: t.camIdx, presetIdx: t.presetIdx, roundIdx };
     this.lastFrameByPreset.set(`${t.camIdx}:${t.presetIdx}`, cap.jpg);
-    const obsId = this.deps.store.insertObservation({
-      runId,
-      roundIdx,
-      camIdx: t.camIdx,
-      presetIdx: t.presetIdx,
-      capturedAt: this.now(),
-      pan: cap.pan,
-      tilt: cap.tilt,
-      zoom: cap.zoom,
-      imgName: cap.imgName,
-    });
+    // 관측 인메모리 기록(구 insertObservation 대체 — observation 원본 pan/tilt/zoom/imgName 은 finalize 불필요 → 미보유).
+    const obsId = ++this.obsSeq;
+    const presetKey = `${t.camIdx}:${t.presetIdx}`;
+    // 관측 라운드 누적(검출 유무 무관 — occupancyRate 분모). 구 observation 테이블의 distinct round 카운트 대체.
+    let rs = this.roundsByPreset.get(presetKey);
+    if (!rs) this.roundsByPreset.set(presetKey, (rs = new Set<number>()));
+    rs.add(roundIdx);
 
-    const raw = await this.deps.vpd.detect(cap.jpg);
-    const vehicles = this.vpdOnParkingOnly ? await this.applyOnPlaceFilter(raw, t) : raw;
+    // VPD off(제품 정책) 시 vpd.detect 미호출 → vehicles=[]. 번호판 필터는 vehicles=[] 로 폴리곤 직접 전환(결정 C).
+    const raw = this.vpdEnabled ? await this.deps.vpd.detect(cap.jpg) : [];
+    const vehicles = this.vpdEnabled && this.vpdOnParkingOnly ? await this.applyOnPlaceFilter(raw, t) : raw;
     const dets: Array<{ kind: 'vehicle' | 'plate'; x: number; y: number; w: number; h: number; conf: number; quad?: NormalizedQuad }> =
       vehicles.map((v) => ({
         kind: 'vehicle',
@@ -338,7 +404,68 @@ export class CaptureJob {
       }
     }
 
-    if (dets.length > 0) this.deps.store.insertDetections(obsId, t.camIdx, t.presetIdx, dets);
+    // 검출 인메모리 누적(구 insertDetections 대체 — DetectionRow 평면 행). 집계는 체크포인트/finalize 가 배열로 소비.
+    for (const d of dets) {
+      this.dets.push({
+        observationId: obsId,
+        roundIdx,
+        camIdx: t.camIdx,
+        presetIdx: t.presetIdx,
+        kind: d.kind,
+        x: d.x,
+        y: d.y,
+        w: d.w,
+        h: d.h,
+        conf: d.conf,
+        ...(d.quad ? { quad: d.quad } : {}),
+      });
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ↑ 여기까지가 **점유 판정 경로**다 — 위 블록은 한 줄도 바뀌지 않았다.
+    // ↓ 아래는 **가산**(읽기 전용). `raw`/`vehicles` 를 읽기만 하고 DB 에 아무것도 쓰지 않는다.
+    //   ∴ 육면체 on/off 는 `insertDetections` 인자를 바꿀 수 없다(구조적 회귀 0 — T6 가 봉인).
+    // ─────────────────────────────────────────────────────────────────────────
+    if (this.deps.cuboidCtx && this.vpdEnabled) {
+      // ★ `keptDetIdx` 는 필터를 **재계산하지 않고** 참조 동일성(indexOf)으로 얻는다 → 필터 경로 무접촉.
+      //   (`filterVehiclesOnPlace` 는 Array.filter — 입력 객체 참조를 보존한다.)
+      //   ⚠️ **-1 을 여기서 버리지 않는다**(DEFECT-2): 전제가 깨지면 `buildFrameCuboids` 가 issues 로 **드러낸다**.
+      //      예전엔 `.filter((i) => i >= 0)` 가 위반을 삼켜 `cuboids:[] · issues:[]`(빈 오버레이 + 무사유)가 됐다.
+      const keptDetIdx = vehicles.map((v) => raw.indexOf(v));
+      await this.updateCuboids(t, cap.jpg, raw, keptDetIdx, roundIdx);
+    }
+  }
+
+  /**
+   * 프리셋 1개분 육면체 갱신(가산·인메모리). **throw 0** — 잡 사망 절대 금지(마스터 §5).
+   * `buildFrameCuboids` 자체가 throw 0 이지만, 문맥 해결(파일 IO)·예기치 못한 오류까지 **한 겹 더** 흡수한다(방어 이중화).
+   */
+  private async updateCuboids(
+    t: SetupTarget,
+    jpeg: Buffer,
+    raw: readonly VehicleBox[],
+    keptDetIdx: readonly number[],
+    roundIdx: number,
+  ): Promise<void> {
+    try {
+      const ctx = await this.deps.cuboidCtx!(t.camIdx, t.presetIdx);
+      const fc = await buildFrameCuboids({ jpeg, detBoxes: raw, keptDetIdx, vpd: this.deps.vpd, ctx });
+      this.cuboidsByPreset.set(`${t.camIdx}:${t.presetIdx}`, {
+        ...fc,
+        camIdx: t.camIdx,
+        presetIdx: t.presetIdx,
+        roundIdx,
+        capturedAt: this.now(),
+      });
+    } catch (e) {
+      // 육면체는 **관찰용 가산 기능**이다 — 실패해도 수집은 계속된다(점유·DB 무영향).
+      logger.warn({ err: e, cam: t.camIdx, preset: t.presetIdx }, '차량 육면체 산출 실패(흡수 — 수집 계속)');
+    }
+  }
+
+  /** 프리셋별 육면체 전문(GET /capture/job-cuboids). 카메라·VPD 호출 0 — 인메모리 읽기만. */
+  getCuboids(camIdx: number, presetIdx: number): JobCuboids | undefined {
+    return this.cuboidsByPreset.get(`${camIdx}:${presetIdx}`);
   }
 
   /** 대상 프리셋의 주차면 폴리곤(차량·번호판 필터 공유 소스). placePromise 는 캐시된 Promise — 파일 I/O 재발생 없음. */
@@ -396,50 +523,24 @@ export class CaptureJob {
     return this.done % p.checkpointEvery === 0;
   }
 
-  /** 집계 후 체크포인트(LLM 활성 시 자문 갱신). 좌표 불변. */
+  /** 집계 후 체크포인트(인메모리 누적 재집계 + 축소 occupancy 보조). 좌표 불변. */
   private async checkpoint(roundIdx: number): Promise<void> {
-    if (this.runId === undefined) return;
     // 발화 확정 → 다음 time 주기 기준점 갱신(rounds 모드에선 미사용).
     this.lastCheckpointMs = this.monotonic();
     // LLM 사용 직전 warm-up 재보장(라운드 간격으로 언로드됐어도 모델 로드 확정). best-effort — 실패해도 진행.
     // 정지 중이면 수 분짜리 콜드 로드 대기를 피하려 스킵.
     if (this.currentState() !== 'stopping') await this.deps.brain?.warmup?.();
-    const dets = this.deps.store.getDetectionsForRun(this.runId);
-    const presetRounds = this.deps.store.getPresetRounds(this.runId);
-    const slots = aggregate(dets, presetRounds, this.aggOptions());
-    this.deps.store.replaceAggregatedSlots(this.runId, slots);
+    // 인메모리 결정형 집계(구 getDetectionsForRun/getPresetRounds/replaceAggregatedSlots DB 경로 대체 — 설계서 §2.2).
+    // Aggregator 시그니처 불변(배열 + 프리셋별 라운드수 맵). CheckpointReviewer/FloorRoiReviewer 배선 제거(캡처 루프 LLM off).
+    const presetRounds = new Map<string, number>([...this.roundsByPreset].map(([k, s]) => [k, s.size]));
+    this.aggregated = aggregate(this.dets, presetRounds, this.aggOptions());
 
-    if (this.deps.reviewer && this.currentState() !== 'stopping') {
-      const result = await this.deps.reviewer.review(
-        this.runId,
-        roundIdx,
-        this.planned,
-        slots,
-        this.newFacesRecentK(),
-        this.deps.expectedByPreset,
-      );
-      if (result) this.latestAdvisory = advisoryLines(result);
-    }
-
-    // 바닥 점유 영역(floor ROI) 계산. 파일 모드(floorRoiUseLlm=false)면 LLM floor 생성 스킵(뷰어가 파일에서 직접 표시).
-    if (this.deps.floorReviewer && this.floorRoiUseLlm !== false) {
-      const floorRes = await this.deps.floorReviewer.review(
-        this.runId,
-        slots,
-        this.lastFrameByPreset,
-        () => this.currentState() === 'stopping',
-      );
-      // LLM 동작불가 감지 시 UI 경고 표식(app.js 메시지박스 · 런당 1회 가드는 클라이언트 담당).
-      if (floorRes.llmUnavailable) this.llmFloorUnavailable = true;
-    }
-
-    // 차량 점유율(LLM 판정) 계산(주입 시). 전 프리셋 순회(캡 없음). LLM 불가/실패 시 graceful skip.
-    // 파일 모드(floorRoiUseLlm=false)면 floorReviewer 와 동일하게 스킵 — 캡처 중 LLM 전면 미사용(R3).
+    // 차량 점유율(축소 보조·인메모리 occByPreset). 파일 모드(floorRoiUseLlm=false)/LLM off 면 no-op(저장 생략).
     if (this.deps.occupancyReviewer && this.floorRoiUseLlm !== false) {
       const occRes = await this.deps.occupancyReviewer.review(
-        this.runId,
         roundIdx,
         this.lastFrameByPreset,
+        this.occByPreset,
         () => this.currentState() === 'stopping',
         this.deps.expectedByPreset,
       );
@@ -447,9 +548,45 @@ export class CaptureJob {
     }
   }
 
-  /** 최근 K회 신규 면 수(수렴 신호). 1차는 단순화 — 현재 후보 면 수를 신호로 전달. */
-  private newFacesRecentK(): number {
-    if (this.runId === undefined) return 0;
-    return this.deps.store.getAggregatedSlots(this.runId).filter((s) => s.status !== 'rejected').length;
+  /** 현재 집계 결과(REST GET /capture/aggregate). 인메모리 최근 체크포인트 산출. */
+  getAggregated(): AggregatedSlot[] {
+    return this.aggregated;
+  }
+
+  /**
+   * 프리셋별 축소 occupancy(REST GET /capture/occupancy). 구 occupancy 테이블 rows shape 유지
+   * (camIdx/presetIdx/occupiedCount/total/rate/spacesJson) — 뷰어 occupancyByKey 무변경. LLM off 시 [].
+   */
+  getOccupancy(): Array<{
+    camIdx: number;
+    presetIdx: number;
+    occupiedCount: number;
+    total: number;
+    rate: number;
+    spacesJson: string;
+  }> {
+    const out: Array<{ camIdx: number; presetIdx: number; occupiedCount: number; total: number; rate: number; spacesJson: string }> = [];
+    for (const [key, j] of this.occByPreset) {
+      const [camIdx, presetIdx] = key.split(':').map(Number);
+      out.push({
+        camIdx,
+        presetIdx,
+        occupiedCount: j.occupiedCount,
+        total: j.total,
+        rate: j.rate,
+        spacesJson: JSON.stringify(j.spaces),
+      });
+    }
+    return out;
+  }
+
+  /** finalize 입력 스냅샷(설계서 §2.3). DB 재조회 없이 인메모리 누적을 그대로 넘긴다. */
+  getSnapshot(): CaptureSnapshot {
+    return {
+      dets: this.dets,
+      presetRounds: new Map<string, number>([...this.roundsByPreset].map(([k, s]) => [k, s.size])),
+      aggregated: this.aggregated,
+      occByPreset: this.occByPreset,
+    };
   }
 }

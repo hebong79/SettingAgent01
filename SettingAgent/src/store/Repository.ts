@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type { NormalizedQuad, NormalizedRect, SetupArtifact } from '../domain/types.js';
 import { rectToQuad } from '../domain/geometry.js';
+import { stringify5 } from '../util/round.js';
 
 /**
  * 셋업 산출물(Preset/ParkingSlot/GlobalSlotIndex)을 JSON 파일로 영속화.
@@ -16,7 +17,7 @@ export class Repository {
   /** 산출물 저장(디렉터리 자동 생성). */
   saveArtifact(artifact: SetupArtifact): void {
     mkdirSync(this.dataDir, { recursive: true });
-    writeFileSync(this.file, JSON.stringify(artifact, null, 2), 'utf-8');
+    writeFileSync(this.file, stringify5(artifact, 2), 'utf-8');
   }
 
   /** 산출물 로드. 없으면 null. 구데이터(plateRoiByPreset=rect)는 로드 시 quad 로 승격(하위호환). */

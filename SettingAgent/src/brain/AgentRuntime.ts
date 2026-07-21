@@ -16,14 +16,11 @@ import {
   FinalizeCaptureResultSchema,
   FloorRoiRawSchema,
   OccupancyRawSchema,
-  CenteringAdviceSchema,
   type SetupBrain,
   type FloorRoiInput,
   type FloorRoiResult,
   type OccupancyInput,
   type OccupancyJudgment,
-  type CenteringAdviceInput,
-  type CenteringAdvice,
   type Stage1Input,
   type Stage1Result,
   type Stage2Input,
@@ -324,22 +321,6 @@ export class AgentRuntime implements SetupBrain, LlmModelSelector {
       rate: total > 0 ? occupiedCount / total : 0,
       confidence: parsed.confidence,
     };
-  }
-
-  // ── 캘리브레이션 중심정렬·줌 자문(좌표 생성 아님 — 소폭 보정 제안·판정) ──
-  // 인라인 한글 프롬프트(reviewCheckpoint 스타일, 단순함 우선). 호출측이 클램프·폴백.
-  async adviseCentering(input: CenteringAdviceInput): Promise<CenteringAdvice | null> {
-    if (!this.client) return null;
-    const { system, user: userTpl } = loadPromptPair(this.cfg.centering?.prompt ?? 'config/prompts/ptz_centering.yaml');
-    const user = renderTemplate(userTpl, {
-      phase: input.phase,
-      errX: input.err.errX.toFixed(3),
-      errY: input.err.errY.toFixed(3),
-      plateWidth: input.plateWidth.toFixed(3),
-      targetWidth: String(input.target.targetWidth),
-      centerTol: String(input.target.centerTol),
-    });
-    return this.chatJson(system, user, (j) => CenteringAdviceSchema.parse(j), input.imageBase64);
   }
 
   /** 셋업 산출물 자연어 검토(보조, /brain/review). 비활성 시 null. */

@@ -6,7 +6,7 @@ import type { CameraList } from '../src/viewer/CameraSource.js';
 
 /** requestImage/move/listCameras 호출 인자를 기록하는 가짜 CameraClient. */
 function spyCamera() {
-  const calls: { requestImage: any[]; move: any[]; list: number } = { requestImage: [], move: [], list: 0 };
+  const calls: { requestImage: any[]; move: any[]; getPtz: any[]; list: number } = { requestImage: [], move: [], getPtz: [], list: 0 };
   const client = {
     async requestImage(cam: number, preset: number, ptz?: any): Promise<CapturedImage> {
       calls.requestImage.push({ cam, preset, ptz });
@@ -15,6 +15,10 @@ function spyCamera() {
     async move(cam: number, pan: number, tilt: number, zoom: number): Promise<boolean> {
       calls.move.push({ cam, pan, tilt, zoom });
       return true;
+    },
+    async getPtz(cam: number) {
+      calls.getPtz.push({ cam });
+      return { pan: 15, tilt: -4, zoom: 9 };
     },
     async listCameras(): Promise<CameraList> {
       calls.list++;
@@ -56,6 +60,13 @@ describe('SimulatorSource', () => {
     const ok = await src.move(4, { pan: -30, tilt: 12, zoom: 8 });
     expect(ok).toBe(true);
     expect(calls.move[0]).toEqual({ cam: 4, pan: -30, tilt: 12, zoom: 8 });
+  });
+
+  it('getPtz → camera.getPtz 위임', async () => {
+    const { client, calls } = spyCamera();
+    const src = new SimulatorSource(client);
+    await expect(src.getPtz(4)).resolves.toEqual({ pan: 15, tilt: -4, zoom: 9 });
+    expect(calls.getPtz).toEqual([{ cam: 4 }]);
   });
 
   it('listCameras → camera.listCameras 위임', async () => {

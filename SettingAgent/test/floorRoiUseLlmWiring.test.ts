@@ -13,17 +13,21 @@ import type { ToolsConfig } from '../src/config/toolsConfig.js';
 import type { SetupTarget } from '../src/setup/SetupOrchestrator.js';
 
 /**
- * 검증자(qa-tester): 바닥 ROI LLM 토글 백엔드 배선(설계 #03 §3-F8~F10).
+ * 검증자(qa-tester): 바닥 ROI LLM 토글 백엔드 배선(설계 #03 §3-F8~F10 — DB 스키마 개편 후 재작성).
  * (1) StartBodySchema 가 floorRoiUseLlm 옵셔널 수용(미지정 하위호환) + 잘못된 타입 거부(400),
- *     start 라우트가 job.start 로 값을 전달.
- * (2) CaptureJob checkpoint floorReviewer 게이트: floorRoiUseLlm=false → review 미호출,
- *     true/미지정 → 호출(기본 true 회귀 0). — R2 는 capture 실행 자체가 아니라 게이트 배선만.
+ *     start 라우트가 job.start 로 값을 전달. (part1 은 wiring 자체가 불변 — CaptureJobDeps 에서
+ *     `store` 만 제거된 채 유지된다.)
+ * (2) ★ CaptureJob checkpoint floorReviewer 게이트는 폐기되었다(FloorRoiReviewer 캡처 루프 미배선,
+ *     설계서 §6.5) — CaptureJobDeps 에 `floorReviewer` 필드 자체가 없다.
+ *     대신 같은 `floorRoiUseLlm` 플래그가 **occupancyReviewer** 게이트에 재사용된다
+ *     (CaptureJob.checkpoint: `floorRoiUseLlm !== false` 일 때만 occupancyReviewer.review 호출).
+ *     이 파일은 그 surviving 게이트로 재작성한다(파일명은 유지 — 같은 플래그의 배선이므로).
  */
 
 const captureCfg: ToolsConfig['capture'] = {
   defaultCount: 50, intervalMs: 1000, moveIntervalMs: 1000, checkpointEvery: 10,
   checkpointTriggerMode: 'rounds', checkpointIntervalMs: 60000, dbFile: ':memory:',
-  clusterDist: 0.06, clusterMinSupport: 3, minConfidence: 0.5, moveBeforeCapture: true,
+  clusterDist: 0.06, clusterMinSupport: 3, minConfidence: 0.5, slotAssignGate: 0.12, moveBeforeCapture: true,
 };
 const setupCfg = {
   presetSettleMs: 0, betweenPresetMs: 0, minConfidence: 0.5, roiPadding: 0, yBandTolerance: 0.1,
@@ -48,7 +52,7 @@ function makeRouteServer() {
   const store = new SqliteStore(':memory:');
   const queue: Array<() => void> = [];
   const job = new CaptureJob({
-    camera: fakeCamera(), vpd: fakeVpd(), store, cfg: captureCfg, lpdEnabled: false,
+    camera: fakeCamera(), vpd: fakeVpd(), cfg: captureCfg, lpdEnabled: false,
     setTimer: (fn) => { queue.push(fn); return queue as unknown as NodeJS.Timeout; },
     clearTimer: () => {}, sleep: async () => {}, now: () => 'T',
   });
@@ -101,7 +105,7 @@ describe('StartBodySchema.floorRoiUseLlm 배선 (F8)', () => {
   });
 });
 
-// ---------- (2) CaptureJob floorReviewer 게이트(F9/F10) ----------
+// ---------- (2) CaptureJob occupancyReviewer 게이트(F9/F10 surviving — floorReviewer 폐기 후) ----------
 
 function fakeCameraJob(): CameraClient {
   return {
@@ -137,49 +141,39 @@ function makeManualTimers() {
   return { setTimer, clearTimer, fireNext };
 }
 
-let openStores: SqliteStore[] = [];
-afterEach(() => {
-  for (const s of openStores) { try { s.close(); } catch { /* noop */ } }
-  openStores = [];
-});
-
 function makeJob(over: Partial<CaptureJobDeps> = {}) {
-  const st = new SqliteStore(':memory:');
   const timers = makeManualTimers();
   const deps: CaptureJobDeps = {
-    camera: fakeCameraJob(), vpd: fakeVpdJob(), store: st, cfg: captureCfg, lpdEnabled: false,
+    camera: fakeCameraJob(), vpd: fakeVpdJob(), cfg: captureCfg, lpdEnabled: false,
     setTimer: timers.setTimer, clearTimer: timers.clearTimer, sleep: async () => {}, now: () => 'T',
     ...over,
   };
-  return { job: new CaptureJob(deps), store: st, timers };
+  return { job: new CaptureJob(deps), timers };
 }
 
-describe('CaptureJob checkpoint floorReviewer 게이트 (F9/F10)', () => {
-  it('floorRoiUseLlm:false(파일 모드) → floorReviewer.review 미호출(LLM floor 스킵)', async () => {
+describe('CaptureJob checkpoint occupancyReviewer 게이트 (F9/F10 — floorRoiUseLlm 재사용)', () => {
+  it('floorRoiUseLlm:false(파일 모드) → occupancyReviewer.review 미호출(LLM 체크포인트 스킵)', async () => {
     const reviewSpy = vi.fn(async () => ({ llmUnavailable: false }));
-    const floorReviewer = { review: reviewSpy } as unknown as CaptureJobDeps['floorReviewer'];
-    const { job, store, timers } = makeJob({ floorReviewer });
-    openStores.push(store);
+    const occupancyReviewer = { review: reviewSpy } as unknown as CaptureJobDeps['occupancyReviewer'];
+    const { job, timers } = makeJob({ occupancyReviewer });
     job.start({ count: 1, intervalMs: 1000, checkpointEvery: 1, checkpointTriggerMode: 'rounds', checkpointIntervalMs: 60000, targets: jobTargets, floorRoiUseLlm: false });
     await timers.fireNext();
     expect(reviewSpy).not.toHaveBeenCalled();
   });
 
-  it('floorRoiUseLlm:true → floorReviewer.review 호출(LLM 모드)', async () => {
+  it('floorRoiUseLlm:true → occupancyReviewer.review 호출(LLM 모드)', async () => {
     const reviewSpy = vi.fn(async () => ({ llmUnavailable: false }));
-    const floorReviewer = { review: reviewSpy } as unknown as CaptureJobDeps['floorReviewer'];
-    const { job, store, timers } = makeJob({ floorReviewer });
-    openStores.push(store);
+    const occupancyReviewer = { review: reviewSpy } as unknown as CaptureJobDeps['occupancyReviewer'];
+    const { job, timers } = makeJob({ occupancyReviewer });
     job.start({ count: 1, intervalMs: 1000, checkpointEvery: 1, checkpointTriggerMode: 'rounds', checkpointIntervalMs: 60000, targets: jobTargets, floorRoiUseLlm: true });
     await timers.fireNext();
     expect(reviewSpy).toHaveBeenCalledTimes(1);
   });
 
-  it('floorRoiUseLlm 미지정(기본 true) → floorReviewer.review 호출(회귀 0)', async () => {
+  it('floorRoiUseLlm 미지정(기본 true) → occupancyReviewer.review 호출(회귀 0)', async () => {
     const reviewSpy = vi.fn(async () => ({ llmUnavailable: false }));
-    const floorReviewer = { review: reviewSpy } as unknown as CaptureJobDeps['floorReviewer'];
-    const { job, store, timers } = makeJob({ floorReviewer });
-    openStores.push(store);
+    const occupancyReviewer = { review: reviewSpy } as unknown as CaptureJobDeps['occupancyReviewer'];
+    const { job, timers } = makeJob({ occupancyReviewer });
     // floorRoiUseLlm 필드 자체를 넘기지 않음 → start() 에서 기본 true 로 해석되어야 함.
     job.start({ count: 1, intervalMs: 1000, checkpointEvery: 1, checkpointTriggerMode: 'rounds', checkpointIntervalMs: 60000, targets: jobTargets });
     await timers.fireNext();

@@ -1,25 +1,15 @@
+import { HucomsClient } from '../clients/hucoms/HucomsClient.js';
 import type { CameraSourceConfig } from '../config/toolsConfig.js';
-import { fetchWithTimeout } from '../util/http.js';
+import { SimulatorMjpegAdapter } from '../stream/SimulatorMjpegAdapter.js';
+import type { StreamAdapter } from '../stream/StreamAdapter.js';
 import type { CameraList, CameraSource, Ptz, SnapshotOpts, SnapshotResult } from './CameraSource.js';
 
-/**
- * Hucoms PTZ 카메라(실물) CGI 어댑터(설계서 §13.4).
- *
- * ⚠️ 아래 CGI 경로/원시 PTZ 범위·파라미터명은 **실기기 미확인 가정값**이다.
- *    실 장비(192.168.0.153, HNR-2036LA) 연결 후 실측하여 보정한다(설계서 §13.6).
- *    범위는 cameraSources[].ptz 로 주입 시 우선 적용(아래 기본 범위 폴백).
- */
-const HUCOMS_LOGIN_PATH = '/cgi-bin/login.cgi'; // 실측 보정 필요
-const HUCOMS_SNAPSHOT_PATH = '/cgi-bin/snapshot.cgi'; // 실측 보정 필요
-const HUCOMS_PTZ_PATH = '/cgi-bin/ptz.cgi'; // 실측 보정 필요
-const HUCOMS_PTZ_PARAMS = { pan: 'pan', tilt: 'tilt', zoom: 'zoom' }; // 실측 보정 필요
+/** HTTP API Hucoms V1.22 원시 PTZ 범위. */
+const HUCOMS_DEFAULT_PAN_RANGE: [number, number] = [0, 35999];
+const HUCOMS_DEFAULT_TILT_RANGE: [number, number] = [-2000, 9000];
+const HUCOMS_DEFAULT_ZOOM_RANGE: [number, number] = [0, 65535];
 
-/** 기본 원시 PTZ 범위(실측 보정 필요). cameraSources[].ptz 가 있으면 그것을 우선. */
-const HUCOMS_DEFAULT_PAN_RANGE: [number, number] = [0, 36000];
-const HUCOMS_DEFAULT_TILT_RANGE: [number, number] = [0, 9000];
-const HUCOMS_DEFAULT_ZOOM_RANGE: [number, number] = [1, 36];
-
-/** 뷰어 단위 범위(CameraClient zoom 과 동일 1~36, pan/tilt 는 도(°) -180~180 가정). */
+/** SettingViewer의 기존 공통 좌표계. */
 const VIEWER_PAN_RANGE: [number, number] = [-180, 180];
 const VIEWER_TILT_RANGE: [number, number] = [-90, 90];
 const VIEWER_ZOOM_RANGE: [number, number] = [1, 36];
@@ -30,97 +20,123 @@ interface NativePtz {
   zoom: number;
 }
 
-/** 선형 매핑 + 범위 클램프. from→to. */
-function mapRange(v: number, from: [number, number], to: [number, number]): number {
+function mapRange(value: number, from: [number, number], to: [number, number]): number {
   const [a, b] = from;
   const [c, d] = to;
   if (b === a) return c;
-  const t = (v - a) / (b - a);
-  const clamped = Math.min(1, Math.max(0, t));
-  return c + clamped * (d - c);
+  const ratio = Math.min(1, Math.max(0, (value - a) / (b - a)));
+  return c + ratio * (d - c);
 }
 
+function finiteValue(values: Record<string, string>, ...keys: string[]): number | undefined {
+  for (const key of keys) {
+    const value = Number(values[key]);
+    if (Number.isFinite(value)) return value;
+  }
+  return undefined;
+}
+
+/**
+ * Hucoms 실물 카메라 어댑터.
+ *
+ * Agent 쪽 CameraSource 계약과 Hucoms HTTP API V1.22의 query 인증·JPEG·PTZF·MJPEG를 연결한다.
+ * 자격증명은 HucomsClient 메모리에만 유지하고, Client 통신 로그에서는 passwd를 마스킹한다.
+ */
 export class RealPtzSource implements CameraSource {
   readonly kind = 'hucoms' as const;
-  /** 인증 세션(쿠키/토큰). 메모리 통과만 — 저장·로그·응답 노출 금지. */
-  private session: string | null = null;
-  private readonly base: string;
+  readonly streamTransport: StreamAdapter['transport'];
+  private readonly client: HucomsClient;
   private readonly panRange: [number, number];
   private readonly tiltRange: [number, number];
   private readonly zoomRange: [number, number];
-  /** 마지막 명령 PTZ(현재-뷰 조회 CGI 미상 시 폴백 반환용). */
+  private readonly streamAdapter: StreamAdapter;
   private lastPtz: Ptz = { pan: 0, tilt: 0, zoom: 1 };
 
-  constructor(private cfg: CameraSourceConfig, private timeoutMs = 7000) {
+  constructor(private cfg: CameraSourceConfig, timeoutMs = 7000, streamAdapter?: StreamAdapter) {
     const host = cfg.host ?? '127.0.0.1';
     const port = cfg.port ?? 80;
-    this.base = `http://${host}:${port}`;
+    this.client = new HucomsClient({
+      baseUrl: cfg.baseUrl ?? `http://${host}:${port}`,
+      username: cfg.username,
+      password: cfg.password,
+      timeoutMs,
+    });
     this.panRange = cfg.ptz?.panRange ?? HUCOMS_DEFAULT_PAN_RANGE;
     this.tiltRange = cfg.ptz?.tiltRange ?? HUCOMS_DEFAULT_TILT_RANGE;
     this.zoomRange = cfg.ptz?.zoomRange ?? HUCOMS_DEFAULT_ZOOM_RANGE;
+    // 직접 생성한 레거시 소비자는 Hucoms MJPEG를 유지한다. sourceRegistry의 실카메라는 RTSP adapter를 명시 주입한다.
+    this.streamAdapter = streamAdapter ?? new SimulatorMjpegAdapter((_cam, _preset, signal) => this.client.iterMjpeg({ signal }));
+    this.streamTransport = this.streamAdapter.transport;
   }
 
-  /** login.cgi 인증 → 세션 보관. 자격증명은 보관·노출하지 않는다(세션만 유지). */
+  /**
+   * Hucoms V1.22에는 별도 login CGI가 없으므로 자격증명을 설정한 뒤 getservername으로 검증한다.
+   * 실패하면 자격증명을 즉시 제거한다.
+   */
   async login(user: string, pass: string): Promise<boolean> {
-    const loginPath = this.cfg.loginPath ?? HUCOMS_LOGIN_PATH;
-    const res = await fetchWithTimeout(
-      `${this.base}${loginPath}`,
-      {
-        method: 'POST',
-        headers: { 'content-type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({ user, pass }).toString(),
-      },
-      this.timeoutMs,
-    );
-    if (!res.ok) {
-      this.session = null;
+    this.client.setCredentials(user, pass);
+    try {
+      await this.client.getServerName();
+      return true;
+    } catch {
+      this.client.clearCredentials();
       return false;
     }
-    // 세션은 Set-Cookie 또는 응답 토큰에서 추출(실측 보정 필요). 우선 쿠키 헤더 사용.
-    const cookie = res.headers.get('set-cookie');
-    this.session = cookie ?? 'authenticated';
-    return true;
   }
 
-  /** 단일 소스를 프리셋 없는 라이브 뷰 1개로 매핑(설계서 §13.6). */
+  async health(): Promise<boolean> {
+    try {
+      await this.client.getServerName();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   async listCameras(): Promise<CameraList> {
     return {
-      cameras: [{ camIdx: 1, name: this.cfg.id, enabled: true, presets: [] }],
+      // 물리 카메라는 camerapos preset을 장비에서 보유하지 않는다. UI 선택 안정성을 위해 현재 위치 항목 하나를 제공한다.
+      cameras: [{ camIdx: 1, name: this.cfg.id, enabled: true, presets: [{ presetIdx: 1, label: '현재 위치' }] }],
     };
   }
 
-  async snapshot(_cam: number, opt: SnapshotOpts): Promise<SnapshotResult> {
-    if (opt.mode === 'manual' && opt.ptz) {
-      await this.move(_cam, opt.ptz);
-    }
-    const snapshotUrl = this.cfg.snapshotUrl ?? `${this.base}${HUCOMS_SNAPSHOT_PATH}`;
-    const res = await fetchWithTimeout(
-      snapshotUrl,
-      { method: 'GET', headers: this.authHeaders() },
-      this.timeoutMs,
-    );
-    if (!res.ok) throw new Error(`Hucoms snapshot 실패: HTTP ${res.status}`);
-    const jpeg = Buffer.from(await res.arrayBuffer());
-    return { jpeg, ptz: this.lastPtz };
+  /** Hucoms 장비가 보고하는 현재 PTZF를 Viewer 좌표계로 변환해 반환한다. */
+  async getPtz(_camera: number): Promise<Ptz> {
+    // UI의 '현재 PTZ 불러오기'는 장비 응답이 필수다. 실패를 마지막 명령값으로 위장하지 않는다.
+    return this.currentPtz(true);
   }
 
-  async move(_cam: number, ptz: Ptz): Promise<boolean> {
+  async snapshot(camera: number, options: SnapshotOpts): Promise<SnapshotResult> {
+    if (options.mode === 'manual' && options.ptz) await this.move(camera, options.ptz);
+    const jpeg = await this.client.getJpeg();
+    const ptz = await this.currentPtz();
+    return { jpeg, ptz };
+  }
+
+  async move(_camera: number, ptz: Ptz): Promise<boolean> {
     const native = this.toNativePtz(ptz);
-    const params = new URLSearchParams({
-      [HUCOMS_PTZ_PARAMS.pan]: String(Math.round(native.pan)),
-      [HUCOMS_PTZ_PARAMS.tilt]: String(Math.round(native.tilt)),
-      [HUCOMS_PTZ_PARAMS.zoom]: String(Math.round(native.zoom)),
+    await this.client.goPtzfPosition({
+      pan: Math.round(native.pan),
+      tilt: Math.round(native.tilt),
+      zoom: Math.round(native.zoom),
+      panSpeed: 100,
+      tiltSpeed: 100,
+      zoomSpeed: 100,
     });
-    const res = await fetchWithTimeout(
-      `${this.base}${HUCOMS_PTZ_PATH}?${params.toString()}`,
-      { method: 'GET', headers: this.authHeaders() },
-      this.timeoutMs,
-    );
-    if (res.ok) this.lastPtz = ptz;
-    return res.ok;
+    this.lastPtz = ptz;
+    return true;
   }
 
-  /** 뷰어 단위 → 원시 정수 단위(선형 매핑). */
+  async *streamMjpeg(
+    camera: number,
+    _presetIdx: number,
+    signal: AbortSignal,
+    ptz?: Ptz,
+  ): AsyncGenerator<Buffer> {
+    if (ptz) await this.move(camera, ptz);
+    yield* this.streamAdapter.stream({ cam: camera, presetIdx: _presetIdx, signal, ptz });
+  }
+
   toNativePtz(viewerPtz: Ptz): NativePtz {
     return {
       pan: mapRange(viewerPtz.pan, VIEWER_PAN_RANGE, this.panRange),
@@ -129,18 +145,30 @@ export class RealPtzSource implements CameraSource {
     };
   }
 
-  /** 원시 단위 → 뷰어 단위(왕복 일치). */
   fromNativePtz(native: unknown): Ptz {
-    const n = native as NativePtz;
+    const value = native as NativePtz;
     return {
-      pan: mapRange(n.pan, this.panRange, VIEWER_PAN_RANGE),
-      tilt: mapRange(n.tilt, this.tiltRange, VIEWER_TILT_RANGE),
-      zoom: mapRange(n.zoom, this.zoomRange, VIEWER_ZOOM_RANGE),
+      pan: mapRange(value.pan, this.panRange, VIEWER_PAN_RANGE),
+      tilt: mapRange(value.tilt, this.tiltRange, VIEWER_TILT_RANGE),
+      zoom: mapRange(value.zoom, this.zoomRange, VIEWER_ZOOM_RANGE),
     };
   }
 
-  /** 세션을 헤더로 통과(자격증명 평문 미포함). */
-  private authHeaders(): Record<string, string> {
-    return this.session ? { cookie: this.session } : {};
+  private async currentPtz(requireDeviceResponse = false): Promise<Ptz> {
+    try {
+      const response = await this.client.getPtzfPosition();
+      const pan = finiteValue(response.values, 'panpos', 'pan');
+      const tilt = finiteValue(response.values, 'tiltpos', 'tilt');
+      const zoom = finiteValue(response.values, 'zoompos', 'zoom');
+      if (pan === undefined || tilt === undefined || zoom === undefined) {
+        if (requireDeviceResponse) throw new Error('카메라 PTZF 위치 응답이 완전하지 않습니다');
+        return this.lastPtz;
+      }
+      this.lastPtz = this.fromNativePtz({ pan, tilt, zoom });
+    } catch (cause) {
+      if (requireDeviceResponse) throw cause;
+      // 일부 모델은 위치 조회를 지원하지 않으므로 마지막 성공 명령값으로 강등한다.
+    }
+    return this.lastPtz;
   }
 }

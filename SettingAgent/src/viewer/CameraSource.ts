@@ -42,6 +42,11 @@ export interface SnapshotOpts {
  */
 export interface CameraSource {
   readonly kind: 'sim' | 'hucoms' | 'rpc'; // onvif 는 후속(이번 범위 제외)
+  readonly streamTransport?: 'http-mjpeg' | 'rtsp-ffmpeg';
+  /** 선택 구현의 실제 연결 상태. 미구현 소스는 listCameras 성공 여부로 판단한다. */
+  health?(): Promise<boolean>;
+  /** (선택) 장비가 보고하는 현재 PTZ. 실카메라·시뮬레이터 UI 상태 동기화에 사용한다. */
+  getPtz?(cam: number): Promise<Ptz>;
   listCameras(): Promise<CameraList>;
   snapshot(cam: number, opt: SnapshotOpts): Promise<SnapshotResult>;
   move(cam: number, ptz: Ptz): Promise<boolean>;

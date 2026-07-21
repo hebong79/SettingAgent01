@@ -88,12 +88,6 @@ const OccupancySchema = z.object({
   timeoutMs: z.number().int().positive().default(120000),
 });
 
-/** PTZ 캘리브레이션 자문(adviseCentering) 설정(옵셔널 — 미설정 시 기본 yaml 사용). */
-const CenteringSchema = z.object({
-  /** system/user 를 담은 단일 yaml 프롬프트 파일 경로. */
-  prompt: z.string().min(1),
-});
-
 /**
  * LLM 강제 구동(warm-up/preload) 설정(옵셔널 — 미설정 시 default 로 활성).
  * Ollama 네이티브 `/api/chat` 에 keep_alive 를 실어 모델을 미리 로드/유지한다(콜드 로드 폴백 방지).
@@ -120,7 +114,6 @@ export const LlmConfigSchema = z.object({
   setupPrompts: SetupPromptsSchema,
   floorRoi: FloorRoiSchema.optional(),
   occupancy: OccupancySchema.optional(),
-  centering: CenteringSchema.optional(),
   warmup: WarmupSchema.optional(),
   /** 멀티 프로바이더 프로필 목록(옵셔널). 미지정 시 llm 단일 블록을 id='default' 프로필로 승격. */
   models: z.array(LlmModelProfileSchema).optional(),
@@ -192,9 +185,6 @@ export const DEFAULT_LLM_CONFIG: LlmConfig = {
     prompt: 'config/prompts/occupancy.yaml',
     timeoutMs: 120000,
   },
-  centering: {
-    prompt: 'config/prompts/ptz_centering.yaml',
-  },
   warmup: {
     enabled: true,
     keepAlive: '24h',
@@ -223,7 +213,6 @@ export function loadLlmConfig(path = 'config/llm.config.json'): LlmConfig {
       setupPrompts: { ...DEFAULT_LLM_CONFIG.setupPrompts, ...(raw.setupPrompts as object) },
       floorRoi: { ...DEFAULT_LLM_CONFIG.floorRoi, ...(raw.floorRoi as object) },
       occupancy: { ...DEFAULT_LLM_CONFIG.occupancy, ...(raw.occupancy as object) },
-      centering: { ...DEFAULT_LLM_CONFIG.centering, ...(raw.centering as object) },
       warmup: { ...DEFAULT_LLM_CONFIG.warmup, ...(raw.warmup as object) },
       // models/activeModel 은 배열/문자열 → 섹션 머지 대상 아님(raw 값 그대로 통과, 없으면 미포함).
       ...(raw.models !== undefined ? { models: raw.models } : {}),

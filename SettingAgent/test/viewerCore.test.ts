@@ -8,6 +8,7 @@ import {
   fpsToInterval,
   clampZoom,
   stepPtz,
+  resolveAbsPtz,
   createStreamLoop,
   capFrameKey,
   moveRenderDirective,
@@ -94,14 +95,41 @@ describe('stepPtz', () => {
     expect(stepPtz(cur, 'up', 3).tilt).toBe(3);
     expect(stepPtz(cur, 'down', 3).tilt).toBe(-3);
   });
-  it('zoomIn/zoomOut → ±1 클램프', () => {
-    expect(stepPtz({ ...cur, zoom: 36 }, 'zoomIn', 5).zoom).toBe(36);
-    expect(stepPtz({ ...cur, zoom: 1 }, 'zoomOut', 5).zoom).toBe(1);
-    expect(stepPtz(cur, 'zoomIn', 5).zoom).toBe(11);
+  it('zoomIn/zoomOut → ±step 클램프(step 값 반영)', () => {
+    expect(stepPtz({ ...cur, zoom: 36 }, 'zoomIn', 5).zoom).toBe(36); // 상한 클램프
+    expect(stepPtz({ ...cur, zoom: 1 }, 'zoomOut', 5).zoom).toBe(1); // 하한 클램프
+    expect(stepPtz(cur, 'zoomIn', 5).zoom).toBe(15); // 10 + step(5)
+    expect(stepPtz(cur, 'zoomOut', 3).zoom).toBe(7); // 10 − step(3)
+    expect(stepPtz(cur, 'zoomIn', 0.01).zoom).toBeCloseTo(10.01, 5); // 미세 step 반영
   });
   it('원본 불변(순수)', () => {
     const c = { pan: 1, tilt: 2, zoom: 3 };
     stepPtz(c, 'left', 5);
+    expect(c).toEqual({ pan: 1, tilt: 2, zoom: 3 });
+  });
+});
+
+describe('resolveAbsPtz (절대이동 입력 — 빈 칸=현재값 유지, 버그수정)', () => {
+  const cur = { pan: 30, tilt: -10, zoom: 12 };
+  it('세 칸 모두 채우면 그 값 사용(zoom 클램프)', () => {
+    expect(resolveAbsPtz(cur, { pan: '45', tilt: '5', zoom: '20' })).toEqual({ pan: 45, tilt: 5, zoom: 20 });
+    expect(resolveAbsPtz(cur, { pan: '0', tilt: '0', zoom: '99' })).toEqual({ pan: 0, tilt: 0, zoom: 36 });
+  });
+  it('zoom 만 채우면 pan/tilt 는 현재값 유지(핵심 회귀: 프레이밍 보존)', () => {
+    expect(resolveAbsPtz(cur, { pan: '', tilt: '', zoom: '25' })).toEqual({ pan: 30, tilt: -10, zoom: 25 });
+  });
+  it('zoom 비우면 배율은 현재값 유지(1 로 리셋 안 함)', () => {
+    expect(resolveAbsPtz(cur, { pan: '40', tilt: '', zoom: '' })).toEqual({ pan: 40, tilt: -10, zoom: 12 });
+  });
+  it('입력 0 은 유효값으로 반영(빈 칸과 구분)', () => {
+    expect(resolveAbsPtz(cur, { pan: '0', tilt: '', zoom: '' }).pan).toBe(0);
+  });
+  it('비수치/공백 입력은 현재값 폴백', () => {
+    expect(resolveAbsPtz(cur, { pan: 'abc', tilt: '  ', zoom: undefined })).toEqual(cur);
+  });
+  it('원본 불변(순수)', () => {
+    const c = { pan: 1, tilt: 2, zoom: 3 };
+    resolveAbsPtz(c, { pan: '9', tilt: '9', zoom: '9' });
     expect(c).toEqual({ pan: 1, tilt: 2, zoom: 3 });
   });
 });

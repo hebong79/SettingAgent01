@@ -92,6 +92,11 @@ export interface VehicleBox {
   rect: NormalizedRect;
   confidence: number;
   cls: string;
+  /**
+   * 차량 실루엣 마스크(정규화 폴리곤). **세그멘테이션(seg) 경로에서만 채워진다** — det 경로는 항상 없음.
+   * 옵셔널·가산이므로 기존 소비처(점유 판정·DB·집계)는 무영향. rect 는 절대 대체하지 않는다.
+   */
+  mask?: NormalizedPolygon;
 }
 
 /** 스캔 1건 식별 단위. */

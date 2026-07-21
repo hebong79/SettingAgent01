@@ -2,16 +2,62 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { readFileSync, rmSync, existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { expandPlateTargets, writeSlotPtz } from '../src/calibrate/slotPtzWriter.js';
+import { expandPlateTargets, expandPlateTargetsFromSlotSetup, writeSlotPtz } from '../src/calibrate/slotPtzWriter.js';
 import { buildSlotPtzJson } from '../src/calibrate/controlMath.js';
 import { Repository } from '../src/store/Repository.js';
 import type { SetupArtifact } from '../src/domain/types.js';
+import type { SlotSetupView } from '../src/capture/types.js';
 import { rectToQuad, quadBoundingRect } from '../src/domain/geometry.js';
 import type { SlotPtzItem } from '../src/calibrate/types.js';
 
 /**
- * 검증자(qa-tester): expandPlateTargets(펼침·globalIdx 역참조) + writeSlotPtz(파일 I/O, Repository 비오염).
+ * 검증자(qa-tester): expandPlateTargets(펼침·globalIdx 역참조, @deprecated 회귀) +
+ *   ★ expandPlateTargetsFromSlotSetup(신 소스, 설계서 §5-A) + writeSlotPtz(파일 I/O, Repository 비오염).
  */
+
+/** SlotSetupView fixture 헬퍼(lpd 없으면 null 로 override). */
+function view(slotId: number, over: Partial<SlotSetupView> = {}): SlotSetupView {
+  return {
+    slotId, camId: 1, presetId: 1, presetSlotIdx: 1, presetKey: '1:1',
+    roi: [], vpd: null, lpd: rectToQuad({ x: 0.62, y: 0.62, w: 0.05, h: 0.03 }),
+    occupyRange: null, pan: null, tilt: null, zoom: null, centered: false, img1: null, slot3dFrontCenter: null, updatedAt: null,
+    ...over,
+  };
+}
+
+describe('expandPlateTargetsFromSlotSetup (신 소스 · 설계서 §5-A)', () => {
+  it('(a) lpd 보유 행만 대상 — 빈 주차면(lpd=null) 제외', () => {
+    const views: SlotSetupView[] = [view(1), view(2, { lpd: null }), view(3)];
+    const t = expandPlateTargetsFromSlotSetup(views);
+    expect(t).toHaveLength(2); // 2번(lpd null) 제외
+    expect(t.map((x) => x.globalIdx)).toEqual([1, 3]);
+  });
+
+  it('(b) 매핑 정확성 — camIdx/presetIdx/slotId(String)/globalIdx(int)/plateRoi/presetSlotIdx', () => {
+    const lpd = rectToQuad({ x: 0.31, y: 0.44, w: 0.06, h: 0.03 });
+    const [t] = expandPlateTargetsFromSlotSetup([view(7, { camId: 2, presetId: 3, presetSlotIdx: 5, lpd })]);
+    expect(t.camIdx).toBe(2); // v.camId
+    expect(t.presetIdx).toBe(3); // v.presetId
+    expect(t.slotId).toBe('7'); // String(v.slotId)
+    expect(typeof t.slotId).toBe('string');
+    expect(t.globalIdx).toBe(7); // 정수 slotId 그대로(항상 존재)
+    expect(t.plateRoi).toEqual(quadBoundingRect(lpd)); // quad → 축정렬 bounding rect(lpd)
+    expect(t.presetSlotIdx).toBe(5); // DB preset_slotidx 그대로(재계산 금지)
+  });
+
+  it('(b) presetSlotIdx=null 은 그대로 null(0/−1 발명 금지)', () => {
+    const [t] = expandPlateTargetsFromSlotSetup([view(9, { presetSlotIdx: null })]);
+    expect(t.presetSlotIdx).toBeNull();
+  });
+
+  it('(c) 빈 입력 → []', () => {
+    expect(expandPlateTargetsFromSlotSetup([])).toEqual([]);
+  });
+
+  it('(c) lpd 전부 null → []', () => {
+    expect(expandPlateTargetsFromSlotSetup([view(1, { lpd: null }), view(2, { lpd: null })])).toEqual([]);
+  });
+});
 
 const rect = (x: number) => ({ x, y: 0.7, w: 0.03, h: 0.02 });
 /** plateRoiByPreset 는 신 계약상 quad(OBB 4점). 축정렬 fixture 는 rectToQuad 로 생성. */

@@ -11,19 +11,21 @@ import type { VpdClient } from '../src/clients/VpdClient.js';
 import type { Repository } from '../src/store/Repository.js';
 import type { CapturedImage, SetupArtifact } from '../src/domain/types.js';
 import type { ToolsConfig } from '../src/config/toolsConfig.js';
+import type { CaptureSnapshot } from '../src/capture/CaptureJob.js';
+import type { DetectionRow } from '../src/capture/types.js';
 
 /**
- * 검증자(qa-tester): Finalizer occupancyAgreement(로직 점유 vs LLM 저장분 1회 비교) 게이트 (설계 §05 G6-②).
+ * 검증자(qa-tester): Finalizer occupancyAgreement(로직 점유 vs LLM 인메모리 저장분 1회 비교) 게이트 (설계 §05 G6-②).
  * + POST /capture/finalize 의 FinalizeBodySchema.occupancy 옵셔널 수용(하위호환·잘못된 shape 거부).
  * 근거: 01_architect_plan.md §05 G6 + 02_developer_changes.md 02-H(§6 G6-②).
- * best-effort: brain 비활성 / LLM 저장분 없음 / 로직 점유 미전달 → graceful skip(agreement 미부착, 좌표·slots 불변).
- * LLM 재호출 0회 — store.getLatestOccupancy(캡처 중 저장분) 재사용만.
+ * best-effort: brain 비활성 / LLM 저장분(occByPreset) 없음 / 로직 점유 미전달 → graceful skip(agreement 미부착, 좌표·slots 불변).
+ * ★ 설계서 §2.3: 구 getLatestOccupancy(DB) 폐기 — snapshot.occByPreset(인메모리) 재사용만. runId 폐기 — CaptureSnapshot 직접 전달.
  */
 
 const captureCfg: ToolsConfig['capture'] = {
   defaultCount: 50, intervalMs: 1000, moveIntervalMs: 1000, checkpointEvery: 10,
   checkpointTriggerMode: 'rounds', checkpointIntervalMs: 60000, dbFile: ':memory:',
-  clusterDist: 0.06, clusterMinSupport: 3, minConfidence: 0.5, moveBeforeCapture: true,
+  clusterDist: 0.06, clusterMinSupport: 3, minConfidence: 0.5, slotAssignGate: 0.12, moveBeforeCapture: true,
 };
 
 const fakeRepo = (): { repo: Repository; saved: SetupArtifact[] } => {
@@ -31,30 +33,29 @@ const fakeRepo = (): { repo: Repository; saved: SetupArtifact[] } => {
   return { saved, repo: { saveArtifact: (a: SetupArtifact) => saved.push(a), loadArtifact: () => saved.at(-1) ?? null, path: 'mem' } as unknown as Repository };
 };
 
-/** enabled=true 이지만 finalizeCapture/judgeOccupancy 미보유 두뇌 — occupancyAgreement 는 저장분 재사용만으로 산출됨을 증명. */
+/** enabled=true 이지만 finalizeCapture/judgeOccupancy 미보유 두뇌 — occupancyAgreement 는 snapshot 재사용만으로 산출됨을 증명. */
 const enabledBrain = () => ({ enabled: true } as unknown as SetupBrain);
 
 let stores: SqliteStore[] = [];
 afterEach(() => { for (const s of stores) { try { s.close(); } catch { /* noop */ } } stores = []; });
 function mem(): SqliteStore { const s = new SqliteStore(':memory:'); stores.push(s); return s; }
 
-/** 안정 클러스터(support>=3) 1개 → finalize 후 slot 1개(c1p1s1). */
-function seedStableRun(store: SqliteStore): number {
-  const runId = store.createRun({ plannedCount: 3, intervalMs: 1, startedAt: 'T' });
-  for (const round of [1, 2, 3]) {
-    const obs = store.insertObservation({ runId, roundIdx: round, camIdx: 1, presetIdx: 1, capturedAt: 'C', pan: 0, tilt: 0, zoom: 1, imgName: 'x' });
-    store.insertDetections(obs, 1, 1, [{ kind: 'vehicle', x: 0.3, y: 0.3, w: 0.1, h: 0.1, conf: 0.9 }]);
-  }
-  return runId;
+/** 안정 클러스터(support>=3) 1개분 스냅샷(구 seedStableRun DB 시드 대체) → finalize 후 slot 1개(c1p1s1). occByPreset 는 비어있음(LLM 저장분 없음). */
+function seedStableSnapshot(): CaptureSnapshot {
+  const dets: DetectionRow[] = [1, 2, 3].map((round) => ({
+    observationId: round, roundIdx: round, camIdx: 1, presetIdx: 1, kind: 'vehicle', x: 0.3, y: 0.3, w: 0.1, h: 0.1, conf: 0.9,
+  }));
+  return { dets, presetRounds: new Map([['1:1', 3]]), aggregated: [], occByPreset: new Map() };
 }
 
-/** LLM 점유 저장분(체크포인트 중 저장). cam1 preset1: id1=점유, id2=공차. */
-function seedLlmOccupancy(store: SqliteStore, runId: number): void {
-  store.insertOccupancy(runId, {
-    camIdx: 1, presetIdx: 1, atRound: 1, occupiedCount: 1, total: 2, rate: 0.5,
-    spacesJson: JSON.stringify([{ id: 1, occupied: true }, { id: 2, occupied: false }]),
-    updatedAt: 'T',
+/** LLM 점유 저장분(체크포인트 중 인메모리 축적 모사). cam1 preset1: id1=점유, id2=공차. */
+function withLlmOccupancy(snapshot: CaptureSnapshot): CaptureSnapshot {
+  const occByPreset = new Map(snapshot.occByPreset);
+  occByPreset.set('1:1', {
+    spaces: [{ id: 1, occupied: true }, { id: 2, occupied: false }],
+    occupiedCount: 1, total: 2, rate: 0.5, confidence: 1,
   });
+  return { ...snapshot, occByPreset };
 }
 
 /** 로직 점유 바디: id1=점유(LLM 일치), id2=점유(LLM 불일치) → agreedSpaces=1/2. */
@@ -68,65 +69,55 @@ function makeFinalizer(store: SqliteStore, brain?: SetupBrain) {
 }
 
 describe('Finalizer occupancyAgreement 게이트 (G6-②)', () => {
-  it('brain 활성 + LLM 저장분 + 로직 점유 바디 → agreement 1회 산출(정확값)', async () => {
+  it('brain 활성 + LLM 저장분(occByPreset) + 로직 점유 바디 → agreement 1회 산출(정확값)', async () => {
     const store = mem();
-    const runId = seedStableRun(store);
-    seedLlmOccupancy(store, runId);
-    const getSpy = vi.spyOn(store, 'getLatestOccupancy');
+    const snapshot = withLlmOccupancy(seedStableSnapshot());
     const finalizer = makeFinalizer(store, enabledBrain());
 
-    const r = await finalizer.finalize(runId, { logicOccupancy: logicOcc });
+    const r = await finalizer.finalize(snapshot, { logicOccupancy: logicOcc });
 
     expect(r.occupancyAgreement).toEqual({ comparedPresets: 1, comparedSpaces: 2, agreedSpaces: 1, agreementRate: 0.5 });
-    // LLM 재호출 없음 — 저장분(getLatestOccupancy) 재사용만(정확히 1회 참조).
-    expect(getSpy).toHaveBeenCalledTimes(1);
   });
 
-  it('LLM 저장분 없음 → occupancyAgreement 미부착(graceful skip)', async () => {
+  it('LLM 저장분(occByPreset) 없음 → occupancyAgreement 미부착(graceful skip)', async () => {
     const store = mem();
-    const runId = seedStableRun(store); // insertOccupancy 없음.
+    const snapshot = seedStableSnapshot(); // occByPreset 비어있음.
     const finalizer = makeFinalizer(store, enabledBrain());
-    const r = await finalizer.finalize(runId, { logicOccupancy: logicOcc });
+    const r = await finalizer.finalize(snapshot, { logicOccupancy: logicOcc });
     expect(r.occupancyAgreement).toBeUndefined();
   });
 
   it('로직 점유 바디 미전달 → skip(저장분 있어도 비교 안 함)', async () => {
     const store = mem();
-    const runId = seedStableRun(store);
-    seedLlmOccupancy(store, runId);
+    const snapshot = withLlmOccupancy(seedStableSnapshot());
     const finalizer = makeFinalizer(store, enabledBrain());
-    const r = await finalizer.finalize(runId); // opts 없음.
+    const r = await finalizer.finalize(snapshot); // opts 없음.
     expect(r.occupancyAgreement).toBeUndefined();
   });
 
   it('brain 비활성/미주입 → skip(저장분·바디 있어도 비교 안 함)', async () => {
     const store = mem();
-    const runId = seedStableRun(store);
-    seedLlmOccupancy(store, runId);
+    const snapshot = withLlmOccupancy(seedStableSnapshot());
     const finalizer = makeFinalizer(store); // brain 미주입.
-    const r = await finalizer.finalize(runId, { logicOccupancy: logicOcc });
+    const r = await finalizer.finalize(snapshot, { logicOccupancy: logicOcc });
     expect(r.occupancyAgreement).toBeUndefined();
   });
 
   it('일치 프리셋 없음(키 불일치) → comparedSpaces=0 → 미부착', async () => {
     const store = mem();
-    const runId = seedStableRun(store);
-    seedLlmOccupancy(store, runId); // 저장분 키 '1:1'
+    const snapshot = withLlmOccupancy(seedStableSnapshot()); // 저장분 키 '1:1'
     const finalizer = makeFinalizer(store, enabledBrain());
-    const r = await finalizer.finalize(runId, { logicOccupancy: [{ key: '9:9', spaces: [{ idx: 1, occupied: true }] }] });
+    const r = await finalizer.finalize(snapshot, { logicOccupancy: [{ key: '9:9', spaces: [{ idx: 1, occupied: true }] }] });
     expect(r.occupancyAgreement).toBeUndefined();
   });
 
   it('불변식: occupancyAgreement 유무와 무관하게 slots/좌표(roiByPreset) 동일(회귀)', async () => {
-    // 동일 시드 두 run: 하나는 점유검증 수행, 하나는 skip → artifact.slots 동일해야.
+    // 동일 시드 두 finalize: 하나는 점유검증 수행, 하나는 skip → artifact.slots 동일해야.
     const storeA = mem();
-    const runA = seedStableRun(storeA);
-    seedLlmOccupancy(storeA, runA);
-    const rA = await makeFinalizer(storeA, enabledBrain()).finalize(runA, { logicOccupancy: logicOcc });
+    const rA = await makeFinalizer(storeA, enabledBrain()).finalize(withLlmOccupancy(seedStableSnapshot()), { logicOccupancy: logicOcc });
 
     const storeB = mem();
-    const runB = seedStableRun(storeB);
-    const rB = await makeFinalizer(storeB).finalize(runB); // 검증 없음.
+    const rB = await makeFinalizer(storeB).finalize(seedStableSnapshot()); // 검증 없음.
 
     expect(rA.occupancyAgreement).toBeDefined();
     expect(rB.occupancyAgreement).toBeUndefined();
@@ -149,7 +140,7 @@ function makeRouteServer() {
   const store = new SqliteStore(':memory:');
   const queue: Array<() => void> = [];
   const job = new CaptureJob({
-    camera: fakeCamera(), vpd: fakeVpd(), store, cfg: captureCfg, lpdEnabled: false,
+    camera: fakeCamera(), vpd: fakeVpd(), cfg: captureCfg, lpdEnabled: false,
     setTimer: (fn) => { queue.push(fn); return queue as unknown as NodeJS.Timeout; },
     clearTimer: () => {}, sleep: async () => {}, now: () => 'T',
   });
@@ -163,7 +154,7 @@ function makeRouteServer() {
     orchestrator, repo, camera: fakeCamera(), vpd: fakeVpd(),
     captureJob: job, finalizer, sqlite: store, capture: captureCfg,
   });
-  return { app, store, finalizer };
+  return { app, store, finalizer, job };
 }
 
 let app: FastifyInstance | undefined;
@@ -174,14 +165,13 @@ afterEach(async () => {
 });
 
 describe('POST /capture/finalize — FinalizeBodySchema.occupancy 수용/거부', () => {
-  it('occupancy 미지정(하위호환) → finalize(runId, {logicOccupancy: undefined}) 로 전달', async () => {
+  it('occupancy 미지정(하위호환) → finalize(잡의 인메모리 스냅샷, {logicOccupancy: undefined}) 로 전달', async () => {
     const s = makeRouteServer(); app = s.app; routeStore = s.store;
-    // 진행 중 run 이 없으면 400(no run to finalize) — 게이트 통과를 위해 스텁으로 대체 검증.
     const spy = vi.spyOn(s.finalizer, 'finalize').mockResolvedValue({ artifact: { presets: [], slots: [], globalIndex: [], createdAt: 'T' }, slots: 0, globalCount: 0 });
-    // runId 명시 전달로 no-run 게이트 우회(FinalizeBodySchema.runId 옵셔널).
-    const r = await app.inject({ method: 'POST', url: '/capture/finalize', payload: { runId: 1 } });
+    // run_id 폐기(설계서 §3) — 진행 중 잡이 없어도(state idle) 현재 스냅샷으로 finalize 호출.
+    const r = await app.inject({ method: 'POST', url: '/capture/finalize', payload: {} });
     expect(r.statusCode).toBe(200);
-    expect(spy).toHaveBeenCalledWith(1, { logicOccupancy: undefined });
+    expect(spy).toHaveBeenCalledWith({ dets: [], presetRounds: new Map(), aggregated: [], occByPreset: new Map() }, { logicOccupancy: undefined });
   });
 
   it('occupancy 옵셔널 바디 → finalize 로 logicOccupancy 전달', async () => {
@@ -191,9 +181,9 @@ describe('POST /capture/finalize — FinalizeBodySchema.occupancy 수용/거부'
       occupancyAgreement: { comparedPresets: 1, comparedSpaces: 2, agreedSpaces: 1, agreementRate: 0.5 },
     });
     const occupancy = [{ key: '1:1', spaces: [{ idx: 1, occupied: true }, { idx: 2, occupied: false }] }];
-    const r = await app.inject({ method: 'POST', url: '/capture/finalize', payload: { runId: 1, occupancy } });
+    const r = await app.inject({ method: 'POST', url: '/capture/finalize', payload: { occupancy } });
     expect(r.statusCode).toBe(200);
-    expect(spy).toHaveBeenCalledWith(1, { logicOccupancy: occupancy });
+    expect(spy).toHaveBeenCalledWith({ dets: [], presetRounds: new Map(), aggregated: [], occByPreset: new Map() }, { logicOccupancy: occupancy });
     // 응답에 occupancyAgreement 부가.
     expect(r.json().occupancyAgreement).toEqual({ comparedPresets: 1, comparedSpaces: 2, agreedSpaces: 1, agreementRate: 0.5 });
   });
@@ -202,7 +192,7 @@ describe('POST /capture/finalize — FinalizeBodySchema.occupancy 수용/거부'
     const s = makeRouteServer(); app = s.app; routeStore = s.store;
     const r = await app.inject({
       method: 'POST', url: '/capture/finalize',
-      payload: { runId: 1, occupancy: [{ key: '1:1', spaces: [{ idx: 'x', occupied: true }] }] },
+      payload: { occupancy: [{ key: '1:1', spaces: [{ idx: 'x', occupied: true }] }] },
     });
     expect(r.statusCode).toBe(400);
   });
@@ -211,7 +201,7 @@ describe('POST /capture/finalize — FinalizeBodySchema.occupancy 수용/거부'
     const s = makeRouteServer(); app = s.app; routeStore = s.store;
     const r = await app.inject({
       method: 'POST', url: '/capture/finalize',
-      payload: { runId: 1, occupancy: [{ key: '1:1', spaces: [{ idx: 1 }] }] },
+      payload: { occupancy: [{ key: '1:1', spaces: [{ idx: 1 }] }] },
     });
     expect(r.statusCode).toBe(400);
   });

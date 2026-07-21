@@ -327,8 +327,8 @@ describe('buildFlatSlotRows — 전체 주차면 평면 목록(R2)', () => {
     const parkingSlotsByKey = {
       // 실제 GET /capture/runs/:id/slots 행 shape: vpd/lpd 는 객체 또는 null(불리언 아님).
       '1:1': [
-        { slotIdx: 1, occupied: false, vpd: null, lpd: null }, // DB 가 '공차' → 파일 계산(점유)을 덮어씀.
-        { slotIdx: 2, occupied: true, vpd: { x: 0, y: 0, w: 1, h: 1 }, lpd: [{ x: 0, y: 0 }] },
+        { slotId: 1, occupied: false, vpd: null, lpd: null }, // DB 가 '공차' → 파일 계산(점유)을 덮어씀.
+        { slotId: 2, occupied: true, vpd: { x: 0, y: 0, w: 1, h: 1 }, lpd: [{ x: 0, y: 0 }] },
       ],
     } as unknown as Parameters<typeof buildFlatSlotRows>[0]['parkingSlotsByKey'];
     const rows = buildFlatSlotRows({ placeRoi, detectByKey, parkingSlotsByKey });
@@ -364,10 +364,10 @@ describe('구 run(0-based slot_idx) × 신 전역 인덱스 — 오귀속 금지
   const detectByKey = { '1:1': { plates: [{ quad: quad(0.04, 0.12, 0.04) }] } }; // 중심 (0.06,0.14) ∈ globalIdx 1.
   const legacyDb = {
     '1:1': [
-      { slotIdx: 0, occupied: true, vpd: {}, lpd: [{ x: 0, y: 0 }] }, // 배열 위치 0(= 신 globalIdx 1)의 진짜 데이터.
-      ...Array.from({ length: 6 }, (_, i) => ({ slotIdx: i + 1, occupied: false, vpd: null, lpd: null })),
+      { slotId: 0, occupied: true, vpd: {}, lpd: [{ x: 0, y: 0 }] }, // 배열 위치 0(= 신 globalIdx 1)의 진짜 데이터.
+      ...Array.from({ length: 6 }, (_, i) => ({ slotId: i + 1, occupied: false, vpd: null, lpd: null })),
     ],
-    '1:2': Array.from({ length: 6 }, (_, i) => ({ slotIdx: i, occupied: true, vpd: {}, lpd: null })),
+    '1:2': Array.from({ length: 6 }, (_, i) => ({ slotId: i, occupied: true, vpd: {}, lpd: null })),
   } as unknown as Parameters<typeof buildFlatSlotRows>[0]['parkingSlotsByKey'];
 
   it('오귀속 금지 — 0-based DB 행은 통째 기각되어 한 칸 밀린 값이 붙지 않는다(파일 계산으로 폴백)', () => {
@@ -394,9 +394,9 @@ describe('구 run(0-based slot_idx) × 신 전역 인덱스 — 오귀속 금지
     // DB 행 집합이 그 프리셋의 파일 전역번호 집합(1..7)과 완전히 일치.
     const freshDb = {
       '1:1': [
-        { slotIdx: 1, occupied: false, vpd: null, lpd: null }, // 파일 계산은 점유지만 DB(정합)가 우선 → 공차.
-        { slotIdx: 2, occupied: true, vpd: { x: 0, y: 0, w: 1, h: 1 }, lpd: [{ x: 0, y: 0 }] },
-        ...Array.from({ length: 5 }, (_, i) => ({ slotIdx: i + 3, occupied: false, vpd: null, lpd: null })),
+        { slotId: 1, occupied: false, vpd: null, lpd: null }, // 파일 계산은 점유지만 DB(정합)가 우선 → 공차.
+        { slotId: 2, occupied: true, vpd: { x: 0, y: 0, w: 1, h: 1 }, lpd: [{ x: 0, y: 0 }] },
+        ...Array.from({ length: 5 }, (_, i) => ({ slotId: i + 3, occupied: false, vpd: null, lpd: null })),
       ],
     } as unknown as Parameters<typeof buildFlatSlotRows>[0]['parkingSlotsByKey'];
     const rows = buildFlatSlotRows({ placeRoi, detectByKey, parkingSlotsByKey: freshDb });
@@ -408,7 +408,7 @@ describe('구 run(0-based slot_idx) × 신 전역 인덱스 — 오귀속 금지
     // 파일: 1:1 에서 1면 삭제 → 전역번호 재압축(N=16). DB 에는 삭제 전 번호(예: 17)가 남아 있음.
     const edited = removePlaceSpace(placeRoi, 3);
     const staleDb = {
-      '1:1': [{ slotIdx: 1, occupied: true, vpd: {}, lpd: null }, { slotIdx: 99, occupied: true, vpd: {}, lpd: null }],
+      '1:1': [{ slotId: 1, occupied: true, vpd: {}, lpd: null }, { slotId: 99, occupied: true, vpd: {}, lpd: null }],
     } as unknown as Parameters<typeof buildFlatSlotRows>[0]['parkingSlotsByKey'];
     const rows = buildFlatSlotRows({ placeRoi: edited, parkingSlotsByKey: staleDb });
     expect(rows.find((r) => r.globalIdx === 1)).toMatchObject({ occupied: false, vpd: false, lpd: false }); // 기각.

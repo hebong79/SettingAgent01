@@ -60,6 +60,60 @@
     "port": 13020,
     "apiKeyEnv": "SETTING_API_KEY"
   },
+  "cameraRuntime": {
+    "executionMode": "typescript-native",
+    "selectedCameraId": "simulator-1"
+  },
+  "cameraStreaming": {
+    "ffmpegPath": "ffmpeg",
+    "rtspTransport": "tcp",
+    "fps": 5,
+    "jpegQuality": 5,
+    "startupTimeoutMs": 10000
+  },
+  "cameraSources": [
+    {
+      "id": "simulator-1",
+      "label": "시뮬레이터 1",
+      "kind": "sim",
+      "protocol": "unity-rpc",
+      "baseUrl": "http://localhost:13110",
+      "username": "",
+      "password": "",
+      "rtspUrl": ""
+    },
+    {
+      "id": "simulator-2",
+      "label": "시뮬레이터 2",
+      "kind": "sim",
+      "protocol": "unity-rpc",
+      "baseUrl": "http://localhost:13111",
+      "username": "",
+      "password": "",
+      "rtspUrl": ""
+    },
+    {
+      "id": "real-camera-1",
+      "label": "리얼 카메라 1",
+      "kind": "hucoms",
+      "protocol": "hucoms-v1.22",
+      "baseUrl": "http://192.168.0.153:80",
+      "username": "admin",
+      "password": "",
+      "rtspUrl": "rtsp://192.168.0.153:554/stream1"
+    },
+    {
+      "id": "real-camera-2",
+      "label": "리얼 카메라 2",
+      "kind": "hucoms",
+      "protocol": "hucoms-v1.22",
+      "baseUrl": "http://192.168.0.154:80",
+      "username": "admin",
+      "password": "",
+      "rtspUrl": "rtsp://192.168.0.154:554/stream1"
+    }
+  ],
+  "cameraMode": "simulator",
   "store": {
     "dataDir": "data",
     "captureDir": "data/captures"

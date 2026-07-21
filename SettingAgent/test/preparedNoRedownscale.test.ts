@@ -3,13 +3,12 @@ import sharp from 'sharp';
 import { createServer, type Server } from 'node:http';
 import { AddressInfo } from 'node:net';
 import type { LlmConfig } from '../src/config/llmConfig.js';
-import type { FloorRoiInput, CenteringAdviceInput } from '../src/brain/SetupBrain.js';
+import type { FloorRoiInput } from '../src/brain/SetupBrain.js';
 
 /**
  * 검증자(qa-tester): 재다운스케일 방지 (설계 §3-3 chat.prepared, 성공기준 5).
  * recognizeFloorRoi/judgeOccupancy 는 prepareGroundingImage(smartResize) 로 이미 정확 크기라
  * chat() 이 downscaleJpegBase64 를 다시 호출하면 안 된다(좌표계 불일치 방지).
- * 반면 비-그라운딩 경로(adviseCentering)는 기존 downscale 을 그대로 탄다(회귀 보존).
  * image 모듈을 partial mock 하여 downscaleJpegBase64 호출 여부를 직접 관찰한다.
  */
 
@@ -66,12 +65,11 @@ function cfg(): LlmConfig {
     mcp: { enabled: false, transport: 'stdio', servers: [] },
     setupPrompts: {
       stage1Enabled: true, stage2Enabled: true, stage3Enabled: true,
-      stage1: pair('config/prompts/stage1_preset_judge.system.md'),
-      stage2: pair('config/prompts/stage2_dedupe_label.system.md'),
-      stage3: pair('config/prompts/stage3_final_report.system.md'),
+      stage1: pair('config/prompts/_archive/stage1_preset_judge.system.md'),
+      stage2: pair('config/prompts/_archive/stage2_dedupe_label.system.md'),
+      stage3: pair('config/prompts/_archive/stage3_final_report.system.md'),
     },
-    floorRoi: { enabled: true, maxPerCheckpoint: 12, prompt: 'config/prompts/floor_roi.yaml', timeoutMs: 120000 },
-    centering: { prompt: 'config/prompts/ptz_centering.yaml' },
+    floorRoi: { enabled: true, maxPerCheckpoint: 12, prompt: 'config/prompts/_archive/floor_roi.yaml', timeoutMs: 120000 },
   };
 }
 
@@ -95,18 +93,5 @@ describe('prepared=true → chat() 재다운스케일 방지 (성공기준 5)', 
     const res = await rt.recognizeFloorRoi!(floorInput);
     expect(res).not.toBeNull();
     expect(downscaleSpy).not.toHaveBeenCalled(); // 중복 리사이즈 없음
-  });
-
-  it('대조: adviseCentering(비-prepared) → downscaleJpegBase64 호출(기존 경로 보존)', async () => {
-    downscaleSpy.mockClear();
-    nextContent = JSON.stringify({ converged: true });
-    const rt = new AgentRuntime(cfg());
-    const input: CenteringAdviceInput = {
-      phase: 'center', err: { errX: 0.1, errY: -0.05 }, plateWidth: 0.12,
-      target: { targetWidth: 0.2, centerTol: 0.03 }, imageBase64: jpegB64,
-    };
-    const res = await rt.adviseCentering!(input);
-    expect(res).not.toBeNull();
-    expect(downscaleSpy).toHaveBeenCalledWith(1288); // imageMaxEdge 로 다운스케일
   });
 });

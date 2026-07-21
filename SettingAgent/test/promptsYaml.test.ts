@@ -3,7 +3,7 @@ import { loadPromptPair, renderTemplate } from '../src/brain/prompts.js';
 
 describe('loadPromptPair (yaml system/user 프롬프트)', () => {
   it('floor_roi.yaml 을 system/user 로 로드(픽셀 그라운딩 규약)', () => {
-    const { system, user } = loadPromptPair('config/prompts/floor_roi.yaml');
+    const { system, user } = loadPromptPair('config/prompts/_archive/floor_roi.yaml');
     expect(typeof system).toBe('string');
     expect(typeof user).toBe('string');
     expect(system).toContain('바닥'); // 바닥 점유 영역 지시
@@ -16,7 +16,7 @@ describe('loadPromptPair (yaml system/user 프롬프트)', () => {
   });
 
   it('user 템플릿 치환(imgW/imgH/vehiclePx)', () => {
-    const { user } = loadPromptPair('config/prompts/floor_roi.yaml');
+    const { user } = loadPromptPair('config/prompts/_archive/floor_roi.yaml');
     const out = renderTemplate(user, { camIdx: '1', presetIdx: '2', imgW: '1288', imgH: '728', vehiclePx: '[258,218,773,509]' });
     expect(out).toContain('camera=1');
     expect(out).toContain('preset=2');
@@ -31,7 +31,7 @@ describe('loadPromptPair (yaml system/user 프롬프트)', () => {
   });
 
   it('ptz_centering.yaml 로드 + 2단계 워크플로·치환', () => {
-    const { system, user } = loadPromptPair('config/prompts/ptz_centering.yaml');
+    const { system, user } = loadPromptPair('config/prompts/_archive/ptz_centering.yaml');
     expect(system).toContain('pan/tilt'); // center 단계
     expect(system).toContain('zoom'); // zoom 단계
     expect(user).toContain('{{phase}}');

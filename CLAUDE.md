@@ -21,4 +21,6 @@
 | 2026-06-25 | 초기 구성 (4인 팀: architect/developer/qa-tester/documenter + parkagent-dev 오케스트레이터) | 전체 | - |
 | 2026-07-07 | goal/loop 실행 모드 추가 (오케스트레이터가 선형/goal·loop 자동 판단·셋팅. 관찰형·튜닝 작업에 경험적 검증 루프 적용) | parkagent-dev 스킬 | 마스터 요청 — 관찰·정합·튜닝형 작업의 경험적 반복 개발 |
 | 2026-07-07 | `Goal:`/`Loop:`/`Requirements:` 구조화 프롬프트를 B 모드 확정 트리거로 규약화(섹션별 매핑·GOAL_LOOP_TEMPLATE.md 추가) | parkagent-dev 스킬 | 마스터 요청 — 표준 프롬프트 형식으로 작업 착수 |
+| 2026-07-16 | 작업별 모델선정 스킬 등록(설계=Fable/구현·검증=Opus/문서화=Sonnet). parkagent-dev의 "모든 Agent 호출 model: opus 필수" 규정을 해당 규칙 참조로 갱신 | model-routing 스킬(신규) + parkagent-dev 스킬 | 마스터 요청 — 검증된 작업별 모델 배정을 재사용 가능한 단일 출처로 |
+| 2026-07-17 | 설계 단계 모델을 Fable → **Opus**로 변경(허용값에서 fable 제거). 매핑이 설계·구현·검증=Opus / 문서화=Sonnet 으로 단순화 | model-routing 스킬 + parkagent-dev 스킬 | 마스터 요청 |
 

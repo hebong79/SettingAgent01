@@ -9,6 +9,14 @@ export interface DbRoutesDeps {
 const DEFAULT_LIMIT = 200;
 const MAX_LIMIT = 1000;
 
+/**
+ * 조회 응답에서 마스킹할 민감 컬럼(테이블명 → 컬럼 집합). read-only 뷰어의 평문 노출 차단(설계 §4).
+ * 마스킹 대상 컬럼은 검색(LIKE) 대상에서도 제외해 값 존재여부 유출을 막는다.
+ */
+const SENSITIVE: Record<string, Set<string>> = {
+  camera_info: new Set(['password']),
+};
+
 /** limit 정수 clamp 1..1000(기본 200). 비수치 → 기본값. */
 export function clampLimit(raw: unknown): number {
   const n = Number(raw);
@@ -95,13 +103,16 @@ export function registerDbRoutes(app: FastifyInstance, deps: DbRoutesDeps): void
       ).map((r) => r.name);
 
       // 검색: 전 컬럼 CAST→TEXT LIKE(값은 100% 바인딩, 컬럼명은 신뢰 스키마값 + quote).
+      // 민감 컬럼은 검색 대상에서 제외(마스킹된 값과 매칭돼도 행이 노출되면 존재여부 유출).
+      const sensitive = SENSITIVE[name];
+      const searchCols = sensitive ? columns.filter((c) => !sensitive.has(c)) : columns;
       let where = '';
       const searchBinds: string[] = [];
-      if (search && columns.length > 0) {
+      if (search && searchCols.length > 0) {
         const like = `%${escapeLike(search)}%`;
-        const clauses = columns.map((c) => `CAST(${quoteIdent(c)} AS TEXT) LIKE ? ESCAPE '\\'`);
+        const clauses = searchCols.map((c) => `CAST(${quoteIdent(c)} AS TEXT) LIKE ? ESCAPE '\\'`);
         where = ` WHERE (${clauses.join(' OR ')})`;
-        for (let i = 0; i < columns.length; i++) searchBinds.push(like);
+        for (let i = 0; i < searchCols.length; i++) searchBinds.push(like);
       }
 
       const total = (
@@ -110,6 +121,15 @@ export function registerDbRoutes(app: FastifyInstance, deps: DbRoutesDeps): void
       const rows = d
         .prepare(`SELECT * FROM ${quoted}${where} LIMIT ? OFFSET ?`)
         .all(...searchBinds, limit, offset) as Array<Record<string, unknown>>;
+
+      // 민감 컬럼 마스킹: 값이 있으면 '****', null 은 null 유지(존재여부만 노출, 평문 차단).
+      if (sensitive) {
+        for (const row of rows) {
+          for (const col of sensitive) {
+            if (col in row) row[col] = row[col] != null ? '****' : null;
+          }
+        }
+      }
 
       return { columns, rows, total, limit, offset };
     } catch (err) {

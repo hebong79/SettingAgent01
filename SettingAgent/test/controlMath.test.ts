@@ -8,6 +8,7 @@ import {
   isCentered,
   isWidthConverged,
   dampGain,
+  zoomForWidth,
   buildSlotPtzJson,
 } from '../src/calibrate/controlMath.js';
 import type { PlateBox } from '../src/clients/LpdClient.js';
@@ -89,6 +90,25 @@ describe('zoomCorrection', () => {
   });
   it('plateWidth≈0 방어 → 현재 zoom 클램프 반환', () => {
     expect(zoomCorrection(8, 0, 0.2, clamp)).toBe(8);
+  });
+});
+
+describe('zoomForWidth (방안2 목표 zoom 직접산출·게인무관)', () => {
+  const clamp = (z: number) => Math.min(36, Math.max(1, z));
+  it('폭∝zoom 직접 목표: targetZoom = curZoom×targetWidth/curWidth', () => {
+    // 실측 판폭 0.0274 @z1.69341 → 목표폭 0.2 는 z≈12.36, acquire 0.12 는 z≈7.42.
+    expect(zoomForWidth(1.69341, 0.0274, 0.2, clamp)).toBeCloseTo(1.69341 * 0.2 / 0.0274, 4);
+    expect(zoomForWidth(1.69341, 0.0274, 0.12, clamp)).toBeCloseTo(1.69341 * 0.12 / 0.0274, 4);
+    // presetZoom=1·lpd 0.05 → acquire 0.12 = z 2.4, target 0.2 = z 4.0(PtzCalibrator 계획값).
+    expect(zoomForWidth(1, 0.05, 0.12, clamp)).toBeCloseTo(2.4, 5);
+    expect(zoomForWidth(1, 0.05, 0.2, clamp)).toBeCloseTo(4.0, 5);
+  });
+  it('curWidth≈0(퇴화) 가드 → clampZoom(curZoom)', () => {
+    expect(zoomForWidth(3, 0, 0.2, clamp)).toBe(3);
+    expect(zoomForWidth(3, 1e-5, 0.2, clamp)).toBe(3);
+  });
+  it('clamp 상한: 초소 lpd → 산출 zoom>36 → 36', () => {
+    expect(zoomForWidth(1, 0.005, 0.2, clamp)).toBe(36); // 1×0.2/0.005=40 → 36.
   });
 });
 

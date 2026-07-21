@@ -1,9 +1,7 @@
-import type { SqliteStore } from './SqliteStore.js';
-import type { SetupBrain } from '../brain/SetupBrain.js';
+import type { SetupBrain, OccupancyJudgment } from '../brain/SetupBrain.js';
 import { logger } from '../util/logger.js';
 
 export interface OccupancyReviewerDeps {
-  store: SqliteStore;
   brain?: SetupBrain;
   now?: () => string;
 }
@@ -22,16 +20,16 @@ export class OccupancyReviewer {
   }
 
   /**
-   * @param runId 대상 런
-   * @param atRound 이 체크포인트의 라운드 번호(이력 append 키)
+   * @param atRound 이 체크포인트의 라운드 번호(로깅용).
    * @param framesByPreset 프리셋별 최근 프레임 JPEG(`${camIdx}:${presetIdx}` → Buffer, 전 프리셋)
+   * @param occByPreset 인메모리 축소 occupancy 누적 대상(구 insertOccupancy DB 대체 — 프리셋키 → 판정).
    * @param shouldStop 각 프리셋 처리 전 정지 요청 여부(옵셔널). true 면 다음 프리셋 전 중단.
    * @param expectedByPreset 프리셋별 기대 면 수(LLM 힌트, 선택).
    */
   async review(
-    runId: number,
     atRound: number,
     framesByPreset: Map<string, Buffer>,
+    occByPreset: Map<string, OccupancyJudgment>,
     shouldStop?: () => boolean,
     expectedByPreset?: Record<string, number>,
   ): Promise<{ llmUnavailable: boolean }> {
@@ -60,16 +58,8 @@ export class OccupancyReviewer {
           continue; // 비활성/무효 → skip(빈 프리셋 0% 는 j.total===0 로 저장됨).
         }
         succeeded += 1;
-        this.deps.store.insertOccupancy(runId, {
-          camIdx,
-          presetIdx,
-          atRound,
-          occupiedCount: j.occupiedCount,
-          total: j.total,
-          rate: j.rate,
-          spacesJson: JSON.stringify(j.spaces),
-          updatedAt: this.now(),
-        });
+        // 인메모리 축소 저장(구 insertOccupancy DB 대체). 프리셋키 → 전체 판정(getOccupancy/agreement 소비).
+        occByPreset.set(key, j);
       } catch (e) {
         errorCount += 1;
         logger.warn(

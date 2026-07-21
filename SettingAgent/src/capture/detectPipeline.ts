@@ -8,6 +8,7 @@ import type { VpdClient } from '../clients/VpdClient.js';
 import type { LpdClient } from '../clients/LpdClient.js';
 import type { NormalizedPoint, NormalizedQuad, NormalizedRect } from '../domain/types.js';
 import { readJpegSize } from '../util/jpeg.js';
+import { center, quadBoundingRect } from '../domain/geometry.js';
 import { filterVehiclesOnPlace, filterPlatesOnPlace } from './onPlaceFilter.js';
 import { matchPlatesToSlots } from '../setup/plateMatch.js';
 import { pickNearestPlate } from '../calibrate/controlMath.js';
@@ -15,13 +16,18 @@ import { vehicleCenterZoomPtz, inverseProjectQuad, clampQuadCenterToRect, type F
 import { parseCameraViews, type CameraView } from '../setup/mapTargets.js';
 import { buildGroundInputs } from '../ground/groundInputs.js';
 import { estimateGroundModels } from '../ground/groundModel.js';
+import { buildFrameCuboids, type CuboidContext, type FrameCuboids } from '../ground/frameCuboids.js';
 import type { GroundOptions } from '../ground/types.js';
 import { logger } from '../util/logger.js';
 
 /** runDetect 의존성(스텁 주입 가능한 구조적 최소 계약). */
 export interface DetectDeps {
   camera: Pick<CameraClient, 'requestImage' | 'clampZoom' | 'listCameras'>;
-  vpd: Pick<VpdClient, 'detect'>;
+  /**
+   * ★ `segment`/`canSegment` 는 **Partial** 이다 — 기존 테스트 스텁(`{ detect }` 만 구현)이
+   * **타입 에러 없이 그대로 컴파일**된다(회귀 0, CLAUDE.md §3). seg 부재 = 육면체 미산출(강등).
+   */
+  vpd: Pick<VpdClient, 'detect'> & Partial<Pick<VpdClient, 'segment' | 'canSegment'>>;
   lpd: Pick<LpdClient, 'detect'>;
 }
 
@@ -76,7 +82,14 @@ export interface DetectResult {
     lpdFilteredOut: number;
     /** 모드A 를 요청했으나 폴리곤이 없어 강등된 사유. */
     onPlaceDegraded?: string;
+    /** VPD(차량) 검출 게이트(false=VPD 미실행 · LPD 전용). 0대와 '미실행'을 구분(정직 표기). */
+    vpdEnabled: boolean;
   };
+  /**
+   * ★ 차량 3D 육면체(가산·옵셔널). `cuboidCtx` 미주입 시 **키 자체가 없다** → 기존 응답 shape 과 완전히 동일(회귀 0).
+   * 산출은 base 프레임(det bbox 가 나온 **바로 그 프레임**) 기준이며 zoom 재시도 뷰는 쓰지 않는다.
+   */
+  cuboids?: FrameCuboids;
 }
 
 /** 모드A 옵션. 미지정 → 필터 없음(runDetect 3인자 계약 불변). */
@@ -91,19 +104,27 @@ export interface OnPlaceOpts {
 /**
  * fovBaseV 추정 실패 시 폴백(도). **zoom=1 기준** 수직 FOV.
  *
- * 이전 값 24.017 은 `PtzCamRoi.json` 의 `camera.fov` 였는데, 그것은 **zoom=1.4 에서의 fov 스냅샷**이라
- * base(zoom=1) 로 쓰면 f 가 +42% 틀린다(재중심 PTZ 가 항상 ~30% 미달 → 대상이 중심에서 평균 154px 이탈, 라이브 실측).
- * 33.1 은 **독립 3자 일치**로 고른 값이다:
- *   ① 라이브 실측(pan 2° 회전 → 픽셀 이동량 ZNCC, 프리셋 줌대역 zoom 1.4~1.9): 32.6~33.5°
- *   ② 지면모델 공동추정(poolFovBaseV, 실데이터): 33.102°
- *   ③ 설계서 GT(camera.fov=24.01697 @ zoom=1.4 역산): 33.167°
- * 폴백이 실제로 쓰이면 항상 advisory 로그를 남긴다(조용한 강등 금지 — 이 버그가 숨었던 이유).
+ * 이전 값 33.1 은 각도 반비례식(hFOV=58/zoom) Unity 렌더에 탄젠트 피팅한 근사값이었다.
+ * Unity가 탄젠트 광학 모델(tan(hFOV/2)=tan(29°)/zoom)로 전환됨에 따라
+ * zoom=1 base는 정확히 CObjCamera.DEFAULT_VERT_FOV = 34.6348°(수평 58° @ 16:9)로 정합된다.
+ *   검증: Camera.HorizontalToVerticalFieldOfView(58°, 16/9) = 34.6348°
+ * fovBaseV 재추정(groundModel·poolFovBaseV)이 성공하면 이 폴백은 쓰이지 않는다.
+ * 폴백이 실제로 쓰이면 항상 advisory 로그를 남긴다(조용한 강등 금지).
  */
-const FALLBACK_FOV_BASE_V = 33.1;
+const FALLBACK_FOV_BASE_V = 34.6348;
 const FALLBACK_ASPECT = 16 / 9;
 const FRONT_BIAS = 0.62;
 const ZOOM_FACTORS = [2, 3, 4, 5];
 const ZOOM_REF = 1;
+
+/**
+ * 중복 회수 판정 임계(정규화 유클리드 거리). 줌 재시도가 **이미 다른 차량에 배정된 번호판**을 회수하면
+ * 기각한다 — 역투영 오차로 좌표가 원본과 달라(1367 vs 1348px) 수치 동등성으로는 잡히지 않기 때문이다.
+ *
+ * 근거(진단 08 / 설계 09 §논점3 실측): 중복 회수점↔원본 판 = **0.0100** / 정상 신규 회수점↔최근접 배정판 = **0.1357**
+ * / base 판간 최소 간격 = **0.1102**. → 0.03 은 관측 역투영 오차의 3.0배 위, 정상 케이스 최소 거리의 1/4.5 아래.
+ */
+const DUP_EPS = 0.03;
 
 /** fovBaseV 추정 소스(설계 C3 — **실카메라도 줄 수 있는 값만**). 미주입 시 폴백 상수로 강등. */
 export interface DetectCfgSources {
@@ -215,18 +236,26 @@ export async function resolvePresetPtz(
  */
 export async function runDetect(
   deps: DetectDeps,
-  args: { cam: number; preset: number },
+  args: { cam: number; preset: number; vpdEnabled?: boolean; ptz?: { pan?: number; tilt?: number; zoom?: number } },
   cfg: DetectCfg,
   onPlace?: OnPlaceOpts,
+  /** ★ 차량 육면체 문맥(옵셔널·가산). 미지정 시 응답에 `cuboids` 키 자체가 없다 — 기존 계약 완전 불변. */
+  cuboidCtx?: CuboidContext | null,
 ): Promise<DetectResult> {
   const { cam, preset } = args;
+  const vpdEnabled = args.vpdEnabled ?? true; // 라이브러리 기본 true(회귀 0). 라우트가 false(제품 정책)로 VPD 정지.
   // 프리셋 실제 PTZ 를 신뢰 원천으로 base 프레임을 렌더(시뮬 echo 0/0/1 불신 — 리더 실측 확정).
-  const presetPtz = await resolvePresetPtz(deps.camera, cam, preset);
+  // ★ args.ptz 제공 시(lpd-live: 현재 뷰어 수동 PTZ) resolvePresetPtz 를 건너뛰고 그 값을 base 로 사용 →
+  //   requestImage·basePtz·역투영·zoom 재시도가 모두 오버라이드 기준으로 정합(프리셋 스냅 없음).
+  const presetPtz = args.ptz
+    ? { pan: args.ptz.pan ?? 0, tilt: args.ptz.tilt ?? 0, zoom: args.ptz.zoom ?? 1 }
+    : await resolvePresetPtz(deps.camera, cam, preset);
   const base = await deps.camera.requestImage(cam, preset, presetPtz ?? undefined);
   const basePtz = presetPtz ?? { pan: base.pan, tilt: base.tilt, zoom: base.zoom }; // 조회 실패 시에만 echo 폴백(장애 격리).
   const size = readJpegSize(base.jpg);
 
-  const rawVehicles = await deps.vpd.detect(base.jpg);
+  // VPD off(제품 정책) 시 vpd.detect 미호출 → rawVehicles=[]. LPD 는 계속. 필터는 vehicles=[] 로 폴리곤 직접 전환(결정 C).
+  const rawVehicles = vpdEnabled ? await deps.vpd.detect(base.jpg) : [];
   const platesBase = await deps.lpd.detect(base.jpg);
 
   // 모드A: 주차면 위 차량만 남긴다. **zoom 재시도 루프 진입 전**에 축소 → 통행차에 대한 카메라 호출 0회.
@@ -245,6 +274,22 @@ export async function runDetect(
       onPlaceOnly = true;
       filteredOut = r.filteredOut;
     }
+  }
+
+  // ★ 차량 3D 육면체(가산). 위치는 **주차면 필터 직후 · zoom 재시도 루프 前**(루프와 무관·독립).
+  //   base 프레임(det bbox 가 나온 바로 그 프레임)에서 산출한다. seg 미배선/실패 → 강등(throw 0) → `cuboids` 미포함.
+  //   `deps.vpd.segment` 가 없으면(기존 스텁) 아예 시도하지 않는다.
+  let cuboids: FrameCuboids | undefined;
+  if (cuboidCtx && vpdEnabled && deps.vpd.segment && deps.vpd.canSegment) {
+    const vpdSeg = deps.vpd as Required<Pick<VpdClient, 'segment' | 'canSegment'>>;
+    cuboids = await buildFrameCuboids({
+      jpeg: base.jpg,
+      detBoxes: rawVehicles, // ★ 권위 — 필터 전 전량(가림 배제의 근거).
+      // 참조 동일성(필터 경로 무접촉). ⚠️ **-1 을 버리지 않는다**(DEFECT-2) — 전제가 깨지면 issues 로 드러난다.
+      keptDetIdx: vehicles.map((v) => rawVehicles.indexOf(v)),
+      vpd: vpdSeg,
+      ctx: cuboidCtx,
+    });
   }
 
   // VPD 박스를 BuiltSlot(positionIdx/roi/confidence)로 어댑트해 기존 매칭 재사용(신규 매칭 코드 0).
@@ -268,6 +313,8 @@ export async function runDetect(
   const fovOpts: FovOpts = { fovBaseV: cfg.fovBaseV, zoomRef: cfg.zoomRef, aspect: cfg.aspect };
   const outVehicles: DetectVehicle[] = [];
   let recovered = 0;
+  // 이미 배정된 번호판 중심(base 매칭분 + 이 실행에서 확정된 recovered 분) — 재시도 중복 회수 가드용.
+  const assignedCenters = [...matched.values()].map((q) => center(quadBoundingRect(q)));
 
   for (let i = 0; i < vehicles.length; i++) {
     const v = vehicles[i];
@@ -287,9 +334,22 @@ export async function runDetect(
       const pick = pickNearestPlate(await deps.lpd.detect(view.jpg), { x: 0.5, y: 0.5, w: 0, h: 0 });
       if (pick) {
         const recQuad = inverseProjectQuad(pick.quad, viewPtz, basePtz, fovOpts);
+        // 중복 가드: 줌 뷰는 이웃 차량의 번호판도 담는다. 이미 배정된 판을 훔치면(≤DUP_EPS) 기각하고
+        // **다음 zoomFactor 로 계속**한다 — 더 좁아진 FOV 에서 자기 판을 찾을 기회를 보존(루프 상한 불변).
+        // 클램프 **전** 좌표로 판정한다(클램프는 v.rect 로 당기므로 훔친 판과 자기 판을 뭉갠다).
+        const rc = center(quadBoundingRect(recQuad));
+        const dup = assignedCenters.find((c) => Math.hypot(c.cx - rc.cx, c.cy - rc.cy) <= DUP_EPS);
+        if (dup) {
+          logger.warn(
+            { cam, preset, vehicle: i, zoomFactor: cfg.zoomFactors[a], dist: Math.hypot(dup.cx - rc.cx, dup.cy - rc.cy) },
+            '중복 회수 기각 — 이미 다른 차량에 배정된 번호판(다음 zoom 으로 계속)',
+          );
+          continue;
+        }
         // 역투영은 지면원근 오차(§04-A3)로 차량 밖에 떨어질 수 있음 → zoom-in 대상 차량(v.rect)으로 중심 클램프(표시 위치 보정).
         const clamped = clampQuadCenterToRect(recQuad, v.rect, cfg.frontBias);
         plate = { quad: clamped, confidence: pick.confidence, recovered: true, attempts: a + 1 };
+        assignedCenters.push(rc); // 후속 차량 재시도와의 중복도 차단.
         recovered += 1;
         break;
       }
@@ -311,7 +371,9 @@ export async function runDetect(
       onPlaceOnly,
       filteredOut,
       lpdFilteredOut,
+      vpdEnabled,
       ...(onPlaceDegraded ? { onPlaceDegraded } : {}),
     },
+    ...(cuboids ? { cuboids } : {}), // 미산출 시 **키 자체가 없다**(기존 응답 shape 불변).
   };
 }

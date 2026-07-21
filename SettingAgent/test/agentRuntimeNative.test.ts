@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import sharp from 'sharp';
 import type { LlmConfig } from '../src/config/llmConfig.js';
-import type { FloorRoiInput, CenteringAdviceInput } from '../src/brain/SetupBrain.js';
+import type { FloorRoiInput } from '../src/brain/SetupBrain.js';
 
 /**
  * 검증자(qa-tester): AgentRuntime chat 라우팅(네이티브 /api/chat vs OpenAI SDK) — 설계 §결정 A / 구현 §chatNative.
@@ -31,8 +31,6 @@ const FLOOR_JSON = {
   confidence: 0.7,
 };
 
-const CENTERING_JSON = { action: 'accept', reason: 'ok' };
-
 const { AgentRuntime } = await import('../src/brain/AgentRuntime.js');
 
 /** 실제 1920×1080 단색 JPEG base64(다운스케일 검증용). */
@@ -56,12 +54,11 @@ function cfg(over: Partial<LlmConfig['llm']> = {}): LlmConfig {
     mcp: { enabled: false, transport: 'stdio', servers: [] },
     setupPrompts: {
       stage1Enabled: true, stage2Enabled: true, stage3Enabled: true,
-      stage1: pair('config/prompts/stage1_preset_judge.system.md'),
-      stage2: pair('config/prompts/stage2_dedupe_label.system.md'),
-      stage3: pair('config/prompts/stage3_final_report.system.md'),
+      stage1: pair('config/prompts/_archive/stage1_preset_judge.system.md'),
+      stage2: pair('config/prompts/_archive/stage2_dedupe_label.system.md'),
+      stage3: pair('config/prompts/_archive/stage3_final_report.system.md'),
     },
-    floorRoi: { enabled: true, maxPerCheckpoint: 12, prompt: 'config/prompts/floor_roi.yaml', timeoutMs: 120000 },
-    centering: { prompt: 'config/prompts/ptz_centering.yaml' },
+    floorRoi: { enabled: true, maxPerCheckpoint: 12, prompt: 'config/prompts/_archive/floor_roi.yaml', timeoutMs: 120000 },
     warmup: { enabled: true, keepAlive: '24h', numPredict: 1, timeoutMs: 120000 },
   };
 }
@@ -145,25 +142,6 @@ describe('AgentRuntime chat 라우팅 — 네이티브 /api/chat (api:ollama)', 
     expect(meta.height).toBe(532);
     expect(meta.width! % 28).toBe(0);
     expect(meta.height! % 28).toBe(0);
-  });
-
-  it('adviseCentering 도 네이티브 경로로 think:false·images 전송', async () => {
-    fetchSpy.mockResolvedValue(
-      new Response(JSON.stringify({ message: { content: JSON.stringify(CENTERING_JSON) } }), { status: 200 }),
-    );
-    const rt = new AgentRuntime(cfg());
-    const input: CenteringAdviceInput = {
-      phase: 'center',
-      err: { errX: 0.1, errY: -0.05 },
-      plateWidth: 0.12,
-      target: { targetWidth: 0.2, centerTol: 0.03 },
-      imageBase64: bigJpegB64,
-    };
-    const res = await rt.adviseCentering!(input);
-    expect(res).not.toBeNull();
-    const body = lastFetchBody();
-    expect(body.think).toBe(false);
-    expect(Array.isArray(body.messages[1].images)).toBe(true);
   });
 
   it('네이티브 비200 → null(결정형 폴백), throw 안 함', async () => {

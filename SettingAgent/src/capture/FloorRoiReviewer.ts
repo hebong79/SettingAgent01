@@ -90,8 +90,9 @@ export class FloorRoiReviewer {
       }
 
       // LLM 유효 폴리곤이 메인. effQuad/plate 는 LLM 무효 시 폴백(번호판 앵커·포함강제) 전용.
-      const polygon = resolveFloorPolygon(polyRaw, vehicle, effQuad, plate);
-      this.deps.store.upsertFloorRoi(runId, s.presetKey, s.clusterId, polygon, this.now());
+      // ★ 캡처 루프 배선 제거(설계서 §6.5) — floor 발자국은 Finalizer 가 buildPlateAnchoredQuad 결정형으로 항상 생성.
+      //   구 upsertFloorRoi(DB 중간테이블) 폐기. 산출 폴리곤은 미영속(본 클래스는 미배선 잔존).
+      void resolveFloorPolygon(polyRaw, vehicle, effQuad, plate);
     }
 
     // 경고 신호: 애초에 동작 불가(비활성/메서드부재) 또는 시도했으나 전부 무효 반환.

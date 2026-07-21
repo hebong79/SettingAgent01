@@ -9,7 +9,7 @@ import type { ToolsConfig } from '../src/config/toolsConfig.js';
 
 /** 호출 인자를 기록하는 가짜 소스. login 보유=hucoms 흉내. */
 function spySource(kind: 'sim' | 'hucoms' = 'sim') {
-  const calls: { snapshot: any[]; move: any[]; login: any[] } = { snapshot: [], move: [], login: [] };
+  const calls: { snapshot: any[]; move: any[]; login: any[]; getPtz: any[] } = { snapshot: [], move: [], login: [], getPtz: [] };
   const src: CameraSource & { calls: typeof calls } = {
     kind,
     calls,
@@ -24,6 +24,10 @@ function spySource(kind: 'sim' | 'hucoms' = 'sim') {
     async move(cam: number, ptz: Ptz) {
       calls.move.push({ cam, ptz });
       return true;
+    },
+    async getPtz(cam: number) {
+      calls.getPtz.push({ cam });
+      return { pan: 11, tilt: 22, zoom: 33 };
     },
     ...(kind === 'hucoms'
       ? {
@@ -156,6 +160,51 @@ describe('viewerRoutes — /viewer/api/*', () => {
     }
   });
 
+  it('GET /ptz (hucoms) → 장비 PTZ 상태를 반환한다', async () => {
+    const hucoms = spySource('hucoms') as any;
+    const sources = new Map<string, CameraSource>([['ptz1', hucoms]]);
+    const { app, dir } = await mkApp({ sources });
+    try {
+      const r = await app.inject({ method: 'GET', url: '/viewer/api/ptz?source=ptz1&cam=1' });
+      expect(r.statusCode).toBe(200);
+      expect(JSON.parse(r.body)).toEqual({ ptz: { pan: 11, tilt: 22, zoom: 33 } });
+      expect(hucoms.calls.getPtz).toEqual([{ cam: 1 }]);
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('GET /ptz (sim) → 시뮬레이터의 현재 PTZ 상태를 반환한다', async () => {
+    const sim = spySource() as any;
+    const sources = new Map<string, CameraSource>([['sim', sim]]);
+    const { app, dir } = await mkApp({ sources });
+    try {
+      const r = await app.inject({ method: 'GET', url: '/viewer/api/ptz?source=sim&cam=1' });
+      expect(r.statusCode).toBe(200);
+      expect(JSON.parse(r.body)).toEqual({ ptz: { pan: 11, tilt: 22, zoom: 33 } });
+      expect(sim.calls.getPtz).toEqual([{ cam: 1 }]);
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('GET /ptz (미지원 소스) → 501', async () => {
+    const sim = spySource() as any;
+    delete sim.getPtz;
+    const sources = new Map<string, CameraSource>([['sim', sim]]);
+    const { app, dir } = await mkApp({ sources });
+    try {
+      const r = await app.inject({ method: 'GET', url: '/viewer/api/ptz?source=sim&cam=1' });
+      expect(r.statusCode).toBe(501);
+      expect(JSON.parse(r.body).code).toBe('PTZ_STATE_UNSUPPORTED');
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('POST /move allowMove=false → 403', async () => {
     const sim = spySource() as any;
     const sources = new Map<string, CameraSource>([['sim', sim]]);
@@ -222,7 +271,11 @@ describe('viewerRoutes — /viewer/api/*', () => {
     try {
       const r = await app.inject({ method: 'GET', url: '/viewer/api/health' });
       expect(r.statusCode).toBe(200);
-      expect(JSON.parse(r.body)).toEqual({ status: 'ok', sources: ['sim', 'ptz1'] });
+      expect(JSON.parse(r.body)).toEqual({
+        status: 'ok',
+        sources: ['sim', 'ptz1'],
+        sourceDetails: [{ id: 'sim', kind: 'sim' }, { id: 'ptz1', kind: 'hucoms' }],
+      });
     } finally {
       await app.close();
       rmSync(dir, { recursive: true, force: true });

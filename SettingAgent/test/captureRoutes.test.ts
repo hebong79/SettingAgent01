@@ -6,6 +6,9 @@ import type { FastifyInstance } from 'fastify';
 import { buildServer } from '../src/api/server.js';
 import { CaptureJob } from '../src/capture/CaptureJob.js';
 import { Finalizer } from '../src/capture/Finalizer.js';
+import { SetupPipeline } from '../src/pipeline/SetupPipeline.js';
+import type { PtzCalibrator } from '../src/calibrate/PtzCalibrator.js';
+import type { PlateDiscoveryJob } from '../src/calibrate/PlateDiscoveryJob.js';
 import { SqliteStore } from '../src/capture/SqliteStore.js';
 import { normalizePtzCamRoi } from '../src/capture/placeRoi.js';
 import { polygonCentroid } from '../src/domain/polygon.js';
@@ -16,19 +19,26 @@ import type { VpdClient } from '../src/clients/VpdClient.js';
 import type { LpdClient } from '../src/clients/LpdClient.js';
 import type { Repository } from '../src/store/Repository.js';
 import type { CapturedImage, SetupArtifact } from '../src/domain/types.js';
+import type { AggregatedSlot } from '../src/capture/types.js';
 import type { ToolsConfig } from '../src/config/toolsConfig.js';
 import type { SetupTarget } from '../src/setup/SetupOrchestrator.js';
 
 /**
- * 검증자(qa-tester): /capture/* REST (fastify.inject).
- * start/status/stop/finalize/runs/runs:id/aggregate + zod 400 + 중복 409.
+ * 검증자(qa-tester): /capture/* REST (fastify.inject) — DB 스키마 개편 후 재작성.
+ * start/status/stop/finalize/aggregate/occupancy + zod 400 + 중복 409.
  * 기존 /setup/*·/mapping 회귀 확인(가산·불변).
+ *
+ * ★ run_id 폐기(설계서 §3): `/capture/runs` 제거, `/capture/runs/:id/aggregate` → `/capture/aggregate`,
+ *   `/capture/runs/:id/occupancy` → `/capture/occupancy`(둘 다 CaptureJob 인메모리 getter 위임).
+ *   `/capture/finalize` 바디에 runId 없음 — 현재 잡의 getSnapshot() 을 finalize. CaptureJobDeps 에서
+ *   `store` 가 제거되어 `new CaptureJob({...})` 리터럴에서도 제거했다(store 는 SqliteStore/buildServer.sqlite
+ *   에는 여전히 필요 — `/capture/slots` 가 store.getSlotSetup() 을 직접 쓴다).
  */
 
 const captureCfg: ToolsConfig['capture'] = {
   defaultCount: 50, intervalMs: 1000, moveIntervalMs: 1000, checkpointEvery: 10,
   checkpointTriggerMode: 'rounds', checkpointIntervalMs: 60000, dbFile: ':memory:',
-  clusterDist: 0.06, clusterMinSupport: 3, minConfidence: 0.5, moveBeforeCapture: true,
+  clusterDist: 0.06, clusterMinSupport: 3, minConfidence: 0.5, slotAssignGate: 0.12, moveBeforeCapture: true,
 };
 const setupCfg = {
   presetSettleMs: 0, betweenPresetMs: 0, minConfidence: 0.5, roiPadding: 0, yBandTolerance: 0.1,
@@ -50,7 +60,7 @@ function makeServer() {
   const store = new SqliteStore(':memory:');
   const queue: Array<() => void> = [];
   const job = new CaptureJob({
-    camera: fakeCamera(), vpd: fakeVpd(), store, cfg: captureCfg, lpdEnabled: false,
+    camera: fakeCamera(), vpd: fakeVpd(), cfg: captureCfg, lpdEnabled: false,
     setTimer: (fn) => { queue.push(fn); return queue as unknown as NodeJS.Timeout; },
     clearTimer: () => {}, sleep: async () => {}, now: () => 'T',
   });
@@ -136,7 +146,7 @@ describe('/capture/status·stop', () => {
   });
 });
 
-describe('/capture/finalize', () => {
+describe('/capture/finalize (runId 폐기 — 현재 잡 인메모리 스냅샷 finalize)', () => {
   it('running 중 finalize → 409', async () => {
     const s = makeServer(); app = s.app; store = s.store;
     await app.inject({ method: 'POST', url: '/capture/start', payload: { count: 5, targets: [target] } });
@@ -145,92 +155,107 @@ describe('/capture/finalize', () => {
     expect(JSON.parse(r.body).state).toBe('running');
   });
 
-  it('런 없음(미지정 runId) → 404', async () => {
+  it('잡을 한 번도 시작하지 않은 상태(idle)에서도 finalize 가능 → 200 slots:0(runId 불필요)', async () => {
     const s = makeServer(); app = s.app; store = s.store;
     const r = await app.inject({ method: 'POST', url: '/capture/finalize', payload: {} });
-    expect(r.statusCode).toBe(404);
-    expect(JSON.parse(r.body).error).toContain('no run');
+    expect(r.statusCode).toBe(200);
+    const body = JSON.parse(r.body);
+    expect(body.ok).toBe(true);
+    expect(body.slots).toBe(0); // 빈 스냅샷(검출 없음) → 강등 slots 0.
+    expect(body).toHaveProperty('globalCount');
   });
 
-  it('종료된 런 finalize → 200 {ok, slots, globalCount}', async () => {
+  it('중지된 잡 finalize → 200 {ok, slots, globalCount}', async () => {
     const s = makeServer(); app = s.app; store = s.store;
-    // 런을 직접 만들고 종료(LLM off 결정형 강등 — 빈 검출이면 slots 0).
-    const runId = s.store.createRun({ plannedCount: 1, intervalMs: 1, startedAt: 'T' });
-    s.store.endRun(runId, { status: 'done', stopReason: 'count', endedAt: 'T1' });
-    const r = await app.inject({ method: 'POST', url: '/capture/finalize', payload: { runId } });
+    await app.inject({ method: 'POST', url: '/capture/start', payload: { count: 5, targets: [target] } });
+    await app.inject({ method: 'POST', url: '/capture/stop' }); // 타이머 미발화(roundRunning=false) → 즉시 stopped.
+    const r = await app.inject({ method: 'POST', url: '/capture/finalize', payload: {} });
     expect(r.statusCode).toBe(200);
     const body = JSON.parse(r.body);
     expect(body.ok).toBe(true);
     expect(body).toHaveProperty('slots');
     expect(body).toHaveProperty('globalCount');
   });
-});
 
-describe('/capture/runs·aggregate', () => {
-  it('runs → CaptureRunRow[] (메타)', async () => {
+  it('바디에 occupancy(로직 점유 스냅샷) 동봉 → 400 없이 수용(비교 불가 시 occupancyAgreement 미부착)', async () => {
     const s = makeServer(); app = s.app; store = s.store;
-    s.store.createRun({ plannedCount: 1, intervalMs: 1, startedAt: 'A' });
-    const r = await app.inject({ method: 'GET', url: '/capture/runs' });
+    const r = await app.inject({
+      method: 'POST', url: '/capture/finalize',
+      payload: { occupancy: [{ key: '1:1', spaces: [{ idx: 1, occupied: true }] }] },
+    });
     expect(r.statusCode).toBe(200);
     const body = JSON.parse(r.body);
-    expect(Array.isArray(body)).toBe(true);
-    expect(body[0]).toHaveProperty('plannedCount');
+    expect(body.ok).toBe(true);
+    // brain 미주입 → 비교 자체가 비활성(graceful skip) → occupancyAgreement 키 없음.
+    expect(body.occupancyAgreement).toBeUndefined();
+  });
+});
+
+describe('/capture/aggregate (구 /capture/runs/:id/aggregate — run_id 폐기)', () => {
+  it('초기 상태(캡처 이력 없음) → 200 빈 배열', async () => {
+    const s = makeServer(); app = s.app; store = s.store;
+    const r = await app.inject({ method: 'GET', url: '/capture/aggregate' });
+    expect(r.statusCode).toBe(200);
+    expect(JSON.parse(r.body)).toEqual([]);
   });
 
-  it('runs/:id/aggregate → AggregatedSlot[]', async () => {
+  it('job.getAggregated() 를 그대로 위임(AggregatedSlot[] shape 불변)', async () => {
     const s = makeServer(); app = s.app; store = s.store;
-    const runId = s.store.createRun({ plannedCount: 1, intervalMs: 1, startedAt: 'A' });
-    s.store.replaceAggregatedSlots(runId, [{
+    const fake: AggregatedSlot[] = [{
       presetKey: '1:1', clusterId: 1, camIdx: 1, presetIdx: 1, x: 0.1, y: 0.1, w: 0.1, h: 0.1,
       support: 3, occupancyRate: 0.5, plateX: null, plateY: null, plateW: null, plateH: null, plateQuad: null,
       confidence: 0, posSpread: 0, angleSpread: null, status: 'candidate',
-    }]);
-    const r = await app.inject({ method: 'GET', url: `/capture/runs/${runId}/aggregate` });
+    }];
+    vi.spyOn(s.job, 'getAggregated').mockReturnValue(fake);
+    const r = await app.inject({ method: 'GET', url: '/capture/aggregate' });
     expect(r.statusCode).toBe(200);
     const body = JSON.parse(r.body);
     expect(body).toHaveLength(1);
     expect(body[0].presetKey).toBe('1:1');
   });
-
-  it('runs/:id/aggregate (없는 id) → 404', async () => {
-    const s = makeServer(); app = s.app; store = s.store;
-    const r = await app.inject({ method: 'GET', url: '/capture/runs/999/aggregate' });
-    expect(r.statusCode).toBe(404);
-  });
-
-  it('runs/:id/aggregate (잘못된 id) → 400', async () => {
-    const s = makeServer(); app = s.app; store = s.store;
-    const r = await app.inject({ method: 'GET', url: '/capture/runs/abc/aggregate' });
-    expect(r.statusCode).toBe(400);
-  });
 });
 
-describe('/capture/runs/:id/occupancy (점유율 조회 — 성공기준 5)', () => {
-  it('occupancy 저장 후 조회 → 프리셋별 최신 shape', async () => {
+describe('/capture/occupancy (구 /capture/runs/:id/occupancy — 성공기준 5, run_id 폐기)', () => {
+  it('LLM off(occByPreset 비어있음) → 200 빈 배열', async () => {
     const s = makeServer(); app = s.app; store = s.store;
-    const runId = s.store.createRun({ plannedCount: 1, intervalMs: 1, startedAt: 'A' });
-    s.store.insertOccupancy(runId, {
-      camIdx: 1, presetIdx: 1, atRound: 2, occupiedCount: 2, total: 4, rate: 0.5,
-      spacesJson: JSON.stringify([{ id: 1, occupied: true }]), updatedAt: 'T',
-    });
-    const r = await app.inject({ method: 'GET', url: `/capture/runs/${runId}/occupancy` });
+    const r = await app.inject({ method: 'GET', url: '/capture/occupancy' });
+    expect(r.statusCode).toBe(200);
+    expect(JSON.parse(r.body)).toEqual([]);
+  });
+
+  it('job.getOccupancy() 를 그대로 위임(프리셋별 shape 불변)', async () => {
+    const s = makeServer(); app = s.app; store = s.store;
+    const fake = [{ camIdx: 1, presetIdx: 1, occupiedCount: 2, total: 4, rate: 0.5, spacesJson: JSON.stringify([{ id: 1, occupied: true }]) }];
+    vi.spyOn(s.job, 'getOccupancy').mockReturnValue(fake);
+    const r = await app.inject({ method: 'GET', url: '/capture/occupancy' });
     expect(r.statusCode).toBe(200);
     const body = JSON.parse(r.body);
     expect(body).toHaveLength(1);
-    expect(body[0]).toMatchObject({ camIdx: 1, presetIdx: 1, atRound: 2, occupiedCount: 2, total: 4, rate: 0.5 });
+    expect(body[0]).toMatchObject({ camIdx: 1, presetIdx: 1, occupiedCount: 2, total: 4, rate: 0.5 });
     expect(body[0]).toHaveProperty('spacesJson');
   });
+});
 
-  it('없는 id → 404', async () => {
+describe('/capture/slots (구 /capture/runs/:id/slots — store.getSlotSetup() 직접 위임)', () => {
+  it('store.getSlotSetup() 을 그대로 위임(SlotSetupView[] shape 통과)', async () => {
     const s = makeServer(); app = s.app; store = s.store;
-    const r = await app.inject({ method: 'GET', url: '/capture/runs/999/occupancy' });
-    expect(r.statusCode).toBe(404);
+    const fake = [{
+      slotId: 1, camId: 1, presetId: 1, presetSlotIdx: 1, presetKey: '1:1',
+      roi: [{ x: 0.2, y: 0.2 }, { x: 0.5, y: 0.2 }, { x: 0.5, y: 0.5 }, { x: 0.2, y: 0.5 }],
+      vpd: { x: 0.3, y: 0.3, w: 0.1, h: 0.1 },
+      lpd: null, occupyRange: null, pan: null, tilt: null, zoom: null, centered: false, img1: null, slot3dFrontCenter: null, updatedAt: 'T',
+    }];
+    vi.spyOn(s.store, 'getSlotSetup').mockReturnValue(fake);
+    const r = await app.inject({ method: 'GET', url: '/capture/slots' });
+    expect(r.statusCode).toBe(200);
+    expect(JSON.parse(r.body)).toEqual(fake);
   });
 
-  it('잘못된 id → 400', async () => {
+  it('빈 slot_setup → 200 빈 배열', async () => {
     const s = makeServer(); app = s.app; store = s.store;
-    const r = await app.inject({ method: 'GET', url: '/capture/runs/abc/occupancy' });
-    expect(r.statusCode).toBe(400);
+    const r = await app.inject({ method: 'GET', url: '/capture/slots' });
+    expect(r.statusCode).toBe(200);
+    expect(JSON.parse(r.body)).toEqual([]);
   });
 });
 
@@ -276,7 +301,7 @@ describe('POST /capture/warmup (수동 강제 구동 §e)', () => {
     const warmup = vi.fn(warmupImpl);
     const brain = { enabled: true, warmup } as unknown as import('../src/brain/AgentRuntime.js').AgentRuntime;
     const job = new CaptureJob({
-      camera: fakeCamera(), vpd: fakeVpd(), store, cfg: captureCfg, lpdEnabled: false, brain,
+      camera: fakeCamera(), vpd: fakeVpd(), cfg: captureCfg, lpdEnabled: false, brain,
       setTimer: (fn) => { queue.push(fn); return queue as unknown as NodeJS.Timeout; },
       clearTimer: () => {}, sleep: async () => {}, now: () => 'T',
     });
@@ -362,7 +387,7 @@ describe('/capture/save·saves (정밀수집 결과 저장/열기)', () => {
     const s = new SqliteStore(':memory:');
     const queue: Array<() => void> = [];
     const job = new CaptureJob({
-      camera: fakeCamera(), vpd: fakeVpd(), store: s, cfg: captureCfg, lpdEnabled: false,
+      camera: fakeCamera(), vpd: fakeVpd(), cfg: captureCfg, lpdEnabled: false,
       setTimer: (fn) => { queue.push(fn); return queue as unknown as NodeJS.Timeout; },
       clearTimer: () => {}, sleep: async () => {}, now: () => 'T',
     });
@@ -475,7 +500,7 @@ describe('POST /capture/detect (라이브 VPD/LPD 검출 — §04)', () => {
     const s = new SqliteStore(':memory:');
     const queue: Array<() => void> = [];
     const job = new CaptureJob({
-      camera: fakeCamera(), vpd: fakeVpd(), store: s, cfg: captureCfg, lpdEnabled: false,
+      camera: fakeCamera(), vpd: fakeVpd(), cfg: captureCfg, lpdEnabled: false,
       setTimer: (fn) => { queue.push(fn); return queue as unknown as NodeJS.Timeout; },
       clearTimer: () => {}, sleep: async () => {}, now: () => 'T',
     });
@@ -499,7 +524,7 @@ describe('POST /capture/detect (라이브 VPD/LPD 검출 — §04)', () => {
     expect(body).toHaveProperty('summary');
     // 경계면: resolvePresetPtz 로 basePtz 가 프리셋 PTZ(echo 0/0/1 아님).
     expect(body.basePtz).toEqual({ pan: 10, tilt: 5, zoom: 1.5 });
-    // placeRoiFile 미주입 → 모드A 요청(기본 true)이 강등(전량 통과) + 사유 노출(조용한 폴백 금지).
+    // 라우트 기본 vpdEnabled=false(제품 정책) → vpd.detect 미호출(vpdCount:0). placeRoiFile 미주입 → 모드A 강등 사유 노출.
     expect(body.summary).toEqual({
       vpdCount: 0,
       lpdCount: 0,
@@ -507,6 +532,7 @@ describe('POST /capture/detect (라이브 VPD/LPD 검출 — §04)', () => {
       onPlaceOnly: false,
       filteredOut: 0,
       lpdFilteredOut: 0,
+      vpdEnabled: false,
       onPlaceDegraded: '주차면 파일 없음/로드 실패',
     });
   });
@@ -568,21 +594,22 @@ describe('주차면 필터 REST 경계 (§6-16~18)', () => {
     const s = new SqliteStore(':memory:');
     const queue: Array<() => void> = [];
     const job = new CaptureJob({
-      camera: fakeCamera(), vpd: fakeVpd(), store: s, cfg: captureCfg, lpdEnabled: false,
+      camera: fakeCamera(), vpd: fakeVpd(), cfg: captureCfg, lpdEnabled: false,
       setTimer: (fn) => { queue.push(fn); return queue as unknown as NodeJS.Timeout; },
       clearTimer: () => {}, sleep: async () => {}, now: () => 'T',
     });
     const { repo } = fakeRepo();
     const finalizer = new Finalizer({ store: s, repo, cfg: captureCfg, roiPadding: 0, yBandTolerance: 0.1, now: () => 'T' });
     const orchestrator = new SetupOrchestrator({ camera: fakeCamera(), vpd: fakeVpd(), repo, cfg: setupCfg, sleep: async () => {}, now: () => 'T' });
+    const vpdDetect = vi.fn(async () => [PARKED, PASSING]);
     const a = buildServer({
       orchestrator, repo, camera: roiCamera(),
-      vpd: { health: async () => true, detect: async () => [PARKED, PASSING] } as unknown as VpdClient,
+      vpd: { health: async () => true, detect: vpdDetect } as unknown as VpdClient,
       lpd: { health: async () => true, detect: async () => [] } as unknown as LpdClient,
       captureJob: job, finalizer, sqlite: s, capture: captureCfg,
       placeRoiFile: FIXTURE,
     });
-    return { app: a, store: s, job };
+    return { app: a, store: s, job, vpdDetect };
   }
 
   it('§6-16 POST /capture/start {vpdOnParkingOnly:false} → zod 통과 + job.start 로 전달', async () => {
@@ -607,21 +634,42 @@ describe('주차면 필터 REST 경계 (§6-16~18)', () => {
     expect(r.statusCode).toBe(400);
   });
 
+  // 설계서 S3 — 정밀수집 라우트 기본 vpdEnabled=false(제품 정책). 명시 시 그 값이 job.start 로 전달.
+  it('§6-16d start 에서 vpdEnabled 미지정 → job.start 로 false 전달 + status.vpdEnabled=false', async () => {
+    const s = makeServer(); app = s.app; store = s.store;
+    const spy = vi.spyOn(s.job, 'start');
+    const r = await app.inject({ method: 'POST', url: '/capture/start', payload: { count: 3, targets: [target] } });
+    expect(r.statusCode).toBe(200);
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ vpdEnabled: false }));
+    expect(s.job.getStatus().vpdEnabled).toBe(false);
+  });
+
+  it('§6-16e start {vpdEnabled:true} → job.start 로 true 전달 + status.vpdEnabled=true', async () => {
+    const s = makeServer(); app = s.app; store = s.store;
+    const spy = vi.spyOn(s.job, 'start');
+    const r = await app.inject({ method: 'POST', url: '/capture/start', payload: { count: 3, targets: [target], vpdEnabled: true } });
+    expect(r.statusCode).toBe(200);
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ vpdEnabled: true }));
+    expect(s.job.getStatus().vpdEnabled).toBe(true);
+  });
+
   it('★ §6-17 POST /capture/detect 모드 미지정 + placeRoiFile 주입 → 기본 모드A 로 필터', async () => {
     const sv = makeRoiServer(); app = sv.app; store = sv.store;
-    const r = await app.inject({ method: 'POST', url: '/capture/detect', payload: { cam: 1, preset: 1 } });
+    // VPD 필터 거동 검증 테스트 — 라우트 기본 vpdEnabled=false(제품 정책)이므로 VPD 를 명시적으로 켠다(§8 실패-주도 갱신).
+    const r = await app.inject({ method: 'POST', url: '/capture/detect', payload: { cam: 1, preset: 1, vpdEnabled: true } });
     expect(r.statusCode).toBe(200);
     const body = JSON.parse(r.body);
     expect(body.vehicles).toHaveLength(1); // 통행차 제외.
     expect(body.summary).toEqual({
-      vpdCount: 2, lpdCount: 0, recovered: 0, onPlaceOnly: true, filteredOut: 1, lpdFilteredOut: 0,
+      vpdCount: 2, lpdCount: 0, recovered: 0, onPlaceOnly: true, filteredOut: 1, lpdFilteredOut: 0, vpdEnabled: true,
     });
     expect(body.summary.onPlaceDegraded).toBeUndefined(); // 폴리곤이 있으므로 강등 아님.
   });
 
   it('§6-18 POST /capture/detect {vpdOnParkingOnly:false} + placeRoiFile 주입 → 전량 통과', async () => {
     const sv = makeRoiServer(); app = sv.app; store = sv.store;
-    const r = await app.inject({ method: 'POST', url: '/capture/detect', payload: { cam: 1, preset: 1, vpdOnParkingOnly: false } });
+    // VPD 필터 거동 검증 — 라우트 기본 VPD off 이므로 명시적으로 켠다(§8 실패-주도 갱신).
+    const r = await app.inject({ method: 'POST', url: '/capture/detect', payload: { cam: 1, preset: 1, vpdOnParkingOnly: false, vpdEnabled: true } });
     expect(r.statusCode).toBe(200);
     const body = JSON.parse(r.body);
     expect(body.vehicles).toHaveLength(2);
@@ -632,12 +680,34 @@ describe('주차면 필터 REST 경계 (§6-16~18)', () => {
 
   it('§6-18b 주차면 없는 프리셋(preset 9) → 강등 사유가 파일 부재와 구별된다', async () => {
     const sv = makeRoiServer(); app = sv.app; store = sv.store;
-    const r = await app.inject({ method: 'POST', url: '/capture/detect', payload: { cam: 1, preset: 9 } });
+    // VPD 필터 강등 거동 검증 — 라우트 기본 VPD off 이므로 명시적으로 켠다(§8 실패-주도 갱신).
+    const r = await app.inject({ method: 'POST', url: '/capture/detect', payload: { cam: 1, preset: 9, vpdEnabled: true } });
     expect(r.statusCode).toBe(200);
     const body = JSON.parse(r.body);
     expect(body.vehicles).toHaveLength(2); // 전량 통과(드롭 금지).
     expect(body.summary.onPlaceOnly).toBe(false);
     expect(body.summary.onPlaceDegraded).toBe('프리셋 1:9 주차면 0개');
+  });
+
+  // 설계서 S3 — 라우트 기본 vpdEnabled=false(제품 정책): '검출 실행'(vpdEnabled 미지정)은 LPD 전용.
+  it('§6-19 POST /capture/detect 기본(vpdEnabled 미지정) → vpd.detect 미호출 · vehicles 0 · summary.vpdEnabled=false', async () => {
+    const sv = makeRoiServer(); app = sv.app; store = sv.store;
+    const r = await app.inject({ method: 'POST', url: '/capture/detect', payload: { cam: 1, preset: 1 } });
+    expect(r.statusCode).toBe(200);
+    expect(sv.vpdDetect).toHaveBeenCalledTimes(0); // ★ 제품 정책: 자동 경로 VPD 정지.
+    const body = JSON.parse(r.body);
+    expect(body.vehicles).toHaveLength(0);
+    expect(body.summary.vpdEnabled).toBe(false);
+  });
+
+  it('§6-19b POST /capture/detect {vpdEnabled:true}(VPD 검출 버튼) → vpd.detect 호출 · vehicles 표시', async () => {
+    const sv = makeRoiServer(); app = sv.app; store = sv.store;
+    const r = await app.inject({ method: 'POST', url: '/capture/detect', payload: { cam: 1, preset: 1, vpdEnabled: true } });
+    expect(r.statusCode).toBe(200);
+    expect(sv.vpdDetect).toHaveBeenCalledTimes(1);
+    const body = JSON.parse(r.body);
+    expect(body.vehicles).toHaveLength(1); // 통행차 제외, 주차차 1.
+    expect(body.summary.vpdEnabled).toBe(true);
   });
 
   /**
@@ -678,6 +748,98 @@ describe('주차면 필터 REST 경계 (§6-16~18)', () => {
     expect(typeof after.vpdOnParkingOnly).toBe('boolean'); // 배지 표시 조건.
     expect(after.vpdFilteredOut).toBeUndefined(); // 제외 0 → 키 없음(app.js 의 falsy 가드와 정합).
     expect(after.lpdFilteredOut).toBeUndefined(); // 번호판 제외 0 → 동일(배지 괄호 생략).
+  });
+});
+
+/**
+ * ★ 원버튼 셋업 파이프라인 라우트 배선(설계서 §6a 라우트 케이스, 02_developer_changes §7b).
+ *   autoChain 스키마 수용 · onCaptureStart 배선(GET /capture/pipeline stage 로 관측) · isBusy 409 · 미주입 404.
+ *   pipeline 은 실제 SetupPipeline 을 주입(calibrator 만 스텁) — 라우트↔파이프라인 경계를 실동작으로 확인.
+ */
+describe('원버튼 셋업 파이프라인 라우트 (autoChain·/capture/pipeline·isBusy 409)', () => {
+  /** 실제 SetupPipeline 을 배선한 서버(calibrator 는 no-op 스텁). */
+  function makePipelineServer() {
+    const store = new SqliteStore(':memory:');
+    const queue: Array<() => void> = [];
+    const job = new CaptureJob({
+      camera: fakeCamera(), vpd: fakeVpd(), cfg: captureCfg, lpdEnabled: false,
+      setTimer: (fn) => { queue.push(fn); return queue as unknown as NodeJS.Timeout; },
+      clearTimer: () => {}, sleep: async () => {}, now: () => 'T',
+    });
+    const { repo } = fakeRepo();
+    const finalizer = new Finalizer({ store, repo, cfg: captureCfg, roiPadding: 0, yBandTolerance: 0.1, now: () => 'T' });
+    const calibrator = {
+      start: () => ({ total: 0 }),
+      getStatus: () => ({ state: 'idle', done: 0, total: 0 }),
+    } as unknown as PtzCalibrator;
+    const discovery = {
+      start: () => ({ total: 0 }),
+      getStatus: () => ({ state: 'idle', done: 0, total: 0, found: 0 }),
+    } as unknown as PlateDiscoveryJob;
+    const pipeline = new SetupPipeline({ job, finalizer, discovery, calibrator, store, now: () => 'T' });
+    const orchestrator = new SetupOrchestrator({ camera: fakeCamera(), vpd: fakeVpd(), repo, cfg: setupCfg, sleep: async () => {}, now: () => 'T' });
+    const a = buildServer({
+      orchestrator, repo, camera: fakeCamera(), vpd: fakeVpd(),
+      captureJob: job, finalizer, sqlite: store, capture: captureCfg, pipeline,
+    });
+    return { app: a, store, job, pipeline };
+  }
+
+  it('autoChain:true → 200 + onCaptureStart(true) 배선(GET /capture/pipeline stage=capturing, armed=true)', async () => {
+    const s = makePipelineServer(); app = s.app; store = s.store;
+    const r = await app.inject({ method: 'POST', url: '/capture/start', payload: { count: 3, targets: [target], autoChain: true } });
+    expect(r.statusCode).toBe(200);
+    const pl = JSON.parse((await app.inject({ method: 'GET', url: '/capture/pipeline' })).body);
+    expect(pl).toEqual({ armed: true, stage: 'capturing', startedAt: 'T' });
+  });
+
+  it('autoChain:false → 200 + 비무장(pipeline stage=idle, armed=false)', async () => {
+    const s = makePipelineServer(); app = s.app; store = s.store;
+    const r = await app.inject({ method: 'POST', url: '/capture/start', payload: { count: 3, targets: [target], autoChain: false } });
+    expect(r.statusCode).toBe(200);
+    const pl = JSON.parse((await app.inject({ method: 'GET', url: '/capture/pipeline' })).body);
+    expect(pl).toEqual({ armed: false, stage: 'idle' });
+  });
+
+  it('autoChain 미지정 → 200 + 기본 비무장(회귀 0)', async () => {
+    const s = makePipelineServer(); app = s.app; store = s.store;
+    const r = await app.inject({ method: 'POST', url: '/capture/start', payload: { count: 3, targets: [target] } });
+    expect(r.statusCode).toBe(200);
+    const pl = JSON.parse((await app.inject({ method: 'GET', url: '/capture/pipeline' })).body);
+    expect(pl.armed).toBe(false);
+    expect(pl.stage).toBe('idle');
+  });
+
+  it('autoChain 비불리언 → 400 (zod)', async () => {
+    const s = makePipelineServer(); app = s.app; store = s.store;
+    const r = await app.inject({ method: 'POST', url: '/capture/start', payload: { count: 3, targets: [target], autoChain: 'yes' } });
+    expect(r.statusCode).toBe(400);
+  });
+
+  it('GET /capture/pipeline shape — 초기 idle {armed:false, stage:"idle"}', async () => {
+    const s = makePipelineServer(); app = s.app; store = s.store;
+    const r = await app.inject({ method: 'GET', url: '/capture/pipeline' });
+    expect(r.statusCode).toBe(200);
+    expect(JSON.parse(r.body)).toEqual({ armed: false, stage: 'idle' });
+  });
+
+  it('pipeline 미주입 → GET /capture/pipeline 404(미등록, 가산 가드)', async () => {
+    const s = makeServer(); app = s.app; store = s.store; // pipeline 없음.
+    const r = await app.inject({ method: 'GET', url: '/capture/pipeline' });
+    expect(r.statusCode).toBe(404);
+  });
+
+  it('pipeline.isBusy()=true → POST /capture/start 409 {error:"pipeline busy", stage}', async () => {
+    const s = makePipelineServer(); app = s.app; store = s.store;
+    // finalize/calibrate 진행 중을 모사 — isBusy 가드는 job.start 이전에 평가된다.
+    const startSpy = vi.spyOn(s.job, 'start');
+    vi.spyOn(s.pipeline, 'isBusy').mockReturnValue(true);
+    const r = await app.inject({ method: 'POST', url: '/capture/start', payload: { count: 3, targets: [target] } });
+    expect(r.statusCode).toBe(409);
+    const body = JSON.parse(r.body);
+    expect(body.error).toBe('pipeline busy');
+    expect(body).toHaveProperty('stage');
+    expect(startSpy).not.toHaveBeenCalled(); // busy 면 새 수집 시작 안 함.
   });
 });
 

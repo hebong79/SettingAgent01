@@ -45,6 +45,7 @@ class YoloV8ImageObjectDetection:
         results = self.model(
             frame,
             conf=settings.YOLO_CONF_THRESHOLD,
+            iou=settings.YOLO_IOU_THRESHOLD,
             save_conf=True,
             device=self.device,
             verbose=False,
@@ -64,7 +65,9 @@ class YoloV8ImageObjectDetection:
         ]
 
         bboxes = results.boxes.xyxy.cpu().int().tolist()
-        if self.task == "segment":
+        if self.task == "segment" and results.masks is not None:
+            # 검출 0대면 ultralytics 가 results.masks 를 None 으로 둔다 → .xy 접근 시 AttributeError → HTTP 500.
+            # det 경로는 빈 결과를 정상 처리(201 + success:false)하므로 seg 도 같아야 한다(빈 주차장·프리셋 전환 직후 프레임).
             masks = [x.astype(np.int32).tolist() for x in results.masks.xy]
         else:
             masks = []

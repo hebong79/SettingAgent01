@@ -10,6 +10,8 @@ import type { CameraClient } from '../src/clients/CameraClient.js';
 import type { LpdClient, PlateBox } from '../src/clients/LpdClient.js';
 import type { VpdClient } from '../src/clients/VpdClient.js';
 import type { Repository } from '../src/store/Repository.js';
+import type { SqliteStore } from '../src/capture/SqliteStore.js';
+import type { SlotSetupView } from '../src/capture/types.js';
 import type { SetupArtifact } from '../src/domain/types.js';
 import { rectToQuad } from '../src/domain/geometry.js';
 import type { ToolsConfig } from '../src/config/toolsConfig.js';
@@ -28,8 +30,8 @@ const setupCfg = {
 function calCfg(outFile: string): ToolsConfig['calibrate'] {
   return {
     targetPlateWidth: 0.2, centerTol: 0.03, widthTol: 0.02, maxIterations: 30,
-    probeStepDeg: 1.0, maxStepDeg: 5.0, fallbackGainPanDeg: 20, fallbackGainTiltDeg: 15,
-    settleMs: 0, outFile, llmAdvise: false,
+    probeStepDeg: 1.0, maxStepDeg: 5.0, fallbackGainPanDeg: -62, fallbackGainTiltDeg: -35.5,
+    settleMs: 0, outFile,
   };
 }
 
@@ -43,6 +45,16 @@ function artifact(): SetupArtifact {
 
 function repoWith(a: SetupArtifact): Repository {
   return { loadArtifact: () => a } as unknown as Repository;
+}
+
+/** lpd 보유 1슬롯 slot_setup fixture(slot_id=1). PtzCalibrator 센터라이징 소스. */
+function storeWith(): Pick<SqliteStore, 'upsertSlotCentering' | 'getSlotSetup'> {
+  const v: SlotSetupView[] = [{
+    slotId: 1, camId: 1, presetId: 1, presetSlotIdx: 1, presetKey: '1:1',
+    roi: [], vpd: null, lpd: rectToQuad({ x: 0.62, y: 0.62, w: 0.05, h: 0.03 }),
+    occupyRange: null, pan: null, tilt: null, zoom: null, centered: false, img1: null, slot3dFrontCenter: null, updatedAt: null,
+  }];
+  return { getSlotSetup: () => v, upsertSlotCentering: () => {} } as unknown as Pick<SqliteStore, 'upsertSlotCentering' | 'getSlotSetup'>;
 }
 
 function fakeCamera(): CameraClient {
@@ -73,7 +85,7 @@ const fakeVpd = () => ({ health: async () => true, detect: async () => [] } as u
 function makeServer(outFile: string) {
   const repo = repoWith(artifact());
   const camera = fakeCamera();
-  const calibrator = new PtzCalibrator({ camera, lpd: fakeLpd(), repo, cfg: calCfg(outFile), sleep: async () => {}, now: () => 'T' });
+  const calibrator = new PtzCalibrator({ camera, lpd: fakeLpd(), store: storeWith(), cfg: calCfg(outFile), sleep: async () => {}, now: () => 'T' });
   const orchestrator = new SetupOrchestrator({ camera, vpd: fakeVpd(), repo, cfg: setupCfg, sleep: async () => {}, now: () => 'T' });
   const app = buildServer({ orchestrator, repo, camera, vpd: fakeVpd(), calibrator, calibrate: calCfg(outFile) });
   return { app };
@@ -115,7 +127,7 @@ describe('/calibrate/ptz (start·409·zod)', () => {
     const blockingSleep = () => new Promise<void>((r) => { release = r; });
     const repo = repoWith(artifact());
     const camera = fakeCamera();
-    const calibrator = new PtzCalibrator({ camera, lpd: fakeLpd(), repo, cfg: calCfg(out), sleep: blockingSleep, now: () => 'T' });
+    const calibrator = new PtzCalibrator({ camera, lpd: fakeLpd(), store: storeWith(), cfg: calCfg(out), sleep: blockingSleep, now: () => 'T' });
     const orchestrator = new SetupOrchestrator({ camera, vpd: fakeVpd(), repo, cfg: setupCfg, sleep: async () => {}, now: () => 'T' });
     app = buildServer({ orchestrator, repo, camera, vpd: fakeVpd(), calibrator, calibrate: calCfg(out) });
     await app.inject({ method: 'POST', url: '/calibrate/ptz', payload: {} });
@@ -165,7 +177,7 @@ describe('/calibrate/result', () => {
     const body = JSON.parse(r.body);
     expect(body).toHaveProperty('createdAt');
     expect(body.items).toHaveLength(1);
-    expect(body.items[0].slotId).toBe('c1p1s1');
+    expect(body.items[0].slotId).toBe('1'); // slot_setup 소스: slotId=String(정수 slot_id)
   });
 });
 

@@ -69,6 +69,12 @@ export function captureUiState(state: string): {
   suppressFrameMsg: boolean;
   stoppingNote: boolean;
 };
+export function discoverView(status: { state?: string; done?: number; total?: number; found?: number } | null | undefined): {
+  percent: number;
+  label: string;
+  runDisabled: boolean;
+  polling: boolean;
+};
 export function capFrameKey(
   cam: number | string | null | undefined,
   preset: number | string | null | undefined,
@@ -78,6 +84,20 @@ export function settingsFormErrors(form: {
   llm?: { provider?: string; model?: string; baseUrl?: string };
   vpd?: { endpoint?: string; detPath?: string };
   lpd?: { endpoint?: string; detPath?: string };
+  camera?: {
+    executionMode?: string;
+    selectedCameraId?: string;
+    source?: {
+      id?: string;
+      label?: string;
+      kind?: 'sim' | 'hucoms';
+      protocol?: 'unity-rpc' | 'unity-rest' | 'hucoms-v1.22';
+      baseUrl?: string;
+      username?: string;
+      password?: string;
+      rtspUrl?: string;
+    };
+  };
 } | null | undefined): string[];
 
 export function toPixel(rect: NormalizedRect, imgW: number, imgH: number): PixelRect;
@@ -87,6 +107,10 @@ export function slotLabel(slotId: string, globalIndex?: GlobalIndexEntry[]): str
 export function fpsToInterval(fps: number): number;
 export function clampZoom(z: number, min?: number, max?: number): number;
 export function stepPtz(cur: Ptz, dir: string, step: number): Ptz;
+export function resolveAbsPtz(
+  cur: Ptz,
+  raw: { pan?: string; tilt?: string; zoom?: string },
+): Ptz;
 export function clampPanelWidth(px: number, min?: number, max?: number): number;
 
 export interface CameraListItem {
@@ -187,6 +211,8 @@ export interface OccupancySpace {
   idx: number;
   occupied: boolean;
   center?: NormalizedPoint;
+  /** occupied 일 때만: 판정 근거 번호판 OBB quad(입력 그대로) — 점유영역 사다리꼴 축 소스. */
+  plateQuad?: NormalizedPoint[];
 }
 export function computeOccupancy(
   floorPolygons: Array<{ idx: number; quad: NormalizedPoint[] }> | null | undefined,
@@ -221,8 +247,11 @@ export interface FlatSlotRow {
 export function buildFlatSlotRows(args: {
   placeRoi?: PlaceRoiMap | null;
   detectByKey?: Record<string, { vehicles?: Array<{ plate?: { quad: NormalizedPoint[] } }>; plates?: Array<{ quad: NormalizedPoint[] }> }> | null;
-  // vpd/lpd 는 SqliteStore.getParkingSlots(ParkingSlotView) 의 검출 객체(없으면 null) — 존재 여부만 태그로 쓴다.
-  parkingSlotsByKey?: Record<string, Array<{ slotIdx: number; vpd?: NormalizedRect | null; lpd?: NormalizedQuad | null; occupied?: boolean }>> | null;
+  // vpd/lpd 는 SqliteStore.getSlotSetup(SlotSetupView) 의 검출 객체(없으면 null) — 존재 여부만 태그로 쓴다.
+  parkingSlotsByKey?: Record<string, Array<{ slotId: number; vpd?: NormalizedRect | null; lpd?: NormalizedQuad | null }>> | null;
+  // 점유 판정기(occupancy.js:OccupancyJudge) 주입 — 전달 시 차량 접지 귀속 기준으로 판정한다.
+  // 미전달 기본 경로(번호판 중심)는 하위호환용이며 시차 오귀속 결함이 남는다 — 실소비처는 주입할 것.
+  judge?: { judge(floorPolygons: Array<{ idx: number; quad: NormalizedPoint[] }>, detect: unknown): Array<{ idx: number; occupied: boolean }> };
 }): FlatSlotRow[];
 
 export interface SlotLike {
@@ -429,6 +458,10 @@ export function removeDetection(
   sel: DetectSelection | null | undefined,
 ): DetectResult;
 
+// ===== VPD 차량 검출 중복 제거(dedup) 순수 로직 =====
+export function rectIoU(a: NormalizedRect, b: NormalizedRect): number;
+export function dedupeVehicles<T extends { rect: NormalizedRect }>(vehicles: T[], iouThresh?: number): T[];
+
 // ===== [기능3] 주차면 자동보정 아핀(이동+스케일) 순수 로직 =====
 
 export interface TranslateScale {
@@ -479,6 +512,8 @@ export function projectCuboid(
   groundModel: ViewerGroundModel | null | undefined,
   heightM: number,
 ): Cuboid | null;
+
+export function frontFaceCenter(cuboid: Cuboid | null | undefined): NormalizedPoint | null;
 
 export function formatGroundBadge(model: ViewerGroundModel | null | undefined): string;
 

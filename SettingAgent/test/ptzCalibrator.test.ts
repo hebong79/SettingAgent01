@@ -2,36 +2,43 @@ import { describe, it, expect } from 'vitest';
 import { PtzCalibrator, type PtzCalibratorDeps } from '../src/calibrate/PtzCalibrator.js';
 import type { CameraClient } from '../src/clients/CameraClient.js';
 import type { LpdClient, PlateBox } from '../src/clients/LpdClient.js';
-import type { SetupBrain } from '../src/brain/SetupBrain.js';
-import type { Repository } from '../src/store/Repository.js';
+import type { SqliteStore } from '../src/capture/SqliteStore.js';
+import type { SlotSetupView, SlotCenteringRow } from '../src/capture/types.js';
 import type { ToolsConfig } from '../src/config/toolsConfig.js';
-import type { SetupArtifact } from '../src/domain/types.js';
 import { rectToQuad } from '../src/domain/geometry.js';
 import type { SlotPtzArtifact } from '../src/calibrate/types.js';
 
 /**
- * 검증자(qa-tester): PtzCalibrator (camera/lpd/brain 모킹, sleep/now 주입).
+ * 검증자(qa-tester): PtzCalibrator (camera/lpd 모킹, sleep/now 주입).
  * ★ 명령 PTZ 추적: 모킹 LPD 가 응답 PTZ 가 아닌 "명령한 PTZ"(requestImage ptz override)에 따라
  *   번호판 위치/폭을 만든다(시뮬 echo 0/0/1 무관 가정 재현). 순서(중심→줌)·수렴·폴백 검증.
  */
 
 const cfg: ToolsConfig['calibrate'] = {
   targetPlateWidth: 0.2, centerTol: 0.03, widthTol: 0.02, maxIterations: 30,
-  probeStepDeg: 1.0, maxStepDeg: 5.0, fallbackGainPanDeg: 20, fallbackGainTiltDeg: 15,
-  settleMs: 0, outFile: 'data/slot_ptz.json', llmAdvise: false,
+  probeStepDeg: 1.0, maxStepDeg: 5.0, fallbackGainPanDeg: -62, fallbackGainTiltDeg: -35.5,
+  settleMs: 0, outFile: 'data/slot_ptz.json',
 };
 
-/** plateRoiByPreset 1슬롯 fixture. */
-function artifact(): SetupArtifact {
-  return {
-    createdAt: 'T', presets: [],
-    globalIndex: [{ globalIdx: 7, slotId: 'c1p1s1', camIdx: 1, presetIdx: 1 }],
-    slots: [{ slotId: 'c1p1s1', zone: 'z', roiByPreset: { '1:1': { x: 0.6, y: 0.6, w: 0.1, h: 0.05 } }, plateRoiByPreset: { '1:1': rectToQuad({ x: 0.62, y: 0.62, w: 0.05, h: 0.03 }) } }],
-  };
+/** lpd 보유 1슬롯 slot_setup fixture(slot_id=7 → globalIdx=7). */
+function views(): SlotSetupView[] {
+  return [{
+    slotId: 7, camId: 1, presetId: 1, presetSlotIdx: 1, presetKey: '1:1',
+    roi: [], vpd: null, lpd: rectToQuad({ x: 0.62, y: 0.62, w: 0.05, h: 0.03 }),
+    occupyRange: null, pan: null, tilt: null, zoom: null, centered: false, img1: null, slot3dFrontCenter: null, updatedAt: null,
+  }];
 }
 
-function repoWith(a: SetupArtifact | null): Repository {
-  return { loadArtifact: () => a } as unknown as Repository;
+function storeWith(v: SlotSetupView[]): Pick<SqliteStore, 'upsertSlotCentering' | 'getSlotSetup'> {
+  return { getSlotSetup: () => v, upsertSlotCentering: () => {} } as unknown as Pick<SqliteStore, 'upsertSlotCentering' | 'getSlotSetup'>;
+}
+
+/** upsertSlotCentering 호출 인자(rows)를 캡처하는 store 시임 — saveCenteringSlots 경계 검증용. */
+function storeWithSink(v: SlotSetupView[], sink: SlotCenteringRow[][]): Pick<SqliteStore, 'upsertSlotCentering' | 'getSlotSetup'> {
+  return {
+    getSlotSetup: () => v,
+    upsertSlotCentering: (rows: SlotCenteringRow[]) => { sink.push(rows); },
+  } as unknown as Pick<SqliteStore, 'upsertSlotCentering' | 'getSlotSetup'>;
 }
 
 /**
@@ -68,11 +75,11 @@ function makeMockModel() {
   return { camera, lpd, moves };
 }
 
-function makeCalibrator(over: Partial<PtzCalibratorDeps> = {}, a: SetupArtifact | null = artifact()) {
+function makeCalibrator(over: Partial<PtzCalibratorDeps> = {}, v: SlotSetupView[] = views()) {
   const m = makeMockModel();
   let saved: SlotPtzArtifact | undefined;
   const deps: PtzCalibratorDeps = {
-    camera: m.camera, lpd: m.lpd, repo: repoWith(a), cfg,
+    camera: m.camera, lpd: m.lpd, store: storeWith(v), cfg,
     writer: (art) => { saved = art; },
     sleep: async () => {}, now: () => 'T',
     ...over,
@@ -101,23 +108,34 @@ describe('PtzCalibrator 수렴 happy path', () => {
   });
 });
 
-describe('PtzCalibrator 순서(중심→줌)', () => {
-  it('zoom 변화는 중심 수렴 이후에만 발생', async () => {
+describe('PtzCalibrator 순서(방안2: 줌인 acquire → 센터 → 폭)', () => {
+  it('첫 명령은 acquireZoom(>presetZoom)으로 줌인, 이후 pan/tilt 센터(zoom 고정), 이후 width 가 Zt 방향 상승', async () => {
     const { cal, moves } = makeCalibrator();
     cal.start();
     await waitDone(cal);
-    // 첫 zoom!=1 명령의 인덱스 vs 마지막 pan/tilt 변화 인덱스 비교.
-    const firstZoomChange = moves.findIndex((m) => Math.abs(m.zoom - 1) > 1e-9);
-    // 중심정렬 단계의 마지막 pan/tilt 변화(=중심 수렴 직전)는 firstZoomChange 이전이어야 함.
-    let lastPanTiltChange = -1;
-    for (let i = 1; i < moves.length; i++) {
-      if (Math.abs(moves[i].pan - moves[i - 1].pan) > 1e-9 || Math.abs(moves[i].tilt - moves[i - 1].tilt) > 1e-9) {
-        if (firstZoomChange === -1 || i < firstZoomChange) lastPanTiltChange = i;
+    // 방안2 계약: 첫 명령은 acquireZoom(= presetZoom×acquirePlateWidth/lpdWidth = 1×0.12/0.05 = 2.4)으로 줌인.
+    //   넓은시야(presetZoom=1)에서 센터 후 줌인하던 구 계약(중심→줌)이 반전됐다(줌인이 센터보다 먼저).
+    const acquireZoom = 2.4;
+    expect(moves[0].zoom).toBeCloseTo(acquireZoom, 5);
+    expect(moves[0].zoom).toBeGreaterThan(1); // presetZoom(1) 초과 = 줌인 우선(acquire).
+
+    // width 구간 진입점: zoom 이 acquireZoom 을 초과로 상승하기 시작하는 첫 명령(=마감 zoomToPlateWidth).
+    const firstAboveAcquire = moves.findIndex((m) => m.zoom > acquireZoom + 1e-6);
+    expect(firstAboveAcquire).toBeGreaterThan(0); // 줌 상승(폭 마감)은 존재.
+
+    // acquire 구간(width 진입 이전): 모든 명령이 acquireZoom 에 고정(centerOnPlate 는 zoom 불변)이고,
+    //   그 사이 pan/tilt 센터링(변화)이 일어난다 = 센터가 폭보다 먼저.
+    let panTiltCenteredBeforeWidth = false;
+    for (let i = 0; i < firstAboveAcquire; i++) {
+      expect(moves[i].zoom).toBeCloseTo(acquireZoom, 5);
+      if (i > 0 && (Math.abs(moves[i].pan - moves[i - 1].pan) > 1e-9 || Math.abs(moves[i].tilt - moves[i - 1].tilt) > 1e-9)) {
+        panTiltCenteredBeforeWidth = true;
       }
     }
-    expect(firstZoomChange).toBeGreaterThan(0);
-    expect(lastPanTiltChange).toBeGreaterThan(0);
-    expect(lastPanTiltChange).toBeLessThan(firstZoomChange);
+    expect(panTiltCenteredBeforeWidth).toBe(true);
+
+    // 최종 zoom 은 targetZoom(=1×0.2/0.05=4.0) 방향으로 acquireZoom 을 넘어 상승.
+    expect(moves[moves.length - 1].zoom).toBeGreaterThan(acquireZoom);
   });
 });
 
@@ -151,6 +169,19 @@ describe('PtzCalibrator maxIter 미수렴', () => {
   });
 });
 
+describe('PtzCalibrator onFinished 콜백 throw 흡수 (T9 — 파이프라인 배선)', () => {
+  it('완료 콜백이 throw 해도 잡은 죽지 않고 done 종단·콜백 1회', async () => {
+    let called: string | undefined;
+    const { cal } = makeCalibrator({
+      onFinished: (state) => { called = state; throw new Error('콜백 폭발'); },
+    });
+    cal.start();
+    await waitDone(cal);
+    expect(called).toBe('done'); // 콜백은 발화됨.
+    expect(cal.getStatus().state).toBe('done'); // 그러나 잡 상태는 정상 종단(예외 흡수).
+  });
+});
+
 describe('PtzCalibrator 다수 번호판', () => {
   it('대상 prior 최근접 선택(엉뚱한 번호판 무시하고 수렴)', async () => {
     const m = makeMockModel();
@@ -170,28 +201,36 @@ describe('PtzCalibrator 다수 번호판', () => {
   });
 });
 
-describe('PtzCalibrator LLM off/실패 폴백', () => {
-  it('brain=undefined → 결정형만으로 동작', async () => {
-    const { cal, getSaved } = makeCalibrator({ brain: undefined });
+describe('PtzCalibrator saveCenteringSlots → upsertSlotCentering(정수 slot_id 키)', () => {
+  it('수렴 성공 → upsertSlotCentering 1회 호출, slotId:7(정수)·centered:1·ptz 분해 매핑', async () => {
+    const sink: SlotCenteringRow[][] = [];
+    const { cal, getSaved } = makeCalibrator({ store: storeWithSink(views(), sink) });
     cal.start();
     await waitDone(cal);
-    expect(getSaved()!.items[0].centered).toBe(true);
+    expect(cal.getStatus().state).toBe('done');
+
+    // saveCenteringSlots 는 성공(centered&&converged) 항목만 1회 배치 upsert.
+    expect(sink).toHaveLength(1);
+    expect(sink[0]).toHaveLength(1);
+    const row = sink[0][0];
+    // ★ 경계면: slotId 는 정수 전역 slot_id(=item.globalIdx=7), 문자열 'c1p1s1' 아님.
+    expect(row.slotId).toBe(7);
+    expect(typeof row.slotId).toBe('number');
+    expect(row.centered).toBe(1);
+    // SlotCenteringRow shape 완전성(부분 UPDATE 컬럼).
+    expect(Object.keys(row).sort()).toEqual(['centered', 'img1', 'pan', 'slotId', 'tilt', 'updatedAt', 'zoom']);
+    // 분해 PTZ ↔ JSON item.ptz 일치.
+    const it = getSaved()!.items[0];
+    expect({ pan: row.pan, tilt: row.tilt, zoom: row.zoom }).toEqual(it.ptz);
+    expect(row.slotId).toBe(it.globalIdx);
   });
 
-  it('llmAdvise=true 인데 adviseCentering=null → 결정형 폴백 수렴', async () => {
-    const brain = { enabled: true, adviseCentering: async () => null } as unknown as SetupBrain;
-    const { cal, getSaved } = makeCalibrator({ brain, cfg: { ...cfg, llmAdvise: true } as ToolsConfig['calibrate'] });
+  it('lpd 슬롯 0(빈 소스) → upsertSlotCentering 미호출(빈 rows 스킵)', async () => {
+    const sink: SlotCenteringRow[][] = [];
+    const { cal } = makeCalibrator({ store: storeWithSink([], sink) }, []);
     cal.start();
     await waitDone(cal);
-    expect(getSaved()!.items[0].centered).toBe(true);
-  });
-
-  it('adviseCentering occluded=true → 스킵 reason occluded', async () => {
-    const brain = { enabled: true, adviseCentering: async () => ({ occluded: true }) } as unknown as SetupBrain;
-    const { cal, getSaved } = makeCalibrator({ brain, cfg: { ...cfg, llmAdvise: true } as ToolsConfig['calibrate'] });
-    cal.start();
-    await waitDone(cal);
-    expect(getSaved()!.items[0].reason).toBe('occluded');
+    expect(sink).toHaveLength(0);
   });
 });
 
@@ -203,8 +242,11 @@ describe('PtzCalibrator 중복 시작·산출물 없음', () => {
     await waitDone(cal);
   });
 
-  it('setup_artifact 없음 → throw', () => {
-    const { cal } = makeCalibrator({}, null);
-    expect(() => cal.start()).toThrow('no setup artifact');
+  it('lpd 슬롯 0(빈 slot_setup) → total 0, state done', async () => {
+    const { cal } = makeCalibrator({}, []);
+    const r = cal.start();
+    expect(r.total).toBe(0);
+    await waitDone(cal);
+    expect(cal.getStatus().state).toBe('done');
   });
 });

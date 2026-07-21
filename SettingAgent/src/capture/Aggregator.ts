@@ -273,7 +273,7 @@ export function aggregate(
       const occupancyRate = totalRounds > 0 ? c.rounds.size / totalRounds : 0;
       const status: AggregatedSlot['status'] = support < opts.clusterMinSupport ? 'rejected' : 'candidate';
 
-      // 번호판 귀속: 번호판 대표 중심이 vehicle 대표 ROI 내부 + 겹침 최대(기존 matchPlatesToSlots 규칙).
+      // 번호판 귀속: 번호판 대표 중심이 vehicle 대표 ROI 내부 + 겹침 최대(**독립 복제 구현** — matchPlatesToSlots 는 전역 그리디로 개정됨. 규칙 이원화 = 별도 이슈).
       let plate: NormalizedRect | null = null;
       let plateCluster: Cluster | null = null;
       let bestOverlap = 0;

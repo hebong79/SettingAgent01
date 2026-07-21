@@ -26,9 +26,10 @@ function camposA() {
 
 /** 호출 인자를 기록하는 fake RpcCameraSource(inner). CameraposSource 가 위임하는 메서드만 구현. */
 function fakeInner() {
-  const calls: { snapshot: Array<{ cam: number; opt: SnapshotOpts }>; move: any[]; stream: any[] } = {
+  const calls: { snapshot: Array<{ cam: number; opt: SnapshotOpts }>; move: any[]; getPtz: any[]; stream: any[] } = {
     snapshot: [],
     move: [],
+    getPtz: [],
     stream: [],
   };
   const inner = {
@@ -41,6 +42,10 @@ function fakeInner() {
     async move(cam: number, ptz: Ptz): Promise<boolean> {
       calls.move.push({ cam, ptz });
       return true;
+    },
+    async getPtz(cam: number): Promise<Ptz> {
+      calls.getPtz.push({ cam });
+      return { pan: 4, tilt: 5, zoom: 6 };
     },
     streamMjpeg(cam: number, presetIdx: number, signal: AbortSignal, ptz?: Ptz) {
       calls.stream.push({ cam, presetIdx, ptz });
@@ -190,6 +195,15 @@ describe('CameraposSource — device 제어 위임(합성)', () => {
       const ok = await src.move(2, { pan: 10, tilt: 3, zoom: 4 });
       expect(ok).toBe(true);
       expect(inner.calls.move[0]).toEqual({ cam: 2, ptz: { pan: 10, tilt: 3, zoom: 4 } });
+    });
+  });
+
+  it('getPtz → inner.getPtz 위임', async () => {
+    await withTmp(async (file) => {
+      const inner = fakeInner();
+      const src = new CameraposSource(file, inner, fakeRpc({ cameras: [] }));
+      await expect(src.getPtz(2)).resolves.toEqual({ pan: 4, tilt: 5, zoom: 6 });
+      expect(inner.calls.getPtz).toEqual([{ cam: 2 }]);
     });
   });
 

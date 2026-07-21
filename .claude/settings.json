@@ -31,7 +31,42 @@
       "Bash(curl -s -m12 -X POST \"http://localhost:13020/capture/autocorrect\" -H \"content-type: application/json\" -d '{\"cam\":1,\"preset\":2}' -w \" [%{http_code}]\\\\n\")",
       "Bash(curl -s -m6 -X POST \"http://localhost:13020/viewer/api/move\" -H \"content-type: application/json\" -d '{\"cam\":1,\"pan\":57.6,\"tilt\":7.4,\"zoom\":1.9}')",
       "Bash(curl -s -m6 -X POST \"http://localhost:13020/viewer/api/move\" -H \"content-type: application/json\" -d '{\"cam\":1,\"pan\":54.6,\"tilt\":7.4,\"zoom\":1.9}')",
-      "Bash(node -e \"const p=require\\('./package.json'\\);console.log\\(JSON.stringify\\(p.scripts,null,1\\)\\)\")"
+      "Bash(node -e \"const p=require\\('./package.json'\\);console.log\\(JSON.stringify\\(p.scripts,null,1\\)\\)\")",
+      "Bash(echo \"TSC: $?\")",
+      "Bash(kill %1)",
+      "Bash(node -e \"console.log\\(require.resolve\\('fastify'\\)\\)\")",
+      "Bash(node -e \"console.log\\(require.resolve\\('light-my-request'\\)\\)\")",
+      "Bash(curl -s -m 4 http://localhost:13110/cameras)",
+      "Bash(curl -s -m 4 -o /dev/null -w \"%{http_code}\" http://192.168.0.125:9082/)",
+      "Bash(curl -s -m 8 '__TRACKED_VAR__&pan=22' -D - -o base.jpg)",
+      "Bash(curl -s -m 8 \"http://localhost:13020/viewer/api/snapshot?cam=1&preset=1&mode=manual&zoom=1.69341&pan=22&tilt=9.8\" -o tiltp3.jpg)",
+      "Bash(node \"C:/Users/hdw-goback/AppData/Local/Temp/claude/d--Work-Parking3D-AgentVLA-ParkAgent/a858760a-43a9-44f5-b047-dfd3b047b/scratchpad/measure.mjs\")",
+      "Bash(cp C:/Users/hdw-goback/AppData/Local/Temp/claude/d--Work-Parking3D-AgentVLA-ParkAgent/a858760a-43a9-44f5-b047-dfd3b047b/scratchpad/measure.mjs d:/Work/Parking3D/AgentVLA/ParkAgent/SettingAgent/_measure.mjs)",
+      "Bash(node _measure.mjs)",
+      "Bash(curl -s -m8 'http://localhost:13020/viewer/api/snapshot?cam=1&preset=1&mode=manual&zoom=1.69341&tilt=6.8&pan=23' -o C:/Users/hdw-goback/AppData/Local/Temp/claude/d--Work-Parking3D-AgentVLA-ParkAgent/a858760a-43a9-44f5-b047-dfd3b047b/scratchpad/pan1.jpg)",
+      "Bash(curl -s -m8 'http://localhost:13020/viewer/api/snapshot?cam=1&preset=1&mode=manual&zoom=1.69341&tilt=6.8&pan=21' -o C:/Users/hdw-goback/AppData/Local/Temp/claude/d--Work-Parking3D-AgentVLA-ParkAgent/a858760a-43a9-44f5-b047-dfd3b047b/scratchpad/panm1.jpg)",
+      "Bash(curl -s -m8 'http://localhost:13020/viewer/api/snapshot?cam=1&preset=1&mode=manual&zoom=1.69341&pan=22&tilt=7.8' -o C:/Users/hdw-goback/AppData/Local/Temp/claude/d--Work-Parking3D-AgentVLA-ParkAgent/a858760a-43a9-44f5-b047-dfd3b047b/scratchpad/tilt1.jpg)",
+      "Bash(curl -s -m8 'http://localhost:13020/viewer/api/snapshot?cam=1&preset=1&mode=manual&zoom=1.69341&pan=22&tilt=5.8' -o C:/Users/hdw-goback/AppData/Local/Temp/claude/d--Work-Parking3D-AgentVLA-ParkAgent/a858760a-43a9-44f5-b047-dfd3b047b/scratchpad/tiltm1.jpg)",
+      "Bash(node -e \"require\\('sharp'\\); console.log\\('sharp ok', require\\('sharp/package.json'\\).version\\)\")",
+      "Bash(echo \"=== TSC DONE \\(exit $?\\) ===\")",
+      "Bash(curl -s -m5 -o /dev/null -w \"point route: %{http_code}\\\\n\" -X POST http://localhost:13020/calibrate/point -H \"content-type: application/json\" -d '{\"cam\":1,\"preset\":1,\"point\":{\"x\":0.5,\"y\":0.5},\"mode\":\"point\"}')",
+      "Bash(node _verify_aim.mjs)",
+      "Bash(curl -s -m 5 -o /dev/null -w \"cam13110:%{http_code}\\\\n\" http://127.0.0.1:13110/)",
+      "Bash(curl -s -m 8 -o /dev/null -w \"lpd:%{http_code}\\\\n\" http://192.168.0.125:9082/)",
+      "Bash(curl -s -m 30 \"http://127.0.0.1:13020/viewer/api/snapshot?cam=1&preset=1\" -o snap0.jpg -w \"http:%{http_code} bytes:%{size_download}\\\\n\")",
+      "Bash(curl -s -m 30 \"http://127.0.0.1:13020/viewer/api/snapshot?cam=1&preset=1\")",
+      "Bash(curl -s -m 40 \"http://127.0.0.1:13020/viewer/api/snapshot?cam=1&preset=1&mode=preset\" -o snap0.jpg -w \"http:%{http_code} bytes:%{size_download}\\\\n\")",
+      "Bash(curl -s -m 10 -X POST http://127.0.0.1:13020/calibrate/point -H \"content-type: application/json\" -d '{\"cam\":1,\"preset\":1,\"point\":{\"x\":0.5,\"y\":0.6},\"mode\":\"point\"}' -w \"\\\\nhttp:%{http_code}\\\\n\")",
+      "Bash(time curl -s -m 180 -X POST http://127.0.0.1:13020/calibrate/point -H \"content-type: application/json\" -d '{\"cam\":1,\"preset\":1,\"point\":{\"x\":0.545,\"y\":0.60},\"mode\":\"plate-zoom\"}' -w \"\\\\nhttp:%{http_code}\\\\n\")",
+      "Bash(curl -s -m 30 \"http://127.0.0.1:13020/calibrate/frame\" -o frame_zoom.jpg -w \"http:%{http_code} bytes:%{size_download}\\\\n\")",
+      "Bash(time curl -s -m 180 -X POST http://127.0.0.1:13020/calibrate/point -H \"content-type: application/json\" -d '{\"cam\":1,\"preset\":1,\"point\":{\"x\":0.10,\"y\":0.62},\"mode\":\"plate\"}' -w \"\\\\nhttp:%{http_code}\\\\n\")",
+      "Bash(curl -s -m 30 \"http://127.0.0.1:13020/calibrate/frame\" -o frame_plate.jpg -w \"http:%{http_code} bytes:%{size_download}\\\\n\")",
+      "Bash(curl -s -m 40 \"http://127.0.0.1:13020/viewer/api/snapshot?cam=1&preset=1&mode=manual&pan=24.565325216166368&tilt=9.890687792751235&zoom=12.454915916313587\" -o verify_zoom.jpg -w \"http:%{http_code} bytes:%{size_download}\\\\n\")",
+      "Bash(git reset *)",
+      "Bash(git merge --no-ff fix/revert-point-aim -m 'merge: 클릭 개별 센터라이징\\(번호판 기준\\) 확정 — 클릭지점 조준 폐기 *)"
+    ],
+    "additionalDirectories": [
+      "C:\\Users\\hdw-goback\\AppData\\Local\\Temp\\claude\\d--Work-Parking3D-AgentVLA-ParkAgent\\a858760a-43a9-44f5-b047-dfd3b047b\\scratchpad"
     ]
   }
 }

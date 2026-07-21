@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, statSy
 import { join } from 'node:path';
 import type { SetupArtifact } from '../domain/types.js';
 import { logger } from '../util/logger.js';
+import { stringify5 } from '../util/round.js';
 
 /**
  * 정밀수집 결과 스냅샷(save/ 폴더)의 파일 IO 담당(Repository 미러).
@@ -34,7 +35,29 @@ export class SaveStore {
   save(name: string, artifact: SetupArtifact): string {
     const safe = this.sanitizeName(name);
     if (!safe) throw new Error(`invalid save name: ${name}`);
-    const json = JSON.stringify(artifact, null, 2);
+    const json = stringify5(artifact, 2);
+    mkdirSync(this.saveDir, { recursive: true });
+    writeFileSync(join(this.saveDir, `${safe}.json`), json, 'utf-8'); // 정본(권위) — 실패 시 throw.
+    if (this.reportsDir) {
+      try { // 보조 미러 — 실패는 격리(정본 save/ 는 이미 성공).
+        mkdirSync(this.reportsDir, { recursive: true });
+        writeFileSync(join(this.reportsDir, `${safe}.json`), json, 'utf-8');
+      } catch (err) {
+        logger.warn({ err, name: safe }, 'reports 미러 저장 실패(정본 save/ 는 정상)');
+      }
+    }
+    return safe;
+  }
+
+  /**
+   * 임의 스냅샷(SetupArtifact 아님)을 `save/{name}.json` 으로 저장. `save()` 미러이되 타입 제약 없음.
+   * 센터라이징 최종 셋업 스냅샷(기하+PTZ 병합 뷰)처럼 SetupArtifact 형이 아닌 payload 용. stringify5 직렬화.
+   * 안전화 실패 시 throw. reportsDir 주입 시 best-effort 미러(실패 격리·로그).
+   */
+  saveSnapshot(name: string, data: unknown): string {
+    const safe = this.sanitizeName(name);
+    if (!safe) throw new Error(`invalid save name: ${name}`);
+    const json = stringify5(data, 2);
     mkdirSync(this.saveDir, { recursive: true });
     writeFileSync(join(this.saveDir, `${safe}.json`), json, 'utf-8'); // 정본(권위) — 실패 시 throw.
     if (this.reportsDir) {
@@ -75,4 +98,10 @@ export class SaveStore {
 export function defaultSaveName(date: Date = new Date()): string {
   const p = (n: number): string => String(n).padStart(2, '0');
   return `result_${date.getFullYear()}${p(date.getMonth() + 1)}${p(date.getDate())}_${p(date.getHours())}${p(date.getMinutes())}${p(date.getSeconds())}`;
+}
+
+/** 센터라이징 최종 셋업 스냅샷 기본 이름: `Setup_YYYYMMDD_HHMMSS`(로컬 시각, defaultSaveName 미러). */
+export function setupSaveName(date: Date = new Date()): string {
+  const p = (n: number): string => String(n).padStart(2, '0');
+  return `Setup_${date.getFullYear()}${p(date.getMonth() + 1)}${p(date.getDate())}_${p(date.getHours())}${p(date.getMinutes())}${p(date.getSeconds())}`;
 }

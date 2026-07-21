@@ -1,6 +1,6 @@
 import type { CapturedImage } from '../domain/types.js';
 import type { ToolsConfig } from '../config/toolsConfig.js';
-import type { CameraList } from '../viewer/CameraSource.js';
+import type { CameraList, Ptz } from '../viewer/CameraSource.js';
 import { fetchWithTimeout } from '../util/http.js';
 import { splitJpegFrames } from './mjpeg.js';
 
@@ -31,6 +31,8 @@ export interface ICameraClient {
     signal: AbortSignal,
     ptz?: { pan: number; tilt: number; zoom: number },
   ): AsyncGenerator<Buffer>;
+  /** 읽기 전용 현재 PTZ 조회. 구현체가 장비 상태를 반환하지 못하면 예외를 전파한다. */
+  getPtz(camIdx: number): Promise<Ptz>;
   listCameras(): Promise<CameraList>;
   move(camIdx: number, pan: number, tilt: number, zoom: number): Promise<boolean>;
 }
@@ -119,6 +121,24 @@ export class CameraClient implements ICameraClient {
       for (const f of frames) yield f;
       buf = rest;
     }
+  }
+
+  /** GET /ptz?cam_idx=N → Unity REST 시뮬레이터의 현재 PTZ. 카메라 이동·캡처는 수행하지 않는다. */
+  async getPtz(camIdx: number): Promise<Ptz> {
+    const res = await fetchWithTimeout(
+      `${this.baseUrl}/ptz?cam_idx=${encodeURIComponent(String(camIdx))}`,
+      { method: 'GET' },
+      this.cfg.moveTimeoutMs,
+    );
+    const body = await parseOrThrow(res);
+    const raw = body.ptz ?? body;
+    const pan = Number(raw.pan);
+    const tilt = Number(raw.tilt);
+    const zoom = Number(raw.zoom);
+    if (!Number.isFinite(pan) || !Number.isFinite(tilt) || !Number.isFinite(zoom)) {
+      throw new CameraApiError('INVALID_PTZ_STATE', '시뮬레이터 PTZ 응답이 완전하지 않습니다', 502);
+    }
+    return { pan, tilt, zoom: this.clampZoom(zoom) };
   }
 
   /** GET /cameras → 카메라/프리셋(+PTZ) 목록(A타입). enabled=false 포함, presets 중첩 보존. */

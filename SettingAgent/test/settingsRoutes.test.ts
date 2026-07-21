@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, beforeEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
@@ -42,6 +42,11 @@ function seedTools() {
   return {
     _comment: 'tools 주석',
     camera: { baseUrl: 'http://localhost:13100' },
+    cameraRuntime: { executionMode: 'typescript-native', selectedCameraId: 'simulator-1' },
+    cameraSources: [
+      { id: 'simulator-1', label: '시뮬레이터 1', kind: 'sim', protocol: 'unity-rpc', baseUrl: 'http://localhost:13110', username: '', password: '', rtspUrl: '' },
+      { id: 'real-camera-1', label: '리얼 카메라 1', kind: 'hucoms', protocol: 'hucoms-v1.22', baseUrl: 'http://10.0.0.20', username: 'admin', password: 'camera-secret', rtspUrl: 'rtsp://10.0.0.20/stream1', ptz: { panRange: [0, 35999] } },
+    ],
     vpd: { endpoint: 'http://v:1', detPath: '/vpd', apiKeyEnv: 'VPD_API_KEY', timeoutMs: 8000, maxRetries: 3 },
     lpd: { endpoint: 'http://l:1', detPath: '/lpd', apiKeyEnv: 'LPD_API_KEY', timeoutMs: 8000, maxRetries: 3 },
   };
@@ -80,6 +85,14 @@ describe('GET /settings', () => {
       llm: { provider: 'openai-compatible', model: 'M', baseUrl: 'http://a:1/v1', apiKeyEnv: 'LLM_API_KEY' },
       vpd: { endpoint: 'http://v:1', detPath: '/vpd', apiKeyEnv: 'VPD_API_KEY' },
       lpd: { endpoint: 'http://l:1', detPath: '/lpd', apiKeyEnv: 'LPD_API_KEY' },
+      camera: {
+        executionMode: 'typescript-native',
+        selectedCameraId: 'simulator-1',
+        sources: [
+          { id: 'simulator-1', label: '시뮬레이터 1', kind: 'sim', protocol: 'unity-rpc', baseUrl: 'http://localhost:13110', username: '', rtspUrl: '', passwordSet: false },
+          { id: 'real-camera-1', label: '리얼 카메라 1', kind: 'hucoms', protocol: 'hucoms-v1.22', baseUrl: 'http://10.0.0.20', username: 'admin', rtspUrl: 'rtsp://10.0.0.20/stream1', passwordSet: true },
+        ],
+      },
     });
   });
 
@@ -123,6 +136,33 @@ describe('PUT /settings', () => {
     const body = JSON.parse(r.body);
     expect(body.error).toBe('invalid body');
     expect(body.detail).toBeDefined();
+  });
+
+  it('카메라 선택·연결정보 저장 → 비밀번호 GET 미노출 + 기존 ptz 보존', async () => {
+    app = makeServer();
+    const r = await app.inject({
+      method: 'PUT', url: '/settings',
+      payload: {
+        camera: {
+          executionMode: 'typescript-native',
+          selectedCameraId: 'real-camera-1',
+          source: {
+            id: 'real-camera-1', label: '입구 Hucoms', kind: 'hucoms', protocol: 'hucoms-v1.22',
+            baseUrl: 'http://10.0.0.21:80', username: 'operator', password: 'new-secret',
+            rtspUrl: 'rtsp://10.0.0.21:554/stream1',
+          },
+        },
+      },
+    });
+    expect(r.statusCode).toBe(200);
+    const raw = JSON.parse(readFileSync(paths.toolsPath, 'utf-8'));
+    expect(raw.cameraRuntime.selectedCameraId).toBe('real-camera-1');
+    expect(raw.cameraSources[1].password).toBe('new-secret');
+    expect(raw.cameraSources[1].ptz).toEqual({ panRange: [0, 35999] });
+
+    const get = await app.inject({ method: 'GET', url: '/settings' });
+    expect(get.body).not.toContain('new-secret');
+    expect(JSON.parse(get.body).camera.sources[1].passwordSet).toBe(true);
   });
 
   it('허용 밖 섹션(lpr) → 400 (strict)', async () => {

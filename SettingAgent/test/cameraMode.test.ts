@@ -146,17 +146,18 @@ describe('buildSourceRegistry — cameraMode 분기', () => {
   it('real + realCamera 있음 → RealPtzSource(id=realCamera.id)', () => {
     const cfg = base();
     cfg.cameraMode = 'real';
-    cfg.realCamera = { id: 'real', kind: 'hucoms', host: '192.168.0.153', port: 80 };
+    cfg.realCamera = { id: 'real', kind: 'hucoms', host: '192.168.0.153', port: 80, rtspUrl: 'rtsp://192.168.0.153/stream1' };
     const reg = buildSourceRegistry(cfg);
     expect([...reg.keys()]).toEqual(['real']);
     expect(reg.get('real')).toBeInstanceOf(RealPtzSource);
     expect(reg.get('real')!.kind).toBe('hucoms');
+    expect(reg.get('real')!.streamTransport).toBe('rtsp-ffmpeg');
   });
 
   it('real + realCamera.id 커스텀 → 해당 id 를 키로 사용', () => {
     const cfg = base();
     cfg.cameraMode = 'real';
-    cfg.realCamera = { id: 'ptz-front', kind: 'hucoms', host: '10.0.0.9' };
+    cfg.realCamera = { id: 'ptz-front', kind: 'hucoms', host: '10.0.0.9', rtspUrl: 'rtsp://10.0.0.9/stream1' };
     const reg = buildSourceRegistry(cfg);
     expect([...reg.keys()]).toEqual(['ptz-front']);
     expect(reg.get('ptz-front')).toBeInstanceOf(RealPtzSource);
@@ -175,7 +176,7 @@ describe('buildSourceRegistry — cameraMode 분기', () => {
     cfg.realCamera = undefined; // real 분기라면 throw 였을 것
     cfg.cameraSources = [
       { id: 'unity', kind: 'sim', baseUrl: 'http://localhost:13100' },
-      { id: 'ptz1', kind: 'hucoms', host: '192.168.0.153', port: 80 },
+      { id: 'ptz1', kind: 'hucoms', host: '192.168.0.153', port: 80, rtspUrl: 'rtsp://192.168.0.153/stream1' },
     ];
     const reg = buildSourceRegistry(cfg);
     // real 로 새지 않고 다중 경로가 이겨야 한다.

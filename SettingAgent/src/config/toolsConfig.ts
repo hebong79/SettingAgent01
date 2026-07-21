@@ -18,6 +18,8 @@ const CameraSchema = z.object({
 export const VpdSchema = z.object({
   endpoint: z.string().url(),
   detPath: z.string().startsWith('/'),
+  /** 세그멘테이션(마스크) 경로. 미설정이면 seg 기능 비활성(GET /capture/vehicle-cuboids → 404). */
+  segPath: z.string().startsWith('/').optional(),
   apiKeyEnv: z.string().optional(),
   timeoutMs: z.number().int().positive(),
   maxRetries: z.number().int().nonnegative(),
@@ -84,6 +86,12 @@ const CaptureSchema = z.object({
   /** 집계용 최소 신뢰도(setup 과 독립값 허용). */
   minConfidence: z.number().min(0).max(1),
   /**
+   * finalize 공간배정 거리 게이트(정규화). 대표점↔주차면 centroid 거리가 이 값 미만이면
+   * 폴리곤 밖이라도 후보쌍 형성(인접 슬롯 회수). 관측형 튜닝값(설계서 §4).
+   * 라이브 검증: 최대매칭+상호배타가 과배정을 억제하므로 원근 오프셋 큰 프리셋의 정당 슬롯(실측 0.172)까지 포함하도록 0.18.
+   */
+  slotAssignGate: z.number().min(0).max(1).default(0.18),
+  /**
    * 캡처 전 카메라를 프리셋 PTZ 로 실제 이동(/req_move)할지.
    * true 면 시뮬/실 카메라의 활성 화면이 프리셋마다 물리적으로 이동(미리보기와 동일하게 보임).
    * false 면 /req_img 스냅샷만(활성 화면 정지). 기본 true.
@@ -92,12 +100,18 @@ const CaptureSchema = z.object({
 });
 
 /**
- * 주차면별 번호판 중심정렬·줌 PTZ 캘리브레이션(/calibrate/*) 설정(설계서 §3.4).
- * 결정형 적응형 비례제어 + (옵셔널) LLM 자문. 실 단위는 후속(시뮬 도(°) 한정).
+ * 주차면별 번호판 중심정렬·줌 센터라이징(/calibrate/*) 설정(설계서 §3.4).
+ * 결정형 적응형 비례제어(PlatePtz 위임). 실 단위는 후속(시뮬 도(°) 한정).
  */
 const CalibrateSchema = z.object({
   /** 목표 번호판 가로폭(정규화). */
   targetPlateWidth: z.number().min(0).max(1),
+  /**
+   * 1단계 pan/tilt 센터링을 수행할 **넓은 시야 zoom**(기본 1.0=최대광각). 마스터 요구 순서 보장:
+   * 넓은 시야에서 번호판을 화면중앙에 완전 정렬한 뒤 2단계에서 이 zoom 부터 targetPlateWidth 까지 점진 확대.
+   * 너무 넓어 LPD 미검이면 상향(프리셋 zoom 근처). 미지정 시 코드 기본 1.0(PtzCalibrator).
+   */
+  centerZoom: z.number().min(1).max(36).optional(),
   /** 중심 수렴 허용오차(정규화). */
   centerTol: z.number().min(0).max(1),
   /** 폭 수렴 허용오차(정규화). */
@@ -108,15 +122,32 @@ const CalibrateSchema = z.object({
   probeStepDeg: z.number().positive(),
   /** 1스텝 최대 보정(도, 진동 방지). */
   maxStepDeg: z.number().positive(),
-  /** probe 실패 시 기본 게인(°/정규화). */
+  /**
+   * 2단계 zoom 1스텝 최대 증배([z/r, z·r]). 작을수록 스텝당 중심 드리프트↓ → 줌 중 재중심(pan/tilt) 빈도↓
+   * = "줌 우세"(마스터 순서 요구) + plate_lost↓. 단 목표폭 도달에 반복 더 필요. 미지정 시 PlatePtz 기본 1.5.
+   */
+  maxZoomStepRatio: z.number().min(1).max(3).optional(),
+  /**
+   * **zoomRef=1 기준** fallback 게인(°/정규화). PlatePtz 가 시작 zoom 으로 스케일해 사용.
+   * cam1 시뮬 실측(−36.6/−21.0 @z1.69341) 유래 — 카메라별(FOV·마운트) 상이 가능하므로
+   * 새 장비에서는 diagSweep 로 재실측할 것. 부호가 반대면 P 제어가 역방향 발산한다.
+   */
   fallbackGainPanDeg: z.number(),
   fallbackGainTiltDeg: z.number(),
   /** move 후 정착 대기(ms). */
   settleMs: z.number().int().nonnegative(),
+  /**
+   * (방안2) acquire 시작줌이 겨눌 판폭(정규화). "먼저 확대해 찾기"의 확대 정도 — 작은 lpd(실측 0.027)를
+   * 이 폭까지 줌인해 큰 판을 검출·센터한 뒤 targetPlateWidth 로 마감. 미지정 시 코드 기본 0.12(점진).
+   * targetPlateWidth(0.2)로 두면 full-jump(중간 zoom 없이 목표까지 바로 확대).
+   */
+  acquirePlateWidth: z.number().min(0).max(1).optional(),
+  /** (방안3) acquire 미검 시 줌아웃 사다리 1스텝 배율(rungZoom/=step). 미지정 시 코드 기본 1.5. */
+  acquireLadderStep: z.number().min(1).max(3).optional(),
+  /** (방안3) 줌아웃 사다리 최대 rung 수. 0 이면 사다리 없음(acquire 1발만). 미지정 시 코드 기본 5. */
+  acquireLadderMaxSteps: z.number().int().nonnegative().optional(),
   /** 산출물 경로. */
   outFile: z.string().min(1),
-  /** LLM 자문 사용 여부(false 면 순수 결정형, 설계서 §0-C). */
-  llmAdvise: z.boolean(),
 });
 
 /**
@@ -145,17 +176,30 @@ const ViewerSchema = z.object({
   controlToken: z.string(),
 });
 
+/** TypeScript 네이티브 카메라 클라이언트 실행 모드. */
+export const CameraExecutionModeSchema = z.enum(['typescript-native']);
+
 /**
  * 카메라 소스 설정(다중 소스). 미설정 시 camera(단일 sim)로 폴백(하위호환).
- * 자격증명은 여기 두지 않는다(UI 입력 → 통과).
+ * password는 독립형 폐쇄망 배포를 위해 선택적으로 저장할 수 있지만 GET /settings에는 절대 노출하지 않는다.
  */
-const CameraSourceConfigSchema = z.object({
+export const CameraSourceConfigSchema = z.object({
   id: z.string().min(1),
+  label: z.string().min(1).optional(),
   kind: z.enum(['sim', 'hucoms']),
-  baseUrl: z.string().url().optional(), // sim
-  host: z.string().optional(), // hucoms
+  /** 소스 프로토콜. 기존 설정(undefined)은 kind별 레거시 동작을 유지한다. */
+  protocol: z.enum(['unity-rpc', 'unity-rest', 'hucoms-v1.22']).optional(),
+  /** 시뮬레이터/실카메라 HTTP 제어 URL. Hucoms는 host/port보다 우선한다. */
+  baseUrl: z.string().url().optional(),
+  host: z.string().optional(), // hucoms 레거시
   port: z.number().int().positive().optional(),
+  username: z.string().optional(),
+  password: z.string().optional(),
+  /** 영상 소비자가 직접 사용할 스트림 주소. Hucoms HTTP 제어에는 사용하지 않는다. */
+  rtspUrl: z.string().url().or(z.literal('')).optional(),
+  /** @deprecated Hucoms V1.22는 별도 login CGI가 없으며 id/passwd query 인증을 사용한다. */
   loginPath: z.string().optional(),
+  /** @deprecated 네이티브 클라이언트는 /cgi-bin/image/jpeg.cgi를 사용한다. */
   snapshotUrl: z.string().optional(),
   ptz: z
     .object({
@@ -166,6 +210,22 @@ const CameraSourceConfigSchema = z.object({
     .optional(),
 });
 export type CameraSourceConfig = z.infer<typeof CameraSourceConfigSchema>;
+
+export const CameraRuntimeSchema = z.object({
+  executionMode: CameraExecutionModeSchema.default('typescript-native'),
+  /** 옵션창과 런타임이 공통으로 사용하는 활성 카메라 source id. */
+  selectedCameraId: z.string().min(1),
+});
+
+/** 실카메라 RTSP를 Viewer용 JPEG 프레임으로 변환하는 로컬 FFmpeg 설정. */
+export const CameraStreamingSchema = z.object({
+  ffmpegPath: z.string().min(1).default('ffmpeg'),
+  rtspTransport: z.enum(['tcp', 'udp']).default('tcp'),
+  fps: z.number().int().min(1).max(30).default(5),
+  /** FFmpeg MJPEG q:v. 낮을수록 고화질. */
+  jpegQuality: z.number().int().min(2).max(31).default(5),
+  startupTimeoutMs: z.number().int().positive().default(10_000),
+});
 
 const StoreSchema = z.object({
   dataDir: z.string().min(1),
@@ -243,6 +303,10 @@ export const ToolsConfigSchema = z.object({
   unityRpc: UnityRpcSchema,
   /** 다중 카메라 소스(옵셔널). 미설정 시 단일 sim 폴백. */
   cameraSources: z.array(CameraSourceConfigSchema).optional(),
+  /** TypeScript 네이티브 실행 및 활성 카메라 선택. 미설정 시 기존 cameraMode 동작을 유지한다. */
+  cameraRuntime: CameraRuntimeSchema.optional(),
+  /** RTSP → JPEG 변환 기본값. */
+  cameraStreaming: CameraStreamingSchema,
   /**
    * 뷰어 카메라 소스 선택. cameraSources(다중/고급) 미설정 시 이 값으로 단일 소스를 구성.
    * precedence: cameraSources(명시·길이>0) > cameraMode.
@@ -256,7 +320,7 @@ export type ToolsConfig = z.infer<typeof ToolsConfigSchema>;
 
 export const DEFAULT_TOOLS_CONFIG: ToolsConfig = {
   camera: { baseUrl: 'http://localhost:13100', imageTimeoutMs: 7000, moveTimeoutMs: 3000, zoomMin: 1.0, zoomMax: 36.0 },
-  vpd: { endpoint: 'http://127.0.0.1:9081', detPath: '/vpd/api/v2/det/imgupload', apiKeyEnv: 'VPD_API_KEY', timeoutMs: 8000, maxRetries: 3 },
+  vpd: { endpoint: 'http://127.0.0.1:9081', detPath: '/vpd/api/v2/det/imgupload', segPath: '/vpd/api/v2/seg/imgupload', apiKeyEnv: 'VPD_API_KEY', timeoutMs: 8000, maxRetries: 3 },
   lpd: { endpoint: 'http://127.0.0.1:9082', detPath: '/lpd/api/v1/imgupload', apiKeyEnv: 'LPD_API_KEY', timeoutMs: 8000, maxRetries: 3 },
   setup: {
     presetSettleMs: 1000, betweenPresetMs: 500, minConfidence: 0.5, roiPadding: 0.05, yBandTolerance: 0.1,
@@ -267,13 +331,13 @@ export const DEFAULT_TOOLS_CONFIG: ToolsConfig = {
   presetProvider: { type: 'camerapos', unityUrl: '', refreshOnRun: false },
   capture: {
     defaultCount: 50, intervalMs: 30000, moveIntervalMs: 1000, checkpointEvery: 10,
-    checkpointTriggerMode: 'rounds', checkpointIntervalMs: 60000, dbFile: 'data/observations.sqlite',
-    clusterDist: 0.06, clusterMinSupport: 3, minConfidence: 0.5, moveBeforeCapture: true,
+    checkpointTriggerMode: 'rounds', checkpointIntervalMs: 60000, dbFile: 'data/setting.sqlite',
+    clusterDist: 0.06, clusterMinSupport: 3, minConfidence: 0.5, slotAssignGate: 0.18, moveBeforeCapture: true,
   },
   calibrate: {
     targetPlateWidth: 0.2, centerTol: 0.03, widthTol: 0.02, maxIterations: 15,
-    probeStepDeg: 1.0, maxStepDeg: 5.0, fallbackGainPanDeg: 20, fallbackGainTiltDeg: 15,
-    settleMs: 300, outFile: 'data/slot_ptz.json', llmAdvise: true,
+    probeStepDeg: 1.0, maxStepDeg: 5.0, fallbackGainPanDeg: -62, fallbackGainTiltDeg: -35.5,
+    settleMs: 300, outFile: 'data/slot_ptz.json',
   },
   ground: { enabled: true, minDepthEdgePx: 250, slotWidthM: 2.5, slotDepthM: 5.0 },
   server: { port: 13020, apiKeyEnv: 'SETTING_API_KEY' },
@@ -282,6 +346,7 @@ export const DEFAULT_TOOLS_CONFIG: ToolsConfig = {
   unityRpc: { baseUrl: 'http://localhost:13110', timeoutMs: 10000 },
   // cameraSources 는 기본값 미설정(undefined → sourceRegistry 가 단일 sim 으로 폴백).
   cameraMode: 'simulator',
+  cameraStreaming: { ffmpegPath: 'ffmpeg', rtspTransport: 'tcp', fps: 5, jpegQuality: 5, startupTimeoutMs: 10_000 },
   // realCamera 는 기본값 미설정(cameraMode='real' 전환 시 사용자가 추가).
 };
 
@@ -299,8 +364,9 @@ export function loadToolsConfig(path = 'config/tools.config.json'): ToolsConfig 
         merged[key] = raw[key] ?? def;
       }
     }
-    // cameraSources·realCamera 는 옵셔널(DEFAULT 에 없어 위 순회에서 누락) → 있으면 그대로 통과.
+    // cameraSources·cameraRuntime·realCamera 는 옵셔널(DEFAULT 에 없어 위 순회에서 누락) → 있으면 그대로 통과.
     if (raw.cameraSources !== undefined) merged.cameraSources = raw.cameraSources;
+    if (raw.cameraRuntime !== undefined) merged.cameraRuntime = raw.cameraRuntime;
     if (raw.realCamera !== undefined) merged.realCamera = raw.realCamera;
     return ToolsConfigSchema.parse(merged);
   }
