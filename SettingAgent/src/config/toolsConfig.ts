@@ -146,6 +146,37 @@ const CalibrateSchema = z.object({
   acquireLadderStep: z.number().min(1).max(3).optional(),
   /** (방안3) 줌아웃 사다리 최대 rung 수. 0 이면 사다리 없음(acquire 1발만). 미지정 시 코드 기본 5. */
   acquireLadderMaxSteps: z.number().int().nonnegative().optional(),
+  /**
+   * (개별 클릭 전용) 최초 대상 선정 반경 게이트(정규화). 클릭점에서 이 거리를 넘는 판만 있으면
+   * **다른 판을 대신 채택하지 않고** no_plate_near_click 으로 실패한다(거짓 성공 제거).
+   * 미지정 시 코드 기본 0.10 — 클릭정밀도(±0.02)+차체↔판 오프셋(≤0.08) worst 합 이상이면서
+   * 이웃 판 최소 간격 0.11 미만인 구간. ★0.11 이상으로 올리면 이웃 오채택이 되살아나 게이트가 무의미해진다.
+   * 라이브에서 오탐(no_plate_near_click)이 잦으면 0.13 까지 상향하되 그 대가를 감수하는 것임을 알 것.
+   * ★ 배치(calibrateSlot) 경로에는 적용되지 않는다(그쪽은 peerOffsets 소유권 게이트가 담당).
+   */
+  pointMatchRadiusNorm: z.number().min(0).max(1).optional(),
+  /**
+   * (개별 클릭 전용) center+zoom 줌 사다리 사용 여부. 미지정 시 'auto'.
+   * - 'auto'   = 소스가 네이티브 센터링(centerOnPoint)을 지원할 때만 사다리(실카). 시뮬은 기존 경로 100%(회귀 0).
+   * - 'always' = 네이티브 없는 소스(시뮬)에서도 사다리(재중심은 기하 게인 1샷 폴백). 통합 실험용.
+   * - 'off'    = 사다리 완전 비활성(실카도 기존 경로) — 배포 없이 롤백하는 안전핀.
+   */
+  pointZoomLadder: z.enum(['auto', 'always', 'off']).optional(),
+  /**
+   * (개별 클릭 전용) 줌 사다리 rung 상한. **미지정 권장** — 미지정 시 시작 zoom·maxZoomStepRatio·zoom 상한에서
+   * 자동 산출해 비율이 무엇이든(현 설정 1.3) clampZoom 상한 도달을 보장한다. 지정하면 그 값이 우선이며,
+   * 상한에 못 미치는 값을 넣으면 사다리가 중도 포기하고 "최대 줌에서 못 찾음"으로 오보한다.
+   */
+  ladderMaxRungs: z.number().int().nonnegative().optional(),
+  /** (개별 클릭 전용) 네이티브 setcenter 후 정착 대기(ms). 미지정 시 코드 기본 1000(★라이브 미측정 튜닝값). */
+  nativeAimSettleMs: z.number().int().nonnegative().optional(),
+  /**
+   * (개별 클릭 전용) 사다리의 **latch 이전** 눈먼 줌인 배율. 미지정 시 코드 기본 2.0.
+   * latch 전에는 추적 대상이 아직 없어 maxZoomStepRatio(1.3)의 "대상을 날린다" 근거가 성립하지 않는다 →
+   * 성기게 올려 칸수(=rung 당 정착 대기)를 줄인다. latch 후 구간은 maxZoomStepRatio 가 그대로 지배한다.
+   * 근거 전문은 platePtz.ts 의 LADDER_PRELATCH_RATIO 주석.
+   */
+  preLatchZoomStepRatio: z.number().min(1).max(4).optional(),
   /** 산출물 경로. */
   outFile: z.string().min(1),
 });
@@ -201,11 +232,17 @@ export const CameraSourceConfigSchema = z.object({
   loginPath: z.string().optional(),
   /** @deprecated 네이티브 클라이언트는 /cgi-bin/image/jpeg.cgi를 사용한다. */
   snapshotUrl: z.string().optional(),
+  /**
+   * 장비 raw PTZ 범위(미지정 축은 RealPtzSource 의 HUCOMS_DEFAULT_* 기본값).
+   * ★ 축별 optional — 한 축만 정정하려고 나머지 두 축까지 적어야 하면 기본값이 config 에 복제되어
+   *   기본값 변경이 반영되지 않는 사본이 남는다. RealPtzSource:132~134 이 이미 축별 `?? 기본값` 이라
+   *   코드가 요구하지 않는 것을 스키마만 요구하고 있었다(실카 zoomRange 단독 지정이 기동 실패를 냈다).
+   */
   ptz: z
     .object({
-      panRange: z.tuple([z.number(), z.number()]),
-      tiltRange: z.tuple([z.number(), z.number()]),
-      zoomRange: z.tuple([z.number(), z.number()]),
+      panRange: z.tuple([z.number(), z.number()]).optional(),
+      tiltRange: z.tuple([z.number(), z.number()]).optional(),
+      zoomRange: z.tuple([z.number(), z.number()]).optional(),
     })
     .optional(),
 });

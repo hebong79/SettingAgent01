@@ -13,6 +13,18 @@ export class CameraApiError extends Error {
 }
 
 /**
+ * 네이티브 센터링 결과 = 이동 후 PTZ + **정착 확인 여부**.
+ * `settled:false` 는 "명령은 나갔으나 장비가 멈춘 것을 확인하지 못했다"(타임아웃)는 뜻이며,
+ * 이 상태의 PTZ 를 다음 명령의 기준으로 쓰면 **슬루 중간 지점으로 카메라를 되돌려 센터링을 부분 취소한다**
+ * (실카 라이브 실패의 원인). 호출측은 조용히 진행하면 안 된다.
+ * `undefined` = 소스가 정착 판정을 제공하지 않음(구 동작 — 호출측이 자체 대기).
+ * Ptz 를 확장하므로 기존에 `Ptz` 를 반환하던 구현·호출부는 그대로 호환된다.
+ */
+export interface NativeCenterResult extends Ptz {
+  settled?: boolean;
+}
+
+/**
  * 카메라 클라이언트 공개면(설계서 §2.1).
  * private 멤버를 가진 CameraClient 는 명목적 타입이라 RpcCameraClient 로 대체 불가 →
  * 소비처는 이 인터페이스에 의존해 REST/RPC 구현을 교체한다.
@@ -39,7 +51,7 @@ export interface ICameraClient {
    * (선택) 장비 네이티브 지점 센터링 — 정규화 지점(0~1)을 화면 중앙으로. pan/tilt 만, zoom 불변.
    * 지원 구현만 노출한다(미정의 = 미지원 → 호출측이 기하 폴백). 반환은 이동 후 PTZ.
    */
-  centerOnPoint?(camIdx: number, point: { x: number; y: number }): Promise<Ptz>;
+  centerOnPoint?(camIdx: number, point: { x: number; y: number }): Promise<NativeCenterResult>;
 }
 
 /**

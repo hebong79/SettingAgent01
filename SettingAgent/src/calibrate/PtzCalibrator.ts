@@ -10,6 +10,7 @@ import { resolvePresetPtz } from '../capture/detectPipeline.js';
 import { expandPlateTargetsFromSlotSetup, writeSlotPtz } from './slotPtzWriter.js';
 import { buildSlotPtzJson, aimPtzForPoint, zoomForWidth } from './controlMath.js';
 import { setupSaveName, type SaveStore } from '../store/SaveStore.js';
+import { buildSetupResult, SETUP_RESULT_NAME } from '../store/setupResult.js';
 import { PlatePtz, type PlatePtzOpts, type PlatePtzResult } from './platePtz.js';
 import type { PlateTarget, Ptz, SlotPtzItem, CalibrateState, CalibrateStatus } from './types.js';
 
@@ -55,8 +56,19 @@ const WIDTH_RECOVERY_MAX = 2;
 /** lpdWidth 퇴화 판정 임계(0/음수 가드 — acquire 스킵=프리셋시야). */
 const LPD_WIDTH_EPS = 1e-4;
 
-/** PlatePtz 중 이 잡이 쓰는 표면(테스트 시임 경계). */
-type PlatePtzApi = Pick<PlatePtz, 'centerOnPlate' | 'zoomToPlateWidth'>;
+/**
+ * (개별 클릭 전용) 최초 대상 선정 반경 게이트 기본값(cfg 미설정 시). 근거는 CalibrateSchema.pointMatchRadiusNorm 주석.
+ * 요약: 클릭정밀도 0.02 + 차체↔판 오프셋 0.08 = worst 0.10 이상, 이웃 판 최소 간격 0.11 미만.
+ */
+const POINT_MATCH_RADIUS_DEFAULT = 0.1;
+
+/**
+ * PlatePtz 중 이 잡이 쓰는 표면(테스트 시임 경계).
+ * ★ centerAndZoomByLadder 는 **Partial** — 기존 makePlatePtz 스텁(2메서드만 구현)을 쓰는 테스트를
+ *   타입 에러로 죽이지 않기 위해서다. 호출측은 존재 확인 후 없으면 기존 경로로 폴백한다.
+ */
+type PlatePtzApi = Pick<PlatePtz, 'centerOnPlate' | 'zoomToPlateWidth'> &
+  Partial<Pick<PlatePtz, 'centerAndZoomByLadder'>>;
 
 export interface PtzCalibratorDeps {
   camera: ICameraClient;
@@ -72,8 +84,8 @@ export interface PtzCalibratorDeps {
   /** slot_ptz.json writer 주입(테스트는 캡처 stub). 기본=writeSlotPtz. */
   writer?: (artifact: ReturnType<typeof buildSlotPtzJson>, outFile: string) => void;
   /**
-   * 최종 셋업 스냅샷(save/Setup_*.json) writer(옵셔널·가산). 미주입 시 스냅샷 no-op(수동 흐름/테스트 회귀 0).
-   * 잡 done 경로에서 기하+PTZ 병합 뷰를 1회 기록한다.
+   * 최종 결과물 writer(옵셔널·가산). 미주입 시 기록 no-op(수동 흐름/테스트 회귀 0).
+   * 잡 done 경로에서 동일 내용을 이력본(save/Setup_*.json)과 고정본(save/setup_result.json)으로 각 1회 기록한다.
    */
   saveStore?: Pick<SaveStore, 'saveSnapshot'>;
   sleep?: (ms: number) => Promise<void>;
@@ -140,6 +152,19 @@ export class PtzCalibrator {
     return this.lastFrame;
   }
 
+  /**
+   * 카메라를 움직이는 잡 **시작 시** 직전 실행의 프레임 버퍼를 버린다.
+   *
+   * ★ 없으면 표시 버그가 된다(마스터 신고): 새 실행이 첫 캡처를 넣기 전까지 `/calibrate/frame` 이
+   *   **직전 실행의 마지막 프레임**(예: 36배 확대 화면)을 계속 서빙하고, 뷰어는 그 사이 라이브를 끊고
+   *   이 라우트를 폴링하므로 **카메라는 새 위치로 갔는데 화면만 과거를 보여준다**.
+   * 비운 뒤에는 라우트가 404(기존 "버퍼 없음" 계약)를 돌려주고 뷰어는 갱신을 스킵해
+   *   **클릭 시점의 라이브 프레임에 머문다** — 과거 실행 이미지를 현재인 양 보여주는 것보다 정직하다.
+   */
+  private clearLastFrame(): void {
+    this.lastFrame = undefined;
+  }
+
   getStatus(): CalibrateStatus {
     return {
       state: this.state,
@@ -160,6 +185,9 @@ export class PtzCalibrator {
    *    실카 소스는 프리셋 PTZ 테이블이 없어 프리셋 해석이 0/0/1 폴백으로 떨어져 카메라를 엉뚱한 곳으로 날린다.
    *    ★ 개별 경로 한정 — 배치(calibrateSlot)는 프리셋 정본 유지.
    * 3. plateRoi=클릭점(w/h=0) prior 로 centerOnPlate — peerOffsets 미주입 → pickNearestPlate(클릭 최근접).
+   *    ★ initialRadiusNorm(기본 0.10) 주입 — 클릭점 반경 밖 판을 **대신 채택하지 않는다**(거짓 성공 제거).
+   *    ★ zoom!==false 이고 사다리가 켜져 있으면(cfg.pointZoomLadder, 'auto'=네이티브 소스만) 3~4 대신
+   *      PlatePtz.centerAndZoomByLadder 한 호출로 완결한다(조준 먼저 → 확대하며 찾기).
    * 4. center 성공 & zoom!==false 이면 center.gain 체이닝으로 zoomToPlateWidth 1회 마감(성공 시 z, 실패 시 center 반환 — 정직).
    * 5. 저장 호출 없음(writer/saveCenteringSlots/saveSetupSnapshot/upsertSlotCentering 미호출).
    *    onFrame 은 makePlatePtz 생성자에 이미 배선되어 진행 중 lastFrame 갱신(/calibrate/frame 폴링 자동).
@@ -174,11 +202,23 @@ export class PtzCalibrator {
     if (this.state === 'running') throw new Error('calibrate already running');
     if (this.pointBusy) throw new Error('point centering busy');
     this.pointBusy = true;
+    this.clearLastFrame(); // 직전 실행 프레임이 새 실행 화면으로 새는 것을 막는다.
     try {
       const cam = opts?.camera;
       const startPtz = await this.currentPtzFor(camIdx, presetIdx, cam);
+      // 7. center+zoom 은 사다리 우선(조준 → 확대하며 찾기). 시뮬(네이티브 미지원)은 'auto' 에서 타지 않는다 = 기존 경로 보존.
+      if (opts?.zoom !== false && this.ladderEnabled(cam ?? this.camera)) {
+        const ladder = this.makePlatePtz({ ...this.baseOpts(), ...this.ladderOpts() }, cam);
+        if (ladder.centerAndZoomByLadder) {
+          const r = await ladder.centerAndZoomByLadder(camIdx, presetIdx, point, startPtz);
+          return { ok: r.ok, ptz: r.ptz, plateWidth: r.plateWidth, ...(r.reason ? { reason: r.reason } : {}) };
+        }
+      }
       const prior: NormalizedRect = { x: point.x, y: point.y, w: 0, h: 0 };
-      const centered = await this.makePlatePtz({ ...this.baseOpts(), plateRoi: prior }, cam).centerOnPlate(camIdx, presetIdx, startPtz);
+      const centered = await this.makePlatePtz(
+        { ...this.baseOpts(), plateRoi: prior, initialRadiusNorm: this.pointRadius() },
+        cam,
+      ).centerOnPlate(camIdx, presetIdx, startPtz);
       if (centered.ok && opts?.zoom !== false) {
         const z = await this.makePlatePtz({
           ...this.baseOpts(),
@@ -212,6 +252,7 @@ export class PtzCalibrator {
     if (this.state === 'running') throw new Error('calibrate already running');
     if (this.pointBusy) throw new Error('point centering busy');
     this.pointBusy = true;
+    this.clearLastFrame(); // 검출은 없지만 카메라는 움직인다 → 직전 프레임은 이 시점부터 과거다.
     try {
       // 카메라 오버라이드(뷰어가 보고 있는 소스) 우선 — 미주입이면 파이프라인 카메라.
       const camera = opts?.camera ?? this.camera;
@@ -229,6 +270,32 @@ export class PtzCalibrator {
     } finally {
       this.pointBusy = false;
     }
+  }
+
+  /**
+   * 줌 사다리 사용 여부(cfg 스위치 · 기본 'auto'). 'auto' 는 소스가 네이티브 센터링을 지원할 때만 켠다 —
+   * 시뮬(미지원)은 신규 코드를 한 줄도 실행하지 않으므로 기존 성공률이 **구조적으로** 보존된다.
+   */
+  private ladderEnabled(camera: ICameraClient): boolean {
+    const mode = this.cfg.pointZoomLadder ?? 'auto';
+    if (mode === 'off') return false;
+    if (mode === 'always') return true;
+    return typeof camera.centerOnPoint === 'function';
+  }
+
+  /** 개별(클릭) 최초 대상 선정 반경. 배치 경로에는 주입하지 않는다(§회귀 안전성). */
+  private pointRadius(): number {
+    return this.cfg.pointMatchRadiusNorm ?? POINT_MATCH_RADIUS_DEFAULT;
+  }
+
+  /** 사다리 전용 opts(cfg 미설정 필드는 전달하지 않아 PlatePtz 코드 기본값을 쓰게 한다). */
+  private ladderOpts(): PlatePtzOpts {
+    return {
+      initialRadiusNorm: this.pointRadius(),
+      ...(this.cfg.ladderMaxRungs !== undefined ? { ladderMaxRungs: this.cfg.ladderMaxRungs } : {}),
+      ...(this.cfg.nativeAimSettleMs !== undefined ? { nativeAimSettleMs: this.cfg.nativeAimSettleMs } : {}),
+      ...(this.cfg.preLatchZoomStepRatio !== undefined ? { preLatchZoomStepRatio: this.cfg.preLatchZoomStepRatio } : {}),
+    };
   }
 
   /**
@@ -262,6 +329,7 @@ export class PtzCalibrator {
     this.current = undefined;
     this.startedAt = this.now();
     this.endedAt = undefined;
+    this.clearLastFrame(); // 직전 실행 프레임 무효화(배치도 동일 병).
     void this.run(targets);
     return { total: targets.length };
   }
@@ -291,7 +359,7 @@ export class PtzCalibrator {
       }
       this.writer(buildSlotPtzJson(items, this.now()), this.cfg.outFile);
       this.saveCenteringSlots(items); // DB UPDATE 먼저 — 아래 스냅샷이 PTZ 반영된 최신 slot_setup 을 읽도록.
-      this.saveSetupSnapshot(items); // done 경로에서만 best-effort 스냅샷 1회(error 경로는 미기록 — 부분·불신).
+      this.saveSetupSnapshot(); // done 경로에서만 best-effort 기록(error 경로는 미기록 — 부분·불신).
       this.current = undefined;
       this.endedAt = this.now();
       this.state = 'done';
@@ -305,21 +373,25 @@ export class PtzCalibrator {
   }
 
   /**
-   * 최종 셋업 스냅샷(save/Setup_*.json) 1회 기록(옵셔널·best-effort). done 경로에서만 호출.
-   * payload = 완전한 최종 결과: 기하+LPD+점유+PTZ 반영된 slot_setup 뷰(정본) + 센터링 상세(converged/reason).
+   * 최종 결과물 기록(옵셔널·best-effort). done 경로에서만 호출. **동일 내용 2벌**:
+   *   1) save/Setup_YYYYMMDD_HHMMSS.json — 타임스탬프 이력본(덮어쓰기 없음)
+   *   2) save/setup_result.json — 소비측이 읽는 고정 경로(매 실행 덮어쓰기)
+   * payload = buildSetupResult(slot_setup 정본): 기하+점유+PTZ 반영된 최종 슬롯 목록.
    * saveCenteringSlots(DB UPDATE) 이후 getSlotSetup() 을 재조회하므로 PTZ 반영된 최신 뷰를 담는다.
-   * saveStore 미주입·기록 실패는 격리(잡·JSON 정본 무영향).
+   * saveStore 미주입·기록 실패는 격리(잡·JSON 정본 무영향). 두 기록은 각자 best-effort(한쪽 실패가 다른쪽을 막지 않음).
    */
-  private saveSetupSnapshot(items: SlotPtzItem[]): void {
+  private saveSetupSnapshot(): void {
     if (!this.saveStore) return;
+    const result = buildSetupResult(this.store.getSlotSetup()); // 1회 변환 → 2벌 동일 내용 보장.
     try {
-      this.saveStore.saveSnapshot(setupSaveName(new Date()), {
-        createdAt: this.now(),
-        slots: this.store.getSlotSetup(),
-        centering: items,
-      });
+      this.saveStore.saveSnapshot(setupSaveName(new Date()), result);
     } catch (e) {
-      logger.warn({ err: e }, 'Setup 스냅샷 저장 실패(격리 — slot_ptz.json·DB 는 정상)');
+      logger.warn({ err: e }, 'Setup_* 이력본 저장 실패(격리 — slot_ptz.json·DB 는 정상)');
+    }
+    try {
+      this.saveStore.saveSnapshot(SETUP_RESULT_NAME, result);
+    } catch (e) {
+      logger.warn({ err: e }, 'setup_result.json 저장 실패(격리 — slot_ptz.json·DB 는 정상)');
     }
   }
 

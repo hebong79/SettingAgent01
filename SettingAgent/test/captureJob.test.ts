@@ -84,6 +84,19 @@ describe('CaptureJob 시작/중복 (G1)', () => {
     expect(st.runId).toBe(runId);
   });
 
+  /**
+   * 수정 22 — 직전 run 의 프레임 버퍼가 새 run 화면에 새는 표시 버그 회귀 고정.
+   * `lastFrameByPreset` 만 비우고 `lastFrame` 을 남기면 /capture/frame 이 **직전 run 의 화면**을 서빙한다.
+   */
+  it('★start → 직전 run 의 lastFrame 을 서빙하지 않는다(수정 22)', () => {
+    const { job } = makeJob();
+    const stale = { jpeg: Buffer.from('OLD'), camIdx: 1, presetIdx: 1, roundIdx: 7 };
+    Reflect.set(job, 'lastFrame', stale);
+    expect(job.getLastFrame()).toEqual(stale);
+    job.start({ count: 1, intervalMs: 1000, checkpointEvery: 10, checkpointTriggerMode: 'rounds', checkpointIntervalMs: 60000, targets });
+    expect(job.getLastFrame()).toBeUndefined();
+  });
+
   it('running 중 중복 start → throw (라우트에서 409 매핑)', () => {
     const { job } = makeJob();
     job.start({ count: 3, intervalMs: 1000, checkpointEvery: 10, checkpointTriggerMode: 'rounds', checkpointIntervalMs: 60000, targets });

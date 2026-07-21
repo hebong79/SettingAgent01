@@ -12,6 +12,7 @@
 //   gainTilt −21.0~−21.1 @z1.69341 → zoomRef=1 환산 −62.0/−35.5, 1°/2°/3° 완전 선형).
 //   ① probeStepDeg 3→1 ② fallbackGainPanDeg +75→−62(★부호) ③ fallbackGainTiltDeg −35→−35.5.
 
+import { createHash } from 'node:crypto';
 import type { ICameraClient } from '../clients/CameraClient.js';
 import type { LpdClient, PlateBox } from '../clients/LpdClient.js';
 import type { NormalizedPoint, NormalizedRect } from '../domain/types.js';
@@ -30,6 +31,8 @@ import {
   scaleGainForZoom,
   predictPlateCenter,
   predictCenterAfterZoom,
+  aimPtzForPoint,
+  zoomForWidth,
 } from './controlMath.js';
 import type { Ptz } from './types.js';
 
@@ -82,17 +85,70 @@ export interface PlatePtzOpts {
   gain?: PtzGain;
   /** 예측 prior 로부터 이 거리 초과 매칭은 기각(대상 소실 취급). 기본 0.08 = 실측 번호판 간격 0.15 의 절반 근사. */
   matchRadiusNorm?: number;
+  /**
+   * **최초 대상 선정 전용** 반경 게이트(정규화). `plateRoi` prior 로부터 이 거리를 넘는 후보는
+   * "대신 채택"하지 않고 기각한다(`no_plate_near_click`). `matchRadiusNorm`(추적용)과 **별개 파라미터**다 —
+   * 기준점이 예측 중심이 아니라 **조작자의 클릭 좌표**라 흡수해야 할 오차원이 다르기 때문.
+   *
+   * ★ 기본 undefined = **게이트 없음 = 기존 동작**. 배치(calibrateSlot)는 plateRoi 를 주지 않아 prior 가
+   *   화면중앙이고 acquire zoom 에서 판이 중앙에서 크게 벗어날 수 있어, 무조건 게이트를 걸면 대량 미검이 된다.
+   *
+   * ★ 사다리(`centerAndZoomByLadder`)에서는 이 값이 **조준(원본) 프레임 기준**으로 해석된다 —
+   *   latch 전 각 rung 은 누적배율 k 로 스케일한 `initialRadiusNorm × k` 를 실제 게이트로 쓴다.
+   *   `centerOnPlate` 는 확대 없이 1회 선정이라 k=1 = 이 값 그대로다(동작 불변).
+   *   → 클릭 경로만 명시 주입한다(권고 0.10 — 클릭정밀도 0.02 + 차체↔판 오프셋 0.08 = worst 0.10 이상이면서
+   *   이웃 판 최소 간격 0.11 미만인 구간. 0.11 이상은 이웃 오채택이 되살아나 게이트가 무의미해진다).
+   */
+  initialRadiusNorm?: number;
   /** 1스텝 zoom 증배 상한(대칭: [z/r, z·r]). 기본 1.5 — 큰 점프는 중심 오차를 같은 배율로 확대해 대상을 날린다. */
   maxZoomStepRatio?: number;
+  /**
+   * (사다리 전용) **latch 이전** 눈먼 줌인 배율. 기본 2.0(LADDER_PRELATCH_RATIO — 근거는 그 상수 주석).
+   * 아직 추적 대상이 없는 구간이라 `maxZoomStepRatio` 의 "대상을 날린다" 근거가 성립하지 않는다.
+   */
+  preLatchZoomStepRatio?: number;
   /**
    * (소유권 선정 전용) 같은 프리셋 타 슬롯 판중심 − 자기 판중심(원본 정규화 프레임 상대 오프셋, 설계 §A-1).
    * pan/tilt 강체평행이동 불변이라 현재 프레임에서 자기중심 prior 에 더하면 peer 앵커가 된다.
    * 미전달 → 기존 화면중앙 최근접(`pickNearestPlate`, 하위호환). 전달 시 자기 Voronoi 셀 소유 후보만 선정.
    */
   peerOffsets?: NormalizedPoint[];
+  /**
+   * (사다리 전용) rung 상한. **기본 undefined = 시작 zoom·maxZoomStepRatio·clampZoom 상한에서 자동 산출**.
+   * 실질 종료 조건은 `clampZoom` 포화이고 rung 수는 그 위임을 방해하지 않아야 한다 —
+   * ★ 고정 상수(구 기본 8)는 이 위임을 배신했다: 근거였던 1.5 와 달리 실사용 `config/tools.config.json`
+   *   의 `maxZoomStepRatio` 는 **1.3** 이라 1.3^9 ≈ 10.6 에서 사다리가 포기하고,
+   *   zoom 상한 36 이 3.4배 남았는데도 "최대 줌에서 못 찾음"이라는 **오보**를 냈다(이번 작업의 표적인
+   *   먼 차량이 정확히 그 지점에서 잘린다). 자동 산출은 비율이 무엇이든 상한 도달을 보장한다.
+   * ★ `cfg.acquireLadderMaxSteps`(배치의 **줌아웃** 사다리, 기본 5)와 **다른 파라미터** — 혼용 금지.
+   */
+  ladderMaxRungs?: number;
+  /**
+   * (사다리 전용) 네이티브 setcenter 후 정착 대기(ms). 기본 1000.
+   * 근거: `RealPtzSource.centerOnPoint` 는 `move` 와 달리 `waitUntilSettled` 를 호출하지 않는다 →
+   * setcenter 직후의 PTZ 조회값이 슬루 중 값일 수 있고, 그 값을 다음 rung 의 requestImage 로 명령하면
+   * 카메라가 엉뚱한 곳으로 간다. speed=50 으로 큰 pan 을 도는 시간을 보수적으로 잡은 값(★라이브 미측정 — 튜닝 대상).
+   */
+  nativeAimSettleMs?: number;
 }
 
-export type PlatePtzFailReason = 'no_plate' | 'plate_lost' | 'max_iterations' | 'zoom_saturated';
+export type PlatePtzFailReason =
+  | 'no_plate'
+  | 'plate_lost'
+  | 'max_iterations'
+  | 'zoom_saturated'
+  // ↓ 사다리·반경게이트 추가분(기존 4건 문자열 무변경 — UI/DB 회귀 0).
+  /** 검출은 있으나 전부 클릭점 반경(initialRadiusNorm) 밖 → 다른 판을 대신 채택하지 않고 실패(위장 성공 금지). */
+  | 'no_plate_near_click'
+  /** 조준은 됐으나 사다리 전 구간 미검출 + 줌 상한 도달(LPD 한계 — 가림·각도·오염). */
+  | 'plate_not_found_at_max_zoom'
+  /** 네이티브 setcenter / move 가 거절 또는 예외(장비 통신·권한). */
+  | 'aim_failed'
+  /**
+   * (수정 20) 목표 폭을 **사이에 두고** 괄호가 장비 zoom 해상도까지 좁혀졌으나 `widthTol` 안에 못 들어감.
+   * 줌으로 더 가까이 갈 방법이 없다는 뜻이며, `zoom_saturated`(장비 배율 상한)와는 원인이 다르다.
+   */
+  | 'zoom_resolution_limit';
 
 export interface PlatePtzResult {
   ok: boolean;
@@ -106,6 +162,22 @@ export interface PlatePtzResult {
   gain: PtzGain;
   iterations: number;
   reason?: PlatePtzFailReason;
+  /**
+   * (수정 13) **장비 zoom 상한에서 목표 폭에 미달한 채 종료**했는가.
+   * ok:true 와 함께 올 수 있다 — "장비가 할 수 있는 일을 전부 했다"는 뜻이지 목표 달성이 아니다.
+   * 성공/실패와 무관하게 이 사실은 결과에서 삭제하지 않는다(정직성).
+   */
+  widthShortfall?: boolean;
+  /** (수정 17) 장비 줌 상한에서 정렬을 만들기 위해 시도한 **마지막 재중심 횟수**(0 = 불요). */
+  recenterAttempts?: number;
+  /** (수정 18) 종료 시 **최선 폭 지점으로 되돌아갔는가**(진동·악화 종료 방지). */
+  restoredToBest?: boolean;
+  /**
+   * (수정 21) `ok:true` 인데 **중심 정렬이 centerTol 밖**으로 남았는가.
+   * 폭은 수렴했고 신원은 게이트가 보장했으므로 성공이지만, "정렬이 이만큼 남았다"를 지우지 않는다
+   * (`widthShortfall` 과 같은 정직성 관용구). 최종 오차는 `err` 에 실려 있다.
+   */
+  centerShortfall?: boolean;
 }
 
 interface ResolvedOpts {
@@ -121,6 +193,12 @@ interface ResolvedOpts {
   plateRoi: NormalizedRect;
   matchRadiusNorm: number;
   maxZoomStepRatio: number;
+  preLatchZoomStepRatio: number;
+  /** ★ 기본값 부여 금지 — undefined 가 "clampZoom 상한까지 자동 산출"이라는 의미를 갖는다(ladderRungBudget). */
+  ladderMaxRungs?: number;
+  nativeAimSettleMs: number;
+  /** ★ 기본값 부여 금지 — undefined 가 "게이트 없음"(기존 동작)이라는 의미를 갖는다. */
+  initialRadiusNorm?: number;
   gain?: PtzGain;
   peerOffsets?: NormalizedPoint[];
 }
@@ -132,6 +210,87 @@ const IMPROVE_EPS = 1e-3;
  * 0.5^15 ≈ 3e-5 로 게인이 소멸 → PTZ 정지 → improvement=0 → 영구 damp(회복 불가, 실측 A 실패).
  */
 const DAMP_LIMIT = 3;
+
+/**
+ * (사다리 전용) zoom 포화 판정 임계. zoom 은 1~36 배율이라 1e-6 은 유효자릿수 훨씬 아래 =
+ * "clampZoom 이 더 못 올린다"만 잡고 정상 스텝(최소 ×1.5)은 절대 오판하지 않는다.
+ */
+const ZOOM_EPS = 1e-6;
+
+/**
+ * (사다리 전용) 기하 폴백 조준의 1스텝 상한(°). cfg.maxStepDeg(=5)는 **폐루프 미세보정용**이라 재사용 금지 —
+ * 게인 −62@zoom1 에서 클릭 오차 0.3 은 18.6° 를 요구하는데 5° 로 잘리면 조준이 성립하지 않는다.
+ * 사다리의 재중심은 P 제어 반복이 아니라 **개방루프 1샷**이라 진동 방지 클램프가 필요 없고,
+ * PtzCalibrator 의 pre-aim 상한(PREAIM_MAX_STEP=90)과 같은 성격이라 같은 값을 쓴다(이상 게인 방어 상한).
+ */
+const LADDER_AIM_MAX_STEP = 90;
+
+/**
+ * (사다리 전용) 자동 산출 rung 예산에 얹는 여유 칸수. 등반 칸수 위에 얹는 이유는 latch 이후의 rung 이
+ * 항상 ×ratio 로 오르지는 않기 때문이다(직행 목표 zWant 가 더 낮으면 스텝이 작아지고, 재중심만 하고
+ * 넘어가는 칸도 있다). 4 는 목표 폭 부근에서의 미세 수렴 칸을 덮는 관측형 여유값이다.
+ */
+const LADDER_RUNG_SLACK = 4;
+
+/**
+ * (사다리 전용) **latch 이전** 눈먼 줌인의 1스텝 배율. 기본 2.0.
+ *
+ * ★ 되돌리기 전에 읽을 것 — `maxZoomStepRatio`(1.3)를 여기에 쓰지 않는 이유:
+ * 1.3 의 존재 근거는 이 파일 상단 주석 그대로 "큰 점프는 중심 오차를 같은 배율로 확대해 대상을 날린다" 인데,
+ * 그 근거는 **추적 중인 대상이 있을 때만** 성립한다. latch 이전에는 날릴 대상이 아직 검출되지도 않았다.
+ *
+ * ① **누적 드리프트는 칸수가 아니라 총 배율이 결정한다.** 이 파일의 줌 모델(`predictCenterAfterZoom`:
+ *    c' = 0.5 + (c−0.5)·zTo/zFrom)은 곱셈 합성이라 경로에 무관하다 → e_final = e_0 × z_final/z_0.
+ *    같은 zoom 36 에 도달하는 한 1.3 으로 14칸을 가든 2.0 으로 6칸을 가든 **최종 잔차는 동일**하다.
+ *    (latch 이전에는 rung 간 재중심이 아예 없으므로 이 등식이 근사가 아니라 정확하다.)
+ * ② 큰 스텝의 실제 대가는 "최초 검출 가능 zoom 을 지나쳐 필요 이상으로 확대"뿐인데, 검출 가능성은 zoom 에
+ *    단조 증가라 지나쳐도 검출은 되고, **대칭 클램프**(latch 후 줌아웃 허용)가 초과분을 되돌린다.
+ * ③ 대가로 얻는 것: latch 까지의 칸수 절반 이하 = rung 당 (nativeAimSettleMs + settleMs + 장비 슬루)를
+ *    절반으로. 정밀도가 실제로 필요한 latch 이후 구간은 1.3 이 그대로 보존된다.
+ *
+ * ★ 단 하나의 실측 유보(구현자 관측): 잔차가 커지면 반경 게이트(0.10) **밖**으로 나가 latch 창이 좁아진다.
+ *   그래서 "검출이 하나도 없는 구간"에서만 이 배율을 쓰고, LPD 가 후보를 내기 시작하면(기각이더라도)
+ *   즉시 `maxZoomStepRatio` 로 되돌린다(§sawAnyPlate). 속도 이득은 광각 무검출 구간에 몰려 있으므로
+ *   이 보수화로 잃는 이득은 거의 없다.
+ */
+const LADDER_PRELATCH_RATIO = 2.0;
+
+/**
+ * (사다리 전용) rung 절대 상한(무한루프 방지 안전판). `maxZoomStepRatio` 를 1 에 가깝게(예: 1.05)
+ * 설정하면 자동 산출 예산이 수백 칸으로 폭주하므로 런타임을 하드 바운드한다.
+ * 64 는 실사용 최소 비율 1.3 에서 필요한 14 칸의 4배 이상이라 정상 설정을 절대 자르지 않는다.
+ */
+const LADDER_RUNG_HARD_CAP = 64;
+
+/**
+ * (사다리 전용) zoom **실측 정체** 판정 임계(뷰어 배율 단위)와 연속 허용 횟수.
+ *
+ * 배경: `move` 는 `waitUntilSettled` 타임아웃에도 `true` 를 반환하므로 사다리는 줌 명령이 성공한 줄 안다.
+ * 실카 라이브에서 장비 zoom 이 상한에 걸려 더 오르지 않는데도 사다리가 5 rung 을 더 올라가며
+ * rung 당 정착 타임아웃(수 초)을 통째로 낭비했다(실측 25초+). `clampZoom` 은 **뷰어 범위**만 알아
+ * 장비의 물리 상한을 모르므로 포화를 감지하지 못한다 → 실측(zoomAct)으로 판정한다.
+ *
+ * ★ 임계를 "거의 0"으로 잡은 이유: 줌 모터가 느려 한 rung 안에 목표에 못 닿는 **정상** 케이스가 실재한다
+ *   (실측: 목표 raw 8894 명령에 5초 후 9968 — 이동 중이지만 미도달). 그런 경우 실측은 **분명히 변한다**.
+ *   반면 진짜 포화는 실측이 **완전히 고정**된다. 그래서 "조금이라도 움직였으면 정상"으로 보고,
+ *   0.05 배율(≈ raw 50 @[0,16384])만 못 움직인 rung 만 정체로 센다.
+ * ★ 연속 2회를 요구하는 이유: 1회 미상승은 폴링 타이밍·인코더 양자화로도 생길 수 있다. 2회 연속이면
+ *   "명령은 올라갔는데 장비는 두 칸 내내 제자리"라 물리 상한으로 단정할 근거가 된다.
+ */
+/**
+ * (사다리 이분탐색·수정 20) 괄호(bracket)를 더 좁히는 것이 무의미해지는 최소 폭(뷰어 배율 단위).
+ *
+ * 근거: 뷰어 zoom [1,36] 은 raw [0,16384] 의 선형 사상이라 **1 raw ≈ 0.0021 뷰어 단위**다. 0.01 은 약 5 raw =
+ * 장비 양자화보다 확실히 크고(노이즈를 쫓지 않는다), 동시에 실측 최급구간(zoom 35.153→36 에서 폭 0.157→0.238)에서도
+ * 0.01 구간의 폭 변화는 ≈0.001 로 `widthTol`(0.015)의 **1/15** 에 불과하다 → 더 좁혀도 판정이 바뀌지 않는다.
+ */
+const LADDER_BRACKET_MIN_SPAN = 0.01;
+
+const LADDER_ZOOM_STALL_EPS = 0.05;
+const LADDER_ZOOM_STALL_LIMIT = 2;
+
+/** 로그 자릿수 축약(가독). 영속화가 아니므로 round5 규약 대상 아님. */
+const r3 = (v: number): number => Number(v.toFixed(3));
 
 type Center = { cx: number; cy: number };
 
@@ -179,6 +338,12 @@ export class PlatePtz {
       plateRoi: opts.plateRoi ?? { x: 0.5, y: 0.5, w: 0, h: 0 },
       matchRadiusNorm: opts.matchRadiusNorm ?? 0.08,
       maxZoomStepRatio: opts.maxZoomStepRatio ?? 1.5,
+      preLatchZoomStepRatio: opts.preLatchZoomStepRatio ?? LADDER_PRELATCH_RATIO,
+      nativeAimSettleMs: opts.nativeAimSettleMs ?? 1000,
+      // ★ ladderMaxRungs 는 기본값을 주지 않는다(undefined = clampZoom 상한까지 자동 산출 — ladderRungBudget).
+      ...(opts.ladderMaxRungs !== undefined ? { ladderMaxRungs: opts.ladderMaxRungs } : {}),
+      // ★ initialRadiusNorm 만 기본값을 주지 않는다(undefined = 게이트 없음 = 기존 동작).
+      ...(opts.initialRadiusNorm !== undefined ? { initialRadiusNorm: opts.initialRadiusNorm } : {}),
       ...(opts.gain ? { gain: opts.gain } : {}),
       ...(opts.peerOffsets ? { peerOffsets: opts.peerOffsets } : {}),
     };
@@ -195,7 +360,8 @@ export class PlatePtz {
    *
    * @param startPtz 명령 PTZ 추적 시작점(필수 — 응답 echo 신뢰 불가라 "현재 PTZ" 조회 수단이 없다.
    *                 프리셋 기본값이 필요하면 호출측이 detectPipeline.resolvePresetPtz 로 얻는다).
-   * @returns 실패 시 reason: 'no_plate'(시작부터 미검출) | 'plate_lost'(도중 소실·매칭 기각) | 'max_iterations'.
+   * @returns 실패 시 reason: 'no_plate'(시작부터 미검출) | 'no_plate_near_click'(검출은 있으나 전부
+   *          initialRadiusNorm 밖 — 주입 시에만 발생) | 'plate_lost'(도중 소실·매칭 기각) | 'max_iterations'.
    *          결과의 gain 을 zoomToPlateWidth 의 opts.gain 으로 넘기면 실측 게인이 재사용된다(zoom 스케일 자동).
    */
   async centerOnPlate(camIdx: number, presetIdx: number, startPtz: Ptz): Promise<PlatePtzResult> {
@@ -205,9 +371,28 @@ export class PlatePtz {
     const fb: PtzGain = { ...scaleGainForZoom(fbBase, startPtz.zoom), zoomRef: startPtz.zoom };
     let ptz: Ptz = { ...startPtz };
 
-    // 초기 대상 선정만 plateRoi prior(반경 기각 없음) — 이후는 예측 추적(§2.5).
-    let plate = await this.captureAndDetect(camIdx, presetIdx, ptz, o.plateRoi, null);
-    if (!plate) return { ok: false, ptz, plate: null, err: null, plateWidth: null, gain: fb, iterations: 0, reason: 'no_plate' };
+    // 초기 대상 선정만 plateRoi prior — 이후는 예측 추적(§2.5).
+    // 반경 게이트는 initialRadiusNorm 이 주입된 경우에만(클릭 경로). 미주입=null=기존 무게이트 동작.
+    const first = await this.captureDetectPick(camIdx, presetIdx, ptz, o.plateRoi, o.initialRadiusNorm ?? null);
+    if (!first.plate) {
+      if (first.rejected) {
+        // ★ 기각을 반드시 관측 가능하게 남긴다 — "왜 안 되지"를 추측이 아니라 로그로 알 수 있어야 한다.
+        logger.info(
+          {
+            cat: 'centering', phase: 'gate', cam: camIdx, preset: presetIdx,
+            click: { x: r3(o.plateRoi.x + o.plateRoi.w / 2), y: r3(o.plateRoi.y + o.plateRoi.h / 2) },
+            plates: first.count, nearestDist: first.nearestDist === null ? null : r3(first.nearestDist),
+            radius: o.initialRadiusNorm,
+          },
+          '클릭점 반경 밖 판만 검출 → 대신 채택하지 않고 실패(no_plate_near_click)',
+        );
+      }
+      return {
+        ok: false, ptz, plate: null, err: null, plateWidth: null, gain: fb, iterations: 0,
+        reason: first.rejected ? 'no_plate_near_click' : 'no_plate',
+      };
+    }
+    let plate: PlateBox = first.plate;
 
     let pr = quadBoundingRect(plate.quad);
     let err = plateCenterError(pr);
@@ -361,6 +546,571 @@ export class PlatePtz {
   }
 
   /**
+   * [함수 3] 클릭 지점 조준 → **줌 사다리** → 목표 폭 수렴. 개별 center+zoom 을 한 호출로 완결한다.
+   * `centerOnPlate`/`zoomToPlateWidth` 를 호출하지 않는다(상호 의존 없음 — 기존 두 경로 무영향).
+   *
+   * 기존 center+zoom 경로는 **조준보다 검출을 먼저** 요구해서(광각에서 먼 판은 화소 부족 → LPD 미검출)
+   * 시작조차 못 했다. 사다리는 순서를 뒤집는다:
+   *  ① 클릭점을 먼저 화면중앙으로 조준(검출 불요 — 실카는 장비 네이티브 setcenter, 시뮬은 기하 1샷)
+   *  ② 미검출이면 눈먼 zoom 1스텝(×maxZoomStepRatio). **zoom-in 은 광학중심을 보존**하므로 ①로 중앙에 온
+   *     대상은 확대해도 중앙에 남는다 = "찾을 때까지 확대"가 대상을 잃지 않는다.
+   *  ③ 검출되면 판중심으로 재중심(실카는 setcenter 한 방 — 게인/probe/damp 불요) 후 다음 칸으로.
+   *  ④ 폭이 targetPlateWidth 에 수렴하면 성공. **성공 출구는 이 한 곳뿐**(위장 성공 0).
+   *
+   * 거짓 성공 차단: rung 의 prior 는 항상 화면중앙이고, 게이트는 latch 전 `initialRadiusNorm`(클릭 반경) /
+   * latch 후 `matchRadiusNorm`(추적 반경). 게이트를 못 넘으면 **다른 판을 대신 잡지 않고** 실패로 간다.
+   *
+   * @param point   클릭 지점(정규화, **현재 화면 기준**)
+   * @param startPtz 현재 PTZ(호출측이 조회해 넘긴다 — 클릭은 "지금 보이는 화면" 기준이라 프리셋 base 는 어긋난다)
+   * @returns 실패 reason: 'aim_failed' | 'no_plate_near_click'(게이트 기각은 로그로만 남기고 rung 은 줌인 계속)
+   *          | 'plate_not_found_at_max_zoom' | 'plate_lost' | 'zoom_saturated' | 'max_iterations'.
+   */
+  async centerAndZoomByLadder(
+    camIdx: number,
+    presetIdx: number,
+    point: NormalizedPoint,
+    startPtz: Ptz,
+  ): Promise<PlatePtzResult> {
+    const o = this.opts;
+    // 기하 폴백 전용 게인(zoomRef=1 정의 — aimPtzForPoint 가 사용 시점 zoom 으로 스케일한다).
+    // 네이티브 경로에서는 쓰이지 않는다(장비 펌웨어가 자기 FOV 테이블로 변환).
+    const fb: PtzGain = { gainPan: o.fallbackGainPanDeg, gainTilt: o.fallbackGainTiltDeg, zoomRef: 1 };
+    let ptz: Ptz = { ...startPtz };
+
+    // ── ① 클릭점 조준(rung 진입 전 1회) ──
+    const aim = await this.recenterTo(camIdx, point, ptz, fb);
+    if (!aim.ok) {
+      return { ok: false, ptz, plate: null, err: null, plateWidth: null, gain: fb, iterations: 0, reason: 'aim_failed' };
+    }
+    ptz = aim.ptz;
+    logger.info(
+      { cat: 'centering', phase: 'ladder', step: 'aim', cam: camIdx, preset: presetIdx, mode: aim.mode, point: { x: r3(point.x), y: r3(point.y) }, ptz },
+      '사다리 클릭점 조준 완료',
+    );
+
+    let plate: PlateBox | null = null;
+    let err: { errX: number; errY: number } | null = null;
+    let plateWidth: number | null = null;
+    let latched = false; // 한 번이라도 대상 판을 잡았는가(사유 구분·게이트 전환 겸용).
+    // 반경 기각 이력. 사유를 **마지막 rung 상태로만** 가르면 중간에 계속 기각되다가 마지막에 검출 0 이 된
+    // 경우가 'LPD 한계' 로 오보된다 — 한 번이라도 기각이 있었으면 클릭 위치 문제로 보고한다.
+    let rejectedEver = false;
+    // LPD 가 후보를 한 번이라도 냈는가(기각 포함). latch 전 성긴 배율은 **검출이 0 인 구간**에서만 쓴다 —
+    // 후보가 보이기 시작하면 반경 게이트를 지나치지 않도록 즉시 정밀 배율로 되돌린다(LADDER_PRELATCH_RATIO 주석 ★).
+    let sawAnyPlate = false;
+    // (수정 20) 실측쌍 괄호: width < target 인 **최대** zoom(zLo) / width > target 인 **최소** zoom(zHi).
+    // ★ 검출된 rung 에서만 채워지므로 latch 이전 탐색 동작에는 구조적으로 영향이 없다.
+    let zLo: number | null = null;
+    let zHi: number | null = null;
+    // (수정 18) 목표 폭에 가장 가까웠던 rung 을 기억한다. 사다리는 **자신이 도달했던 최선보다 나쁘게 끝나면 안 된다**.
+    let best: { ptz: Ptz; plate: PlateBox; err: { errX: number; errY: number }; plateWidth: number; rung: number } | null = null;
+    const rungBudget = this.ladderRungBudget(ptz.zoom);
+    // zoom 실측 정체 추적(수정 11). prevAct 는 직전 rung 의 장비 실측 zoom.
+    // ★ actLive: 실측이 명령을 따라 움직이는 것을 **한 번이라도 확인**하기 전에는 판정하지 않는다 —
+    //   응답 echo 를 신뢰할 수 없는 소스(시뮬은 0/0/1 고정)에서 "항상 정체"로 오판하는 것을 구조적으로 막는다.
+    let prevAct: number | null = null;
+    let prevCmd: number | null = null;
+    let actLive = false;
+    let stall = 0;
+    // 조준 완료 시점의 zoom. latch 전에는 rung 간 재중심이 **없으므로**(재중심은 검출 분기에만 있다)
+    // 화면 전체가 누적배율 k = z_cur/z_aim 로 정확히 등방 확대된다(predictCenterAfterZoom 의 곱셈 합성).
+    const aimZoom = Math.max(ptz.zoom, 1e-6);
+
+    // ── ②~④ 사다리 ──
+    for (let rung = 0; rung <= rungBudget; rung++) {
+      // 캡처는 항상 requestImage(ptz override) — 이동+캡처 원자(PlatePtz 불변식). move 직접 호출 없음.
+      // ★ latch 전 게이트는 **누적배율 k 로 스케일**한다(고정 0.10 이 아니다).
+      //   관측 거리는 e_orig·k 로 커지는데 고정 반경과 비교하면 축척이 다른 두 양을 비교하는 것이라
+      //   k 가 커질수록 게이트가 부당하게 엄격해지고 latch 창이 [k_검출, radius/e1] 로 **닫힌다**
+      //   (실측: 창 [3,4.65] 프레임에서 성긴 배율이 창을 건너뛰어 6/21 실패).
+      //   radius·k 로 비교하면 게이트가 **원본(조준) 프레임 기준 0.10** 이라는 고정 의미를 되찾고 창은 [k_검출, ∞) 가 된다.
+      //   ★ 판별력은 전혀 약해지지 않는다: 원본에서 0.15 떨어진 이웃은 어느 zoom 에서든 관측 0.15·k → 원본환산 0.15 > 0.10 기각.
+      //   ★ 상한을 두지 않는 이유: k≥5 면 반경이 0.5 를 넘어 사실상 무효로 보이지만, 그 zoom 에서는
+      //     원본 0.1 이상 떨어진 후보가 **이미 프레임 밖**이라(0.1·5=0.5=화면 반폭) 프레임 자체가 게이트 역할을 한다.
+      //     상한을 두면 이번에 고치는 "창이 닫히는" 버그를 그대로 되살린다.
+      const k = ptz.zoom / aimZoom;
+      const gate = latched
+        ? o.matchRadiusNorm
+        : o.initialRadiusNorm === undefined
+          ? null
+          : o.initialRadiusNorm * k;
+      const got = await this.captureDetectPick(camIdx, presetIdx, ptz, priorRect({ cx: 0.5, cy: 0.5 }), gate);
+      if (got.count > 0) sawAnyPlate = true;
+
+      // [수정 11] 명령은 올렸는데 장비 실측 zoom 이 제자리면 물리 상한이다 — 성공으로 믿고 rung 을 낭비하지 않는다.
+      if (prevAct !== null && prevCmd !== null) {
+        const dAct = Math.abs(got.act.zoom - prevAct);
+        const dCmd = Math.abs(ptz.zoom - prevCmd);
+        if (dAct > LADDER_ZOOM_STALL_EPS) actLive = true; // 실측이 명령을 따라온다 = 판정 재료가 유효
+        if (actLive && dCmd > LADDER_ZOOM_STALL_EPS && dAct <= LADDER_ZOOM_STALL_EPS) stall += 1;
+        else stall = 0;
+        if (stall >= LADDER_ZOOM_STALL_LIMIT) {
+          // [수정 13] 정체 시점의 **이번 rung 실측**으로 판정한다(직전 rung 값으로 성공을 주지 않는다).
+          const pr = got.plate ? quadBoundingRect(got.plate.quad) : null;
+          const e = pr ? plateCenterError(pr) : null;
+          const w = pr ? pr.w : plateWidth;
+          const fin = await this.finalizeAtDeviceLimit(camIdx, presetIdx, ptz, got.plate ?? plate, e ?? err, w, latched, fb);
+          logger.warn(
+            {
+              cat: 'centering', phase: 'ladder', rung, cam: camIdx, preset: presetIdx,
+              zoomCmd: r3(ptz.zoom), zoomAct: r3(got.act.zoom), prevAct: r3(prevAct), stall,
+              plateWidth: fin.plateWidth === null ? null : r3(fin.plateWidth), atDeviceLimit: 'zoomAct', ok: fin.ok,
+              recenterAttempts: fin.attempts,
+              errX: fin.err === null ? null : r3(fin.err.errX), errY: fin.err === null ? null : r3(fin.err.errY),
+            },
+            'zoom 명령이 장비 실측에 반영되지 않음(연속 정체) → 그 지점을 최종 위치로 확정',
+          );
+          return {
+            ok: fin.ok, ptz: fin.ptz, plate: fin.plate, err: fin.err, plateWidth: fin.plateWidth,
+            gain: fb, iterations: rung + 1, reason: 'zoom_saturated',
+            widthShortfall: fin.plateWidth !== null && fin.plateWidth < o.targetPlateWidth,
+            recenterAttempts: fin.attempts,
+          };
+        }
+      }
+      prevAct = got.act.zoom;
+      prevCmd = ptz.zoom;
+
+      if (got.plate) {
+        latched = true;
+        plate = got.plate;
+        const pr = quadBoundingRect(plate.quad);
+        plateWidth = pr.w;
+        err = plateCenterError(pr);
+        logger.info(
+          {
+            cat: 'centering', phase: 'ladder', rung, cam: camIdx, preset: presetIdx, zoom: r3(ptz.zoom),
+            errX: r3(err.errX), errY: r3(err.errY), plateWidth: r3(plateWidth), plates: got.count,
+            // 진단(수정 9): 명령 zoom 이 올라도 zoomAct 가 안 오르면 장비가 실제로 줌하지 않은 것이고,
+            // sha/bytes 가 인접 rung 과 같으면 같은 프레임을 분석한 것이다. 둘을 구분하려면 둘 다 필요하다.
+            zoomCmd: r3(ptz.zoom), zoomAct: r3(got.act.zoom), panAct: r3(got.act.pan), tiltAct: r3(got.act.tilt),
+            bytes: got.bytes, sha: got.sha,
+          },
+          '사다리 rung 검출',
+        );
+        if (best === null || Math.abs(plateWidth - o.targetPlateWidth) < Math.abs(best.plateWidth - o.targetPlateWidth)) {
+          best = { ptz: { ...ptz }, plate, err, plateWidth, rung };
+        }
+        if (isWidthConverged(plateWidth, o.targetPlateWidth, o.widthTol)) {
+          // [수정 21] 이 기능의 이름은 **센터라이징**이다 — 폭만 맞고 화면 한쪽에 치우친 채 "완료"는 절반만 한 일이다.
+          //   수정 17 이 세운 "성공 = latch + 실측 정렬" 원칙을 주 경로에도 적용하되, **성공을 좁히지는 않는다**.
+          const fin = await this.finalizeConverged(camIdx, presetIdx, ptz, plate, err, plateWidth, fb);
+          logger.info(
+            {
+              cat: 'centering', phase: 'ladder', rung, cam: camIdx, preset: presetIdx, zoom: r3(fin.ptz.zoom),
+              plateWidth: r3(fin.plateWidth), recenterAttempts: fin.attempts, aligned: fin.aligned,
+              errX: r3(fin.err.errX), errY: r3(fin.err.errY),
+              errBefore: { x: r3(err.errX), y: r3(err.errY) },
+            },
+            fin.aligned ? '사다리 폭 수렴 — 완료' : '사다리 폭 수렴 — 완료(정렬 잔차 남음)',
+          );
+          return {
+            ok: true, ptz: fin.ptz, plate: fin.plate, err: fin.err, plateWidth: fin.plateWidth,
+            gain: fb, iterations: rung + 1,
+            ...(fin.attempts > 0 ? { recenterAttempts: fin.attempts } : {}),
+            ...(fin.aligned ? {} : { centerShortfall: true }),
+            // 재중심 뒤 재측정에서 폭이 목표 아래로 벗어났다면 그 사실도 남긴다(수정 18 의 best 복귀는
+            // max_iterations/plate_lost 전용 경로라 이 성공 출구와 코드 경로가 겹치지 않는다 — 충돌 없음).
+            ...(fin.plateWidth < o.targetPlateWidth - o.widthTol ? { widthShortfall: true } : {}),
+          };
+        }
+        // ③ 판중심 재중심(중심 오차가 tol 밖일 때만 — 불필요한 왕복 억제).
+        if (!isCentered(err, o.centerTol)) {
+          const c = centerOfRect(pr);
+          const re = await this.recenterTo(camIdx, { x: c.cx, y: c.cy }, ptz, fb);
+          if (!re.ok) {
+            return { ok: false, ptz, plate, err, plateWidth, gain: fb, iterations: rung + 1, reason: 'aim_failed' };
+          }
+          ptz = re.ptz;
+        }
+        // ── (수정 20) 실측쌍 괄호 갱신 ──
+        // 목표를 아래에서 스치면 zLo, 위에서 스치면 zHi. 둘 다 잡히면 목표는 반드시 그 사이에 있다(단조성).
+        if (plateWidth < o.targetPlateWidth) {
+          if (zLo === null || ptz.zoom > zLo) zLo = ptz.zoom;
+        } else if (zHi === null || ptz.zoom < zHi) {
+          zHi = ptz.zoom;
+        }
+
+        let zNext: number;
+        if (zLo !== null && zHi !== null && zHi - zLo > ZOOM_EPS) {
+          // ── 괄호 안 이분 탐색 ──
+          // ★ 선형 외삽(zoomForWidth)을 쓰지 않는 이유: `width ∝ zoom` 가정이 장비 상단에서 깨진다
+          //   (실측 w/z 가 16배 0.00131 → 36배 0.00661, **5배** 변화). 그 가정으로 외삽하면 괄호 밖으로 튀어
+          //   36 ↔ 32.5 를 오가는 **극한 순환**이 성립한다(라이브 3주기 관측).
+          //   이분은 **모델을 전혀 가정하지 않는다** — 필요한 것은 "zoom↑ ⇒ width↑" 단조성뿐이고 물리적으로 보장된다.
+          // ★ maxZoomStepRatio 클램프를 **면제**한다(판단 근거): 그 클램프는 "측정하지 않은 zoom 으로 크게 튀어
+          //   중심오차를 배율만큼 확대해 대상을 날리는 것"을 막는 장치다. 괄호의 두 끝은 **이미 측정했고 그 자리에서
+          //   대상을 검출한** zoom 이므로 그 사이 중점에는 그 위험이 존재하지 않는다. 반대로 클램프를 걸면
+          //   넓은 괄호(예 16↔36)의 중점(26)이 1/1.3 밖이라 막혀 수렴이 지연되거나 정체된다. 장비 범위 클램프
+          //   (`clampZoom`)는 그대로 적용한다.
+          zNext = this.camera.clampZoom((zLo + zHi) / 2);
+          // 괄호가 장비 해상도까지 좁혀졌거나 중점이 현재와 같으면 줌으로 더 가까이 갈 방법이 없다 → best 로 종료.
+          if (zHi - zLo <= LADDER_BRACKET_MIN_SPAN || Math.abs(zNext - ptz.zoom) <= ZOOM_EPS) {
+            const back = await this.restoreBest(camIdx, presetIdx, ptz, plateWidth, best, o.widthTol);
+            const fin = await this.finalizeAtDeviceLimit(
+              camIdx, presetIdx, back.restored ? back.ptz : ptz,
+              back.plate ?? plate, back.err ?? err, back.plateWidth ?? plateWidth, latched, fb,
+            );
+            logger.warn(
+              {
+                cat: 'centering', phase: 'ladder', rung, cam: camIdx, preset: presetIdx,
+                zLo: r3(zLo), zHi: r3(zHi), span: r3(zHi - zLo), zoom: fin.ptz.zoom,
+                plateWidth: fin.plateWidth === null ? null : r3(fin.plateWidth), targetPlateWidth: o.targetPlateWidth,
+                ok: fin.ok, recenterAttempts: fin.attempts, restoredToBest: back.restored,
+              },
+              '괄호가 장비 zoom 해상도까지 좁혀짐 — 최선 지점을 최종 위치로 확정',
+            );
+            return {
+              ok: fin.ok, ptz: fin.ptz, plate: fin.plate, err: fin.err, plateWidth: fin.plateWidth,
+              gain: fb, iterations: rung + 1, reason: 'zoom_resolution_limit',
+              widthShortfall: fin.plateWidth !== null && fin.plateWidth < o.targetPlateWidth,
+              recenterAttempts: fin.attempts,
+              ...(back.restored ? { restoredToBest: true } : {}),
+            };
+          }
+        } else {
+          // ── 괄호 미형성(아직 목표의 한쪽만 봤다) → 기존 동작 그대로 ──
+          // 게인무관 직행 목표를 maxZoomStepRatio 로 **대칭** 클램프(zoomToPlateWidth 와 동일 관용구).
+          // ★ 상승 전용이면 목표보다 큰 판(=근거리 클릭)에서 줌아웃 경로가 없어 zoom_saturated 로 실패한다 —
+          //   기존 zoomToPlateWidth 가 정상 수렴하던 케이스라 그대로 두면 "가까운 건 되던데 이제 안 된다" 회귀가 된다.
+          const zWant = zoomForWidth(ptz.zoom, plateWidth, o.targetPlateWidth, (z) => this.camera.clampZoom(z));
+          zNext = this.camera.clampZoom(
+            Math.min(ptz.zoom * o.maxZoomStepRatio, Math.max(ptz.zoom / o.maxZoomStepRatio, zWant)),
+          );
+        }
+        // 포화: 양방향 모두 막힌 경우(clampZoom 상한/하한). 폭 수렴은 위에서 이미 반환했으므로 여기는 항상 미수렴.
+        if (Math.abs(zNext - ptz.zoom) <= ZOOM_EPS) {
+          // [수정 13+17] 장비 상한에서의 폭 미달은 "장비가 할 수 있는 일을 전부 한 상태"일 수 있다.
+          //   정렬을 **전제로 요구하지 않고 만든다**: tol 밖이면 마지막으로 한 번 더 재중심하고 재확인한다.
+          const fin = await this.finalizeAtDeviceLimit(camIdx, presetIdx, ptz, plate, err, plateWidth, latched, fb);
+          logger.warn(
+            {
+              cat: 'centering', phase: 'ladder', rung, cam: camIdx, preset: presetIdx, zoom: fin.ptz.zoom,
+              plateWidth: fin.plateWidth === null ? null : r3(fin.plateWidth), targetPlateWidth: o.targetPlateWidth,
+              zoomCmd: r3(ptz.zoom), zoomAct: r3(got.act.zoom), sha: got.sha, atDeviceLimit: 'clampZoom', ok: fin.ok,
+              recenterAttempts: fin.attempts,
+              errX: fin.err === null ? null : r3(fin.err.errX), errY: fin.err === null ? null : r3(fin.err.errY),
+              // 방향을 사실대로 남긴다(구 문구는 '폭 목표 미달' 고정이라 폭 초과 케이스에서 거짓말을 했다).
+              shortfall: plateWidth < o.targetPlateWidth ? 'under' : 'over',
+            },
+            '사다리 zoom 포화 — 장비 상한 지점을 최종 위치로 확정',
+          );
+          return {
+            ok: fin.ok, ptz: fin.ptz, plate: fin.plate, err: fin.err, plateWidth: fin.plateWidth,
+            gain: fb, iterations: rung + 1, reason: 'zoom_saturated',
+            widthShortfall: fin.plateWidth !== null && fin.plateWidth < o.targetPlateWidth,
+            recenterAttempts: fin.attempts,
+          };
+        }
+        ptz = { ...ptz, zoom: zNext };
+        continue;
+      }
+
+      // 미검출 — 반경 기각이면 관측 가능하게 남긴다(마스터가 클릭 위치 문제인지 LPD 문제인지 알아야 한다).
+      if (got.rejected) {
+        rejectedEver = true;
+        logger.info(
+          {
+            cat: 'centering', phase: 'ladder', rung, cam: camIdx, preset: presetIdx,
+            click: { x: r3(point.x), y: r3(point.y) }, plates: got.count,
+            // ★ 거리 기준은 클릭점이 아니라 **조준 후 화면중앙**(rung prior)이다. 조준이 빗나가면 둘이 갈라지므로
+            //   기준점을 함께 남기고 필드명도 기준을 밝힌다(구 필드명 nearestDist 는 클릭 기준으로 오독됐다).
+            prior: { x: 0.5, y: 0.5 },
+            nearestDistFromPrior: got.nearestDist === null ? null : r3(got.nearestDist), radius: gate === null ? null : r3(gate),
+            // 원본(조준) 프레임 환산 거리 — 게이트가 스케일되므로 실제 판정은 이 값 대 initialRadiusNorm 이다.
+            k: r3(k), distAtAim: got.nearestDist === null ? null : r3(got.nearestDist / k),
+            zoomCmd: r3(ptz.zoom), zoomAct: r3(got.act.zoom), bytes: got.bytes, sha: got.sha,
+          },
+          '사다리 rung 반경 밖 판만 검출 → 대신 채택하지 않음',
+        );
+      }
+      if (latched) {
+        // (수정 18) 대상을 놓친 자리에 그대로 멈추지 말고, 도달했던 최선 폭 지점으로 되돌아가 끝낸다.
+        const back = await this.restoreBest(camIdx, presetIdx, ptz, null, best, o.widthTol);
+        return {
+          ok: false, ptz: back.ptz, plate: back.plate ?? plate, err: back.err ?? err,
+          plateWidth: back.plateWidth ?? plateWidth, gain: fb, iterations: rung + 1, reason: 'plate_lost',
+          ...(back.restored ? { restoredToBest: true } : {}),
+        };
+      }
+      // latch 전 미검출 → 눈먼 1스텝 줌인(광학중심 보존 가정).
+      // 배율은 latch 인지형: 검출이 하나도 없는 구간만 성긴 preLatchZoomStepRatio(칸수↓=소요시간↓),
+      // LPD 가 후보를 내기 시작하면 정밀 maxZoomStepRatio 로 되돌린다(반경 게이트 창을 지나치지 않도록).
+      const stepRatio = sawAnyPlate ? o.maxZoomStepRatio : o.preLatchZoomStepRatio;
+      const zNext = this.camera.clampZoom(ptz.zoom * stepRatio);
+      if (zNext <= ptz.zoom + ZOOM_EPS) {
+        logger.warn(
+          { cat: 'centering', phase: 'ladder', rung, cam: camIdx, preset: presetIdx, zoom: ptz.zoom, plates: got.count, rejectedEver, zoomCmd: r3(ptz.zoom), zoomAct: r3(got.act.zoom), sha: got.sha },
+          '사다리 최대 줌 도달 — 대상 판 미확보',
+        );
+        return {
+          ok: false, ptz, plate: null, err: null, plateWidth: null, gain: fb, iterations: rung + 1,
+          reason: rejectedEver ? 'no_plate_near_click' : 'plate_not_found_at_max_zoom',
+        };
+      }
+      ptz = { ...ptz, zoom: zNext };
+    }
+    // (수정 18) 예산 소진 시점이 도달했던 최선보다 유의하게 나쁘면(진동 등) 최선 지점으로 복귀해 끝낸다.
+    const back = await this.restoreBest(camIdx, presetIdx, ptz, plateWidth, best, o.widthTol);
+    logger.warn(
+      {
+        cat: 'centering', phase: 'ladder', cam: camIdx, preset: presetIdx, zoom: back.ptz.zoom,
+        plateWidth: back.plateWidth ?? plateWidth, rungBudget, latched, rejectedEver,
+        restoredToBest: back.restored, bestRung: best?.rung ?? null,
+      },
+      '사다리 rung 상한 소진',
+    );
+    return {
+      ok: false, ptz: back.ptz, plate: back.plate ?? plate, err: back.err ?? err,
+      plateWidth: back.plateWidth ?? plateWidth, gain: fb, iterations: rungBudget + 1,
+      reason: latched ? 'max_iterations' : rejectedEver ? 'no_plate_near_click' : 'plate_not_found_at_max_zoom',
+      ...(back.restored ? { restoredToBest: true } : {}),
+    };
+  }
+
+  /**
+   * (수정 21) **폭 수렴 성공 출구의 정렬 확인** — best-effort. **성공을 취소하지 않는다.**
+   *
+   * 무회귀가 이 함수의 제1 제약이다: 오늘 성공하는 케이스가 내일 실패하면 안 된다.
+   *  · 이미 tol 안 → **추가 카메라 왕복 0회**로 즉시 반환(대부분이 여기다 — 체감 시간 회귀 없음).
+   *  · tol 밖 → 재중심 1회 + 재확인. **실패하든 여전히 tol 밖이든 호출측은 ok:true 를 유지**하고,
+   *    남은 잔차를 `err`·`centerShortfall`·로그로 드러낸다(감추지 않되 실패로 바꾸지도 않는다).
+   *
+   * 반환 `aligned` 는 "실측으로 정렬이 확인됐는가"이며 성공 여부가 아니다(호출측이 성공을 결정한다).
+   */
+  private async finalizeConverged(
+    camIdx: number,
+    presetIdx: number,
+    ptz: Ptz,
+    plate: PlateBox,
+    err: { errX: number; errY: number },
+    plateWidth: number,
+    fb: PtzGain,
+  ): Promise<{
+    ptz: Ptz; plate: PlateBox; err: { errX: number; errY: number };
+    plateWidth: number; attempts: number; aligned: boolean;
+  }> {
+    const o = this.opts;
+    if (isCentered(err, o.centerTol)) return { ptz, plate, err, plateWidth, attempts: 0, aligned: true };
+
+    const c = centerOfRect(quadBoundingRect(plate.quad));
+    const re = await this.recenterTo(camIdx, { x: c.cx, y: c.cy }, ptz, fb);
+    if (!re.ok) {
+      logger.warn(
+        { cat: 'centering', phase: 'ladder', cam: camIdx, preset: presetIdx, errX: r3(err.errX), errY: r3(err.errY) },
+        '폭 수렴 후 정렬 보정 실패(이동 거절) — 완료는 유지하고 잔차를 보고',
+      );
+      return { ptz, plate, err, plateWidth, attempts: 1, aligned: false };
+    }
+    const again = await this.captureDetectPick(camIdx, presetIdx, re.ptz, priorRect({ cx: 0.5, cy: 0.5 }), o.matchRadiusNorm);
+    if (!again.plate) {
+      // 재확인에서 대상을 못 봤다 — 위치는 re.ptz(카메라 실제 위치), 수치는 **마지막 실측값**을 유지한다(지어내지 않는다).
+      logger.warn(
+        { cat: 'centering', phase: 'ladder', cam: camIdx, preset: presetIdx, errX: r3(err.errX), errY: r3(err.errY) },
+        '폭 수렴 후 정렬 재확인 실패(대상 미검출) — 완료는 유지하고 마지막 실측을 보고',
+      );
+      return { ptz: re.ptz, plate, err, plateWidth, attempts: 1, aligned: false };
+    }
+    const pr = quadBoundingRect(again.plate.quad);
+    const e2 = plateCenterError(pr);
+    return { ptz: re.ptz, plate: again.plate, err: e2, plateWidth: pr.w, attempts: 1, aligned: isCentered(e2, o.centerTol) };
+  }
+
+  /**
+   * (수정 17) **장비 줌 상한 지점을 최종 위치로 확정한다.**
+   *
+   * 마스터 요구: "36배줌 해도 번호판이 20% 안되면 거기서 그 부분이 최종 위치가 되도록."
+   * 상한에서 폭은 더 못 키우지만 **정렬은 아직 만들 수 있다**(줌 상한에서도 setcenter 는 동작한다).
+   * 그래서 정렬을 **전제로 요구하지 않고**, tol 밖이면 마지막으로 한 번 더 재중심하고 **실측으로 재확인**한다.
+   *
+   * ★ 금지선 유지: latch 하지 못했으면 재중심을 시도하지 않고 실패다. 재중심 후에도 tol 밖이거나
+   *   재확인에서 대상을 놓치면 **실패로 둔다**("했으니 됐다" 금지 — 수정 13 에서 세운 추정 금지 원칙).
+   * @returns attempts = 마지막 재중심 시도 횟수(0 = 이미 정렬돼 불요).
+   */
+  private async finalizeAtDeviceLimit(
+    camIdx: number,
+    presetIdx: number,
+    ptz: Ptz,
+    plate: PlateBox | null,
+    err: { errX: number; errY: number } | null,
+    plateWidth: number | null,
+    latched: boolean,
+    fb: PtzGain,
+  ): Promise<{
+    ok: boolean; ptz: Ptz; plate: PlateBox | null; err: { errX: number; errY: number } | null;
+    plateWidth: number | null; attempts: number;
+  }> {
+    const o = this.opts;
+    // 대상을 못 잡았으면 정렬을 만들 대상 자체가 없다(금지선) — 카메라를 건드리지 않고 실패.
+    if (!latched || !plate) return { ok: false, ptz, plate, err, plateWidth, attempts: 0 };
+
+    // ★ 먼저 **현재 위치에서 실측**한다. 호출 시점의 err/plate 는 이번 rung 안에서 이미 재중심이 나간 뒤라면
+    //   낡은 값이고, 그 낡은 중심으로 다시 재중심하면 같은 오프셋을 두 번 밀어 **반대편으로 넘어간다**
+    //   (구현 중 실측: err 0.06 → 재중심 → −0.06). "최종 위치"라고 말하려면 그 자리를 직접 재야 한다.
+    const now = await this.captureDetectPick(camIdx, presetIdx, ptz, priorRect({ cx: 0.5, cy: 0.5 }), o.matchRadiusNorm);
+    if (!now.plate) return { ok: false, ptz, plate, err, plateWidth, attempts: 0 }; // 대상 소실 — 위장 금지.
+    const pr = quadBoundingRect(now.plate.quad);
+    const e = plateCenterError(pr);
+    if (isCentered(e, o.centerTol)) {
+      return { ok: true, ptz, plate: now.plate, err: e, plateWidth: pr.w, attempts: 0 }; // 이미 정렬 — 그 자리가 최종.
+    }
+
+    // 정렬을 **만든다**: 방금 잰 판 중심으로 마지막 재중심 1회(줌 상한에서도 setcenter 는 동작한다).
+    const c = centerOfRect(pr);
+    const re = await this.recenterTo(camIdx, { x: c.cx, y: c.cy }, ptz, fb);
+    if (!re.ok) return { ok: false, ptz, plate: now.plate, err: e, plateWidth: pr.w, attempts: 1 };
+    // ★ 실측 재확인(추정 금지). latch 후이므로 추적 반경으로 신원을 유지한다.
+    const again = await this.captureDetectPick(camIdx, presetIdx, re.ptz, priorRect({ cx: 0.5, cy: 0.5 }), o.matchRadiusNorm);
+    if (!again.plate) return { ok: false, ptz: re.ptz, plate: now.plate, err: e, plateWidth: pr.w, attempts: 1 };
+    const pr2 = quadBoundingRect(again.plate.quad);
+    const err2 = plateCenterError(pr2);
+    return { ok: isCentered(err2, o.centerTol), ptz: re.ptz, plate: again.plate, err: err2, plateWidth: pr2.w, attempts: 1 };
+  }
+
+  /**
+   * (수정 18) **도달했던 최선 폭 지점으로 복귀**한다. 사다리가 자신의 최선보다 나쁜 상태로 끝나는 것을 막는다.
+   *
+   * 실측 배경: 장비 상단에서 폭은 zoom 에 선형이 아니다(라이브 실측 w/z 가 0.0013→0.0066 으로 5배 변화).
+   * 그래서 `zoomForWidth` 의 선형 목표가 크게 빗나가 zoom 36 ↔ 32.5 사이에서 폭이 0.238 ↔ 0.102 로
+   * **진동**했고, 마지막 rung 이 하필 나쁜 쪽이면 "다 확대해놓고 마지막에 작아지는" 결과가 된다.
+   *
+   * 복귀 기준은 `widthTol` 재사용 — "우리가 신경 쓰는 허용오차보다 더 나쁠 때만" 되돌린다(새 임계 없음).
+   * 복귀도 **실측으로 확인**하고(대상 재검출 실패 시 현재 상태 유지), 복귀 사실을 로그에 남긴다.
+   */
+  private async restoreBest(
+    camIdx: number,
+    presetIdx: number,
+    curPtz: Ptz,
+    curWidth: number | null,
+    best: { ptz: Ptz; plate: PlateBox; err: { errX: number; errY: number }; plateWidth: number; rung: number } | null,
+    widthTol: number,
+  ): Promise<{
+    restored: boolean; ptz: Ptz; plate: PlateBox | null;
+    err: { errX: number; errY: number } | null; plateWidth: number | null;
+  }> {
+    const o = this.opts;
+    if (!best) return { restored: false, ptz: curPtz, plate: null, err: null, plateWidth: null };
+    const bestDelta = Math.abs(best.plateWidth - o.targetPlateWidth);
+    // 현재 폭이 없으면(대상 소실) 최선 대비 무한히 나쁜 것으로 본다.
+    const curDelta = curWidth === null ? Infinity : Math.abs(curWidth - o.targetPlateWidth);
+    if (curDelta - bestDelta <= widthTol) return { restored: false, ptz: curPtz, plate: null, err: null, plateWidth: null };
+
+    const got = await this.captureDetectPick(camIdx, presetIdx, best.ptz, priorRect({ cx: 0.5, cy: 0.5 }), o.matchRadiusNorm);
+    if (!got.plate) {
+      // 복귀는 했으나 대상을 다시 못 잡았다 — 위치는 최선 지점이되 실측을 위장하지 않는다.
+      logger.warn(
+        { cat: 'centering', phase: 'ladder', cam: camIdx, preset: presetIdx, bestRung: best.rung, bestZoom: r3(best.ptz.zoom) },
+        '최선 지점 복귀 후 대상 재검출 실패 — 위치만 복귀(실측 미확인)',
+      );
+      return { restored: true, ptz: best.ptz, plate: null, err: null, plateWidth: null };
+    }
+    const pr = quadBoundingRect(got.plate.quad);
+    logger.info(
+      {
+        cat: 'centering', phase: 'ladder', cam: camIdx, preset: presetIdx, bestRung: best.rung,
+        bestZoom: r3(best.ptz.zoom), plateWidth: r3(pr.w), curWidth: curWidth === null ? null : r3(curWidth),
+      },
+      '종료 상태가 최선보다 나빠 최선 폭 지점으로 복귀',
+    );
+    return { restored: true, ptz: best.ptz, plate: got.plate, err: plateCenterError(pr), plateWidth: pr.w };
+  }
+
+  /**
+   * (수정 13) **장비 zoom 상한 도달 시 성공/실패 판정.**
+   *
+   * 마스터의 실제 목적은 "클릭한 차를 최대한 크게 본다"이고, 아래 세 조건이 모두 성립하면
+   * **장비가 할 수 있는 일을 전부 한 상태**다 → 목표 폭 미달이어도 성공으로 보고한다.
+   *   ① 클릭한 그 판을 latch 했다  ② 이번 rung **실측**이 중앙 정렬(centerTol) ③ 상한 도달이 사실 확인됨
+   * (③ 은 호출측이 clampZoom 포화 또는 zoomAct 연속 정체로 **확인한 자리에서만** 이 함수를 부른다 — 추정 금지.)
+   *
+   * ★ 위장 성공 금지 원칙과 충돌하지 않는 이유: 위장 성공은 "**클릭한 대상이 아닌 것**을 잡고 완료라 하는 것"이다.
+   *   여기서는 대상 신원(latch)과 정렬(중앙)이 모두 검증됐고, 미달한 것은 **장비의 물리 한계**뿐이며
+   *   그 사실도 `widthShortfall`/`reason` 으로 결과에 남는다. 정보를 지우지 않으므로 은닉이 아니다.
+   *   반대로 latch 실패나 미정렬은 여기서 **false 를 반환해 실패를 유지**한다 — 1순위 목적은 그대로 지켜진다.
+   */
+  private saturatedOutcome(
+    latched: boolean,
+    plate: PlateBox | null,
+    err: { errX: number; errY: number } | null,
+    centerTol: number,
+  ): boolean {
+    if (!latched || !plate || !err) return false; // 대상 미확보 → 여전히 실패(위장 성공 금지).
+    return isCentered(err, centerTol);            // 중앙 tol 밖 → 여전히 실패.
+  }
+
+  /**
+   * (사다리 전용) rung 예산 산출. **실질 종료는 `clampZoom` 포화**이고 이 값은 무한루프 방지 안전판이다 —
+   * 그래서 "설정된 `maxZoomStepRatio` 가 무엇이든 zoom 상한에 도달하는 것"이 보장되도록 계산한다.
+   *
+   * 등반 칸수 = ceil(log(zoomMax/startZoom) / log(ratio)). zoomMax 는 카메라에게 묻는다(clampZoom 위임 유지 —
+   * 사다리가 독자 상한을 두면 clampZoom 과 이중 진실이 된다). 여기에 latch 후 미세수렴 여유(LADDER_RUNG_SLACK)를
+   * 얹고 절대 상한(LADDER_RUNG_HARD_CAP)으로 바운드한다. `ladderMaxRungs` 명시 주입 시엔 그 값을 존중한다.
+   */
+  private ladderRungBudget(startZoom: number): number {
+    const explicit = this.opts.ladderMaxRungs;
+    if (explicit !== undefined) return Math.min(explicit, LADDER_RUNG_HARD_CAP);
+    // ★ 사다리는 두 배율을 쓴다(latch 전 preLatch / latch 후 max). 예산은 **보수적으로 작은 쪽**으로 잡는다 —
+    //   성긴 배율로 예산을 잡으면 정밀 배율 구간(latch 후)에서 칸이 모자라 목표 폭 직전에 잘린다.
+    //   실사용에서는 preLatch(2.0) > max(1.3) 이라 사실상 max 기준이며, 성긴 구간은 예산을 덜 쓸 뿐이다.
+    const ratio = Math.min(this.opts.maxZoomStepRatio, this.opts.preLatchZoomStepRatio);
+    // ratio ≤ 1 은 확대 불가 설정 — 첫 rung 의 포화 판정이 즉시 종료시키므로 예산은 최소로 둔다.
+    if (ratio <= 1 + ZOOM_EPS) return LADDER_RUNG_SLACK;
+    // ★ 예산은 **양방향**으로 센다. 대칭 클램프(줌아웃 수렴)가 들어간 뒤로는 시작 zoom 이 상한 근처일 때
+    //   등반 칸수가 ≈0 이 되어 예산이 SLACK 뿐인데, 정작 필요한 것은 하강 칸수다(실측: start zoom 36·큰 판 →
+    //   5칸 소진 후 폭 0.252 에서 max_iterations, 한 칸만 더 있으면 수렴). 사다리는 실패해도 PTZ 를 복원하지
+    //   않아 카메라가 상한에 주차되므로 **다음 클릭이 정확히 이 조건**이 된다 — 연쇄 실패를 막으려면 양방향이어야 한다.
+    const z0 = Math.max(startZoom, 1e-6);
+    const zoomMax = this.camera.clampZoom(Number.MAX_SAFE_INTEGER);
+    const zoomMin = Math.max(this.camera.clampZoom(0), 1e-6);
+    const span = Math.max(zoomMax / z0, z0 / zoomMin, 1);
+    const rungs = Math.ceil(Math.log(span) / Math.log(ratio));
+    return Math.min(rungs + LADDER_RUNG_SLACK, LADDER_RUNG_HARD_CAP);
+  }
+
+  /**
+   * (사다리 전용) 정규화 지점을 화면중앙으로 — **네이티브/기하 분기의 유일 지점**.
+   *
+   * 네이티브(휴컴스 ptz_centering setcenter): 정규화오차→도(°) 변환을 장비 펌웨어가 자기 FOV/줌 테이블로
+   * 수행하므로 게인·probe·damp 가 전부 불요하다(소프트웨어 추정치를 섞으면 오차원만 늘어난다).
+   * ★ setcenter 는 `move` 와 달리 정착 대기를 하지 않는다 → nativeAimSettleMs sleep 후 PTZ 재조회.
+   *   zoom 은 setcenter 가 건드리지 않으므로 **명령값을 그대로 유지**한다(응답 echo 불신 — 이 파일의 불변식).
+   * 기하 폴백(시뮬 등 네이티브 미지원): 개방루프 1샷 — move 로 명령하고 명령값을 상태로 삼는다.
+   */
+  private async recenterTo(
+    camIdx: number,
+    p: NormalizedPoint,
+    ptz: Ptz,
+    gainRef: PtzGain,
+  ): Promise<{ ok: boolean; ptz: Ptz; mode: 'native' | 'geometric' }> {
+    const native = this.camera.centerOnPoint;
+    if (native) {
+      const got = await native.call(this.camera, camIdx, p);
+      if (got.settled === false) {
+        // ★ 미정착 상태로 다음 rung 을 명령하면 카메라를 슬루 중간 지점으로 되돌린다(라이브 실패 원인).
+        //   조용히 진행하지 않고 조준 실패로 올린다.
+        logger.warn(
+          { cat: 'centering', phase: 'ladder', step: 'aim', cam: camIdx, point: { x: r3(p.x), y: r3(p.y) } },
+          '네이티브 조준 정착 미확인 → 조준 실패 처리(미정착 PTZ 로 다음 명령 금지)',
+        );
+        return { ok: false, ptz, mode: 'native' };
+      }
+      // 소스가 스스로 정착을 확인했으면(settled===true) 고정 sleep 은 불필요한 지연일 뿐이다.
+      // 정착 판정을 제공하지 않는 소스(settled===undefined)에는 기존 고정 대기를 폴백으로 유지한다.
+      if (got.settled === undefined) await this.sleep(this.opts.nativeAimSettleMs);
+      try {
+        const cur = await this.camera.getPtz(camIdx);
+        return { ok: true, ptz: { pan: cur.pan, tilt: cur.tilt, zoom: ptz.zoom }, mode: 'native' };
+      } catch {
+        // 조회 미지원/실패 소스는 setcenter 반환값으로 강등(조용한 실패 아님 — 이동 자체는 성공).
+        return { ok: true, ptz: { pan: got.pan, tilt: got.tilt, zoom: ptz.zoom }, mode: 'native' };
+      }
+    }
+    const aim = aimPtzForPoint(p, ptz, gainRef, LADDER_AIM_MAX_STEP);
+    const ok = await this.camera.move(camIdx, aim.pan, aim.tilt, aim.zoom);
+    return { ok, ptz: aim, mode: 'geometric' };
+  }
+
+  /**
    * probe 1회 이동 후 게인 추정(부호 포함). 검출·매칭 실패 → fallback 게인.
    * probe 위치의 관측은 다음 예측 prior 의 앵커로 반환한다(obs).
    */
@@ -386,7 +1136,7 @@ export class PlatePtz {
   }
 
   /**
-   * 명령 PTZ override 로 캡처 → LPD → prior 최근접 번호판.
+   * 명령 PTZ override 로 캡처 → LPD → prior 최근접 번호판(동작은 종전과 동일 — captureDetectPick 의 얇은 래퍼).
    * radius 가 주어지면 prior 로부터 그 거리를 넘는 후보는 기각한다(=대상 소실. 이웃 갈아타기 차단 — §2.5).
    */
   private async captureAndDetect(
@@ -396,18 +1146,45 @@ export class PlatePtz {
     prior: NormalizedRect,
     radius: number | null,
   ): Promise<PlateBox | null> {
+    return (await this.captureDetectPick(camIdx, presetIdx, ptz, prior, radius)).plate;
+  }
+
+  /**
+   * captureAndDetect 본체 + **기각 사유 관측용 부가정보**. 반환 null 이 "검출 0" 인지 "반경 밖 기각" 인지
+   * 호출측이 구분할 수 있어야 `no_plate` / `no_plate_near_click` 를 정직하게 가를 수 있다.
+   * count(검출 판 개수)·nearestDist(선정 후보까지 거리)는 라이브에서 게이트를 튜닝하기 위한 관측치다.
+   */
+  private async captureDetectPick(
+    camIdx: number,
+    presetIdx: number,
+    ptz: Ptz,
+    prior: NormalizedRect,
+    radius: number | null,
+  ): Promise<{
+    plate: PlateBox | null; rejected: boolean; count: number; nearestDist: number | null;
+    /** 진단용: 캡처가 보고한 **장비 실측 PTZ**(명령값이 아니다) + 프레임 지문. */
+    act: Ptz; bytes: number; sha: string;
+  }> {
     const cap = await this.camera.requestImage(camIdx, presetIdx, ptz);
     this.onFrame?.(cap.jpg, camIdx, presetIdx);
     await this.sleep(this.opts.settleMs);
     const plates = await this.lpd.detect(cap.jpg);
+    // 진단(수정 9): 장비 실측 PTZ + 프레임 지문. 인접 rung 이 같은 지문이면 같은 이미지를 분석한 것이다.
+    const diag = {
+      act: { pan: cap.pan, tilt: cap.tilt, zoom: cap.zoom },
+      bytes: cap.jpg.length,
+      sha: createHash('sha1').update(cap.jpg).digest('hex').slice(0, 8),
+    };
     // 대상선정: peerOffsets 전달 시 자기 Voronoi 셀 소유 판만(이웃 latch 불가), 미전달 시 기존 화면중앙 최근접(하위호환).
     const picked = this.opts.peerOffsets
       ? pickOwnedByOffsets(plates, prior, this.opts.peerOffsets)
       : pickNearestPlate(plates, prior);
-    if (!picked || radius === null) return picked;
+    if (!picked) return { plate: null, rejected: false, count: plates.length, nearestDist: null, ...diag };
     const c = centerOfRect(quadBoundingRect(picked.quad));
     const t = centerOfRect(prior);
-    return Math.hypot(c.cx - t.cx, c.cy - t.cy) <= radius ? picked : null;
+    const dist = Math.hypot(c.cx - t.cx, c.cy - t.cy);
+    if (radius !== null && dist > radius) return { plate: null, rejected: true, count: plates.length, nearestDist: dist, ...diag };
+    return { plate: picked, rejected: false, count: plates.length, nearestDist: dist, ...diag };
   }
 }
 

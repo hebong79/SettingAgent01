@@ -248,6 +248,7 @@ export class CaptureJob {
     this.llmFloorUnavailable = false;
     this.llmOccupancyUnavailable = false;
     this.lastFrameByPreset.clear();
+    this.lastFrame = undefined; // ★ 프리셋별 버퍼만 비우고 이걸 남기면 /capture/frame 이 직전 run 의 화면을 서빙한다.
     this.cuboidsByPreset.clear(); // 이전 run 의 육면체 잔여 제거(인메모리 — DB 무접촉).
     // 인메모리 누적 초기화(구 DB 중간테이블 대체 — 설계서 §2.2).
     this.dets = [];
