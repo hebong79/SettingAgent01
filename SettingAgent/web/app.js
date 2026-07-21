@@ -2342,6 +2342,8 @@ async function calStart() {
 
 // 동시 클릭 방지 락(개별 센터라이징 진행 중 중복 발화 차단).
 let calPointBusy = false;
+// mousedown 으로 조준을 예약하고 mouseup 에서 발화하기 위한 대기 표식(마스터 요청 — 버튼을 뗄 때 동작).
+let calClickPending = false;
 
 // 개별(클릭) 센터라이징 발화(설계서 §3.4) — calStart 축소판. 저장 없음(POST /calibrate/point).
 // mode='point'=클릭 지점을 화면중앙으로(검출없음·zoom 불변) / 'plate-zoom'=번호판 center+zoom.
@@ -3275,11 +3277,9 @@ function wireOverlayEditing() {
     // 미선택(off)이면 이 분기를 건너뛰어 기존 편집 동작 100% 보존. Ctrl 은 기존 편집 제스처라 제외.
     const clickMode = $('cal-click-mode')?.value;
     if (clickMode && clickMode !== 'off' && !e.ctrlKey) {
-      const { nx, ny } = eventToNorm(e);
+      // 발화는 mouseup 에서 한다(마스터 요청) — down 은 기존 편집으로 새지 않게 소비만 하고 대기 표식을 남긴다.
       e.preventDefault();
-      // center(개별 center)=클릭 지점 자체를 화면중앙으로('point'), center-zoom=번호판 center+zoom('plate-zoom').
-      const mode = clickMode === 'center-zoom' ? 'plate-zoom' : 'point';
-      void calPointCenter(nx, ny, mode);
+      calClickPending = true;
       return;
     }
     const { nx, ny } = eventToNorm(e);
@@ -3398,6 +3398,19 @@ function wireOverlayEditing() {
     }
     dragState.last = { nx, ny };
     drawRoiOverlay();
+  });
+
+  // mouseup: 개별 센터라이징 발화(down 에서 예약된 경우) → 뗀 지점을 화면중앙으로.
+  // window 로 받아 오버레이 밖에서 뗀 경우에도 예약을 반드시 해제한다(유령 발화 방지).
+  window.addEventListener('mouseup', (e) => {
+    if (!calClickPending) return;
+    calClickPending = false;
+    if (!overlay.contains(e.target)) return; // 밖에서 뗌 = 취소.
+    const clickMode = $('cal-click-mode')?.value;
+    if (!clickMode || clickMode === 'off') return; // 누른 뒤 콤보를 끈 경우.
+    const { nx, ny } = eventToNorm(e);
+    // center(개별 center)=뗀 지점 자체를 화면중앙으로('point'), center-zoom=번호판 center+zoom('plate-zoom').
+    void calPointCenter(nx, ny, clickMode === 'center-zoom' ? 'plate-zoom' : 'point');
   });
 
   // mouseup: 이동 확정. 검출 편집(det*)은 임시라 markDirty(mapping 미저장 표시) 생략.
