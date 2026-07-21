@@ -274,11 +274,11 @@ describe('B-1.4 saveCenteringSlots 게이트(centered-only)', () => {
   });
 });
 
-// ── B-1.5: R3 스냅샷 — done 시 saveSnapshot 1회, error 미호출, 미주입 no-op ──
+// ── B-1.5: R3 스냅샷 — done 시 아카이브+최종결과물 2회, error 미호출, 미주입 no-op ──
 describe('B-1.5 saveSetupSnapshot(R3)', () => {
   const box: NormalizedRect = { x: 0.62, y: 0.62, w: 0.05, h: 0.03 };
 
-  it('done 경로: saveSnapshot 1회 — name Setup_ prefix, payload={createdAt, slots, centering:items}', async () => {
+  it('done 경로: saveSnapshot 2회 — Setup_ 아카이브 + setup_result 최종결과물', async () => {
     const snap: Array<{ name: string; data: unknown }> = [];
     const saveStore = { saveSnapshot: (name: string, data: unknown) => { snap.push({ name, data }); return name; } };
     const s = captureStub();
@@ -287,12 +287,36 @@ describe('B-1.5 saveSetupSnapshot(R3)', () => {
     cal.start();
     await waitDone(cal);
     expect(cal.getStatus().state).toBe('done');
-    expect(snap).toHaveLength(1); // ★ 정확히 1회(잡당 1)
+    expect(snap).toHaveLength(2); // ★ 아카이브 1 + 최종결과물 1(잡당 각 1회)
     expect(snap[0].name).toMatch(/^Setup_\d{8}_\d{6}$/); // Setup_YYYYMMDD_HHMMSS
     const payload = snap[0].data as { createdAt: string; slots: SlotSetupView[]; centering: SlotPtzItem[] };
     expect(payload.createdAt).toBe('T'); // now() 주입값
     expect(payload.slots).toBe(views); // getSlotSetup() 재조회 결과(PTZ 반영 뷰)
     expect(payload.centering).toBe(getSaved()!.items); // 센터링 상세(items) 그대로
+
+    // 최종결과물: 고정 이름 setup_result + 샘플 스키마(slots[])
+    expect(snap[1].name).toBe('setup_result');
+    const result = snap[1].data as { slots: Array<{ slotId: number; floor_roi: unknown; occupy_roi: unknown; centering: unknown }> };
+    expect(result.slots).toHaveLength(1);
+    expect(result.slots[0].slotId).toBe(7);
+  });
+
+  it('아카이브 저장이 실패해도 setup_result 는 기록(각자 best-effort·독립)', async () => {
+    const names: string[] = [];
+    const saveStore = {
+      saveSnapshot: (name: string) => {
+        names.push(name);
+        if (name.startsWith('Setup_')) throw new Error('archive io fail');
+        return name;
+      },
+    };
+    const s = captureStub();
+    const views = [view(7, box)];
+    const { cal } = makeCal({ makePlatePtz: s.make, saveStore, store: storeWith(views) }, views);
+    cal.start();
+    await waitDone(cal);
+    expect(cal.getStatus().state).toBe('done');
+    expect(names).toContain('setup_result'); // ★ 아카이브 실패에 물리지 않는다
   });
 
   it('error 경로: writer throw → state error → saveSnapshot 미호출(부분·불신 미기록)', async () => {
