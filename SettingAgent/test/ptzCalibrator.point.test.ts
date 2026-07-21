@@ -158,6 +158,22 @@ describe('centerOnPoint — 클릭 point = plateRoi prior (§5-A-1)', () => {
   });
 });
 
+describe('centerOnPoint — 기준 PTZ = 현재 PTZ (실카 안전장치)', () => {
+  it('camera.getPtz 를 호출해 그 값을 centerOnPlate 시작 PTZ 로 쓴다(프리셋 테이블 없는 실카 대비)', async () => {
+    const CUR: Ptz = { pan: -141.479, tilt: -3.2, zoom: 2 };
+    const getPtzCalls: number[] = [];
+    const camera = {
+      ...makeCamera(),
+      getPtz: async (cam: number) => { getPtzCalls.push(cam); return CUR; },
+    } as unknown as CameraClient;
+    const { cal, spy } = build({ camera, center: centerOkResult });
+    await cal.centerOnPoint(1, 1, PT, { zoom: false });
+
+    expect(getPtzCalls).toEqual([1]);
+    expect(spy.recs[0].centerArgs?.startPtz).toEqual(CUR); // 프리셋(PRESET_PTZ)이 아니라 현재 PTZ.
+  });
+});
+
 describe('centerOnPoint — 저장 스파이 0회 (§5-A-2 핵심 회귀 가드)', () => {
   it('성공 경로: upsertSlotCentering·writer·saveSnapshot 전부 0회', async () => {
     const { cal, upserts, writes, snaps } = build({ center: centerOkResult, zoom: zoomOkResult });

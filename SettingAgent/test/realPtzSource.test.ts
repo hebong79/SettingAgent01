@@ -109,7 +109,8 @@ describe('RealPtzSource — Hucoms HTTP API V1.22', () => {
     await source.login('admin', 'pw');
     seen = [];
     expect(await source.move(1, { pan: 180, tilt: 90, zoom: 36 })).toBe(true);
-    const move = seen.at(-1)!;
+    // move 는 goptzfpos 뒤에 정착 폴링(getptzfpos)을 이어 붙이므로 마지막 요청이 아닌 goptzfpos 를 집는다.
+    const move = seen.find((request) => request.query.get('action') === 'goptzfpos')!;
     expect(move.path).toBe('/cgi-bin/control/ptzf_status.cgi');
     expect(move.query.get('action')).toBe('goptzfpos');
     expect(move.query.get('panpos')).toBe('35999');
