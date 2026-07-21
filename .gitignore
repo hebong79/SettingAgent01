@@ -22,6 +22,10 @@ SettingAgent/save/
 # 정밀수집 결과 보조 미러(reports/*, 런타임 누적, 커밋 제외)
 SettingAgent/reports/
 *.log
+# 센터라이징 기준 프레임(런타임 생성 JPEG, 커밋 제외)
+SettingAgent/data/refframes/
+# 코드 진단 스크래치(일회성 진단 산출물, 커밋 제외)
+SettingAgent/_diag_chord/
 # 정밀 수집 관측 DB(런타임 누적, 커밋 제외)
 *.sqlite
 *.sqlite-shm
