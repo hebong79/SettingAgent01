@@ -1,107 +1,160 @@
-# 04 문서화·영향도 분석 요약 — 개별 center+zoom (이터레이션 1+2+3 누적)
+# 영향도 분석 — 'DB 보기'(#roi-db) 소스 전환 수정
 
-작성: 2026-07-21 · 문서화(documenter)
-이터레이션 1 문서: `SettingAgent/docs/20260721_161759_클릭센터줌_반경게이트_줌사다리.md`
-이터레이션 2 문서: `SettingAgent/docs/20260721_175130_클릭센터줌_실카라이브결함_zoomRange정정.md`
-**이터레이션 3 문서(신규)**: `SettingAgent/docs/20260721_191430_클릭센터줌_상한확정_진동제거_정렬무회귀.md`
+작성: 2026-07-21 · documenter
+최종 문서: `docs/20260721_215536_DB보기_소스전환_수정.md`
+변경 파일: `web/app.js`, `web/index.html` (+ 신규 `test/dbViewSourceSwitch.test.ts`)
 
-이 파일은 이터레이션 3(수정 17~21) 반영으로 **갱신**한 것이다. 이터레이션 1·2 시점 내용은 각 이터레이션 문서 §4 참조. 아래 §이터레이션 3 섹션이 이번 갱신분이며, 그 위 섹션들은 이터레이션 2 시점 그대로 보존한다.
+## 1. 변경 범위 요약
 
----
+`drawOccupancyOverlay`/`drawDetectOverlay`(LPD 분기)/`#roi-db` change 핸들러 3곳의 렌더 우선순위·로드 타이밍 수정 + `drawDbOccupancy` 신규 함수. 서버 API·DB 스키마·다른 에이전트 코드는 미변경.
 
-## ★ 이터레이션 3 갱신분 (수정 17~21)
+## 2. 파일별 파급
 
-### 반전 요약(이터레이션 3)
-마스터 2차 실카 검증에서 양쪽 끝 먼 차량 조준이 성공(이터레이션 2 zoomRange 정정이 주효)했고, 남은 3건을 처리했다. 그 과정에서 "사다리가 더 나쁜 상태로 끝난다"는 리더의 로그 관측이 **1회성이 아니라 3주기 반복 진동**이었고, 원인이 **뷰어 zoom이 raw 엔코더의 선형 사상이지 광학 배율의 선형 사상이 아니라는 것**(실측 `w/z`가 16배→36배 구간에서 5배 변화)임이 드러났다. 대응은 사다리의 선형 외삽(`zWant=zoom×target/width`)을 **모델 무가정 이분 탐색**으로 교체하는 것이었다. 사다리의 핵심 제어 방정식(latch·게이트 스케일링·성공 판정 조건)은 "다음 zoom을 고르는 방법" 외에는 이번에도 손대지 않았다.
+| 파일/영역 | 영향 | 근거 |
+|---|---|---|
+| `web/app.js` | `drawOccupancyOverlay`(hasLive 게이트 제거) · `drawDbOccupancy`(신규) · `drawDetectOverlay` LPD 분기 순서 전환 · `#roi-db` 핸들러 async화. 순수 렌더/이벤트 로직만 변경, 데이터 모델·상태 스키마(`state.*`) 추가 없음 | `git diff web/app.js` |
+| `web/index.html` | `#roi-db` 라벨 `title` 텍스트만 변경(문구 갱신, DOM 구조·id·class 무변경) | `git diff web/index.html` |
+| 서버(`src/api/*`, `SqliteStore`) | **무접촉**. `GET /capture/slots` 요청/응답 shape 변경 없음 | 배경 진단에서 서버는 정상 확인, 수정 대상에서 제외 |
+| DB(`slot_setup` 테이블) | **무접촉**. 스키마·값 변경 없음 | 읽기 전용 조회 경로만 관여 |
+| `@parkagent/types`(공유 패키지) | 무변경. 신규/변경 필드 없음 | 이번 변경은 프런트엔드 렌더 분기뿐, 타입 계약 접촉 없음 |
+| ActionAgent / DMAgent | **영향 없음**. SettingAgent 뷰어(`web/`)는 두 에이전트가 참조하지 않는 독립 UI 계층 | REST 계약·공유 타입 모두 무변경이므로 전파 경로 없음 |
 
-### 변경 파일(이터레이션 3, git diff 기준)
-- `src/calibrate/platePtz.ts` — 신규 private 메서드 3건: `finalizeAtDeviceLimit()`(수정 17, 상한 도달 시 재중심 1회로 정렬을 "만들어" 최종 확정) · `restoreBest()`(수정 18, 종료 상태가 최선보다 `widthTol`만큼 더 나쁘면 최선 지점 복귀) · `finalizeConverged()`(수정 21, 폭 수렴 성공 출구의 무회귀 정렬 확인). 이분 탐색 로직(수정 20, `LADDER_BRACKET_MIN_SPAN=0.01`) + `PlatePtzFailReason`에 `'zoom_resolution_limit'` 추가. 신규 결과 필드: `recenterAttempts`·`restoredToBest`·`centerShortfall`(전부 옵셔널)
-- `web/app.js` — 신규 헬퍼 `moveBasePtz()`(수정 19, 이동 직전 장비 실측 기준화 + 조회 실패 시 이동 차단) + 완료 메시지 일반화(수정 20)
-- 신규/확장 테스트: `test/platePtzLadder.test.ts` L7(5, 수정 17·18) · L8(4, 수정 20 — **`opticalMock` 임의 곡선 주입 스텁 신규 도입**) · L9(5, 수정 21)
+## 3. 부수효과 — `renderSlotList()`의 `finalized` 분기 활성화 범위 확대
 
-### 무접촉/무변경 확인(이터레이션 3)
-- `src/api/calibrateRoutes.ts` — 이번에도 무접촉.
-- `config/`·`src/config/toolsConfig.ts` — 이터레이션 3은 config를 건드리지 않는다(이터레이션 2의 zoomRange 정정만 유효).
-- 사다리 latch 판정·게이트 스케일링(`k=zoom/aimZoom`)·`preLatchZoomStepRatio`·성공 조건(`isWidthConverged`) — **무변경**. 수정 20이 바꾼 것은 다음 zoom을 고르는 방법(외삽→괄호 이분)뿐이다.
-- `@parkagent/types` — 변경 없음. 신규 필드(`recenterAttempts`/`restoredToBest`/`centerShortfall`/`zoom_resolution_limit`)는 전부 `platePtz.ts` 내부 로컬 타입 → **타 에이전트 전파 없음**.
+`renderSlotList()`(`app.js:1085`)는 `state.parkingSlotsByKey`가 채워져 있으면(`finalized = true`, `app.js:1091`) `buildFlatSlotRows`로 좌측 주차면 목록 패널을 전역 인덱스 순 평면 목록(DB 소스)으로 렌더한다. 이 분기는 `#roi-db` 체크와 별개로, `state.parkingSlotsByKey`의 존재 여부만으로 결정된다.
 
-### REST 계약 변경(이터레이션 3)
-- 엔드포인트·요청·응답 shape 무변경.
-- 신규 옵셔널 필드 3종(`recenterAttempts`·`restoredToBest`·`centerShortfall`) + `PlatePtzFailReason` 신규 값 `'zoom_resolution_limit'` — 전부 하위호환.
+이번 수정으로 `#roi-db` change 핸들러가 소스 미로드 시 `loadParkingSlots()`를 직접 호출하게 됐으므로(§3.4, 최종 문서 참고), **제어·모니터링 탭에서 'DB 보기'를 처음 켜는 순간부터** `state.parkingSlotsByKey`가 채워지고, 이후 어떤 이유로든 `renderSlotList()`가 재호출되면(검출 도착 등) 좌측 목록 패널도 `finalized` 분기(DB 소스 평면 목록)로 전환된다.
 
-### 거짓 성공 금지선 재점검(이터레이션 3 — 구현자 자체 재확인, QA 독립 재실행 없음)
-수정 17이 상한 도달 시 성공 판정을 확장하지만, latch 실패·반경 밖 판·재중심 후 tol 밖·재확인 대상 소실·재중심 명령 거절·이웃 갈아타기·폭 미달 은닉 7개 금지선을 코드 경로로 재대조해 전부 차단을 재확인했다(이터레이션 2 문서 §S2에서 QA가 세운 반례 7건과 동일 구조). 수정 21은 `ok:true`→`ok:false` 전환을 만들지 않는 무회귀 설계이며, 이는 L9 테스트(§아래 검증 상태 요약)로 고정됐다. **다만 이 재점검 자체는 구현자 자체 확인이며, 03_qa_report.md에 이터레이션 3 전용 검증 섹션은 없다** — 아래 "검증 상태 요약(이터레이션 3)" 참조.
+- **이전 동작**: 이 분기는 사실상 '정밀 수집' 탭을 한 번이라도 방문해야만 활성화됐다(그 탭의 `setTab` 진입 로직만 `loadParkingSlots()`를 호출했으므로).
+- **이후 동작**: 제어·모니터링 탭에서도 `#roi-db` 체크 한 번으로 동일하게 활성화될 수 있다.
+- **판단**: 목록 패널의 렌더 함수(`buildFlatSlotRows`) 자체는 무변경이고, 표시되는 데이터도 동일한 DB 소스이므로 회귀가 아니라 '더 이른 시점에 같은 화면이 뜨는' 부수효과로 판단한다. 다만 마스터가 제어·모니터링 탭에서 이 목록 패널이 갑자기 나타나는 것을 예상 밖 동작으로 느낄 가능성은 있어 명시적으로 기록해 둔다. **코드 수정 없이 관찰 사실로만 남긴다.**
 
-### 검증 상태 요약(이터레이션 3, 사실 그대로)
-- **191파일 / 2260테스트 전건 통과 — 리더 독립 확인**(`tsc --noEmit` 포함).
-- 경과: 191/2246(이터레이션 2 마감, 리더 확인) → 191/2251(수정 17~19 후, 구현자 자체 보고) → 191/2255(수정 20 후, 구현자 자체 보고) → **191/2260(수정 21 후, 구현자 자체 보고 + 리더 독립 확인)**.
-- **`03_qa_report.md`에는 수정 17~21(이터레이션 3)에 대한 전용 검증 섹션이 없다.** 이터레이션 1·2에서 QA가 수행한 독립 재실행·반례 설계·델타 검증 패턴이 이번 범위에는 적용되지 않았다 — 이 공백을 은닉하지 않는다.
+## 4. 시각적 트레이드오프 — 'DB 보기' 체크 시 라이브 검출 박스 은닉(의도된 동작)
 
-### 운영 주의사항(이터레이션 3 — 이터레이션 2와 동일, 재확인 필요)
-- `web/`은 nodemon 감시 밖 — 수정 19·20의 UI 동작(이동 기준 실측화·완료 메시지)을 반영하려면 브라우저 강력 새로고침(Ctrl+F5) 필요. **이터레이션 2 검증에서 이 절차 누락이 "수정이 안 먹은 것"으로 보인 유력 원인**이었으므로 3차 검증 전 특히 주지시킬 것.
-- config 변경 없음(이번 이터레이션은 서버 재기동 불요).
+수정 전에는 'DB 보기'가 라이브 없을 때만 보이는 폴백이라 라이브·DB가 동시에 화면에 보이는 경우는 없었다(어차피 라이브가 있으면 DB는 안 그려졌다). 수정 후에도 동시 표시는 없다 — 단, 방향이 바뀌었다: **`#roi-db` 체크 시에는 라이브 검출 유무와 무관하게 DB가 우선하고 라이브 박스는 그려지지 않는다**(VPD/LPD/점유영역 공통, "소스 전환" 규약). 이는 요구사항대로 의도된 동작이며, 라이브 검출 결과를 확인하려면 'DB 보기'를 꺼야 한다.
 
-### 확인 필요(이터레이션 3 — 불확실, 단정하지 않음)
-- **마스터 3차 실카 검증 미실시.** 수정 17~20의 인과(§진동 산술 포함)는 로그 사후분석 + `opticalMock` 유닛 테스트로 확정됐으나, 이분 탐색이 실제 장비에서 진동을 제거하는지는 미실측.
-- **`centerOnPlate`·`zoomToPlateWidth`(배치 경로)는 여전히 실카 미검증** — 실카 배치 센터라이징 실행 전 별도 검증 필요.
-- **`real-camera-2` 미실측**(이터레이션 2부터 이어지는 한계, 해소되지 않음).
-- **느리지만 계속 움직이는 장비의 rung 대기**(이터레이션 2 QA S4) — 이번 이터레이션에서 다루지 않음, 그대로 남음.
-- QA의 독립 재실행이 수정 17~21 범위에 없음(위 검증 상태 요약 참조).
+## 5. 확인 필요(불확실 항목)
+
+- 없음. 서버·DB·타 에이전트 무접촉은 코드 경로(REST 핸들러·SqliteStore 호출부)와 diff로 직접 확인했고, 이번 변경이 건드린 함수 3개(`drawOccupancyOverlay`/`drawDetectOverlay`/`#roi-db` 핸들러) 전부 `web/app.js` 내부 순수 렌더/이벤트 로직으로 범위가 닫혀 있다.
+
+## 6. 테스트 근거 (documenter 자체 실행 아님 — 검증자 실행 결과 인용)
+
+- 신규 `test/dbViewSourceSwitch.test.ts`: 5케이스 전부 통과.
+- 전체 `npx vitest run`: 193 파일 / 2271 테스트 전건 통과(회귀 0).
+- 라이브 서버 sharp 합성 육안 확인: LPD/점유영역 DB 오버레이가 실프레임 위 실제 위치에 정확히 안착.
+- VPD DB 오버레이는 `vpd_bbox` 전건 `null`이라 미검증 대상 자체가 없음(데이터 부재, 결함 아님) — 최종 문서 §6 참고.
+
+상세 서사·코드 diff·검증 원문은 최종 문서(`docs/20260721_215536_DB보기_소스전환_수정.md`)를 참고.
 
 ---
 
-## 이터레이션 1+2 누적분 (보존 — 이터레이션 2 시점 그대로)
+# 영향도 분석(추가) — '점유영역 생성' 버튼(DB lpd → occupy_range 재생성)
 
-이 파일은 이터레이션 2(수정 7~16 + 리더 파이프라인 밖 핫픽스) 반영으로 **갱신**한 것이다. 이터레이션 1 시점 내용은 이터레이션 1 문서 §4 참조.
+작성: 2026-07-21 · documenter
+최종 문서: `docs/20260721_221700_점유영역생성_버튼_공통진입점.md`
+변경 파일: `src/capture/floorRoi.ts`(신규 export) · `src/calibrate/PlateDiscoveryJob.ts`(리팩토링) · `src/api/captureRoutes.ts`(신규 라우트) · `web/index.html` · `web/app.js` (+ 신규 `test/slotOccupyBuild.test.ts`, `test/viewerPtzSyncCoverage.test.ts` 1행 추가)
+
+## 1. 변경 범위 요약
+
+기존 discovery 인라인 점유영역 계산식을 `buildOccupyRangeFromPlate`(신규 export)로 추출해 `PlateDiscoveryJob`과 신규 라우트 `POST /capture/slots/occupy`가 공유하게 했다. 신규 라우트는 `slot_setup.lpd`가 있는 슬롯만 `occupy_range`를 재생성하는 부분 UPDATE(`upsertSlotLpd`)이며, 새 기하 알고리즘·DB 스키마 변경은 없다.
+
+## 2. 확인 항목별 결론
+
+| 확인 항목 | 결론 | 근거 |
+|---|---|---|
+| `PlateDiscoveryJob` 리팩토링이 동작 불변인가 | **불변**. `stringify5(buildPlateAnchoredQuad(quadBoundingRect(it.lpdOrig), it.lpdOrig))` → `stringify5(buildOccupyRangeFromPlate(it.lpdOrig))`로 치환했고, `buildOccupyRangeFromPlate`의 구현이 정확히 그 식이므로 계산 결과가 100% 동일한 단순 함수 추출이다. 더 이상 쓰지 않는 `quadBoundingRect` import를 제거했다(고아 import 정리). | `git diff src/calibrate/PlateDiscoveryJob.ts` |
+| `upsertSlotLpd`의 `occupyRange` undefined 규약(무접촉)과 정합하는가 | **정합**. `SqliteStore.upsertSlotLpd`는 `occupyRange`가 동봉되지 않은 행만 `lpd_obb`만 쓰는 얕은 분기(wipe 방지)를 타고, 동봉되면 `lpd_obb`+`occupy_range`를 함께 쓰는 분기(`stmtLpdOccupy`)를 탄다(`SqliteStore.ts:297~303`). 신규 라우트는 대상 슬롯마다 `occupyRange`를 **항상 명시적으로 채워** 보내므로 후자 분기를 타며, 이는 "이 라우트의 목적이 바로 occupy_range 생성"이라는 의도와 일치한다. lpd가 없는 슬롯은 애초에 `rows`에 넣지 않아(스킵) 그 슬롯의 행 자체가 `upsertSlotLpd` 호출에 포함되지 않는다 — 무접촉이 코드 구조상 보장된다. | `src/api/captureRoutes.ts` 신규 라우트 본문, `SqliteStore.ts:297~303` |
+| Finalizer 경로(차량 bbox 기반 `buildPlateAnchoredQuad`)가 미변경인가 | **미변경**. `git diff`에 `Finalizer.ts`는 나타나지 않는다. `buildPlateAnchoredQuad` 함수 자체(`floorRoi.ts`)도 시그니처·본문 무변경 — `buildOccupyRangeFromPlate`는 그 함수를 호출하는 새 wrapper를 옆에 추가했을 뿐이다. Finalizer가 차량 bbox를 가진 경우 여전히 그 bbox로 `buildPlateAnchoredQuad`를 직접 호출하는 기존 경로를 그대로 쓴다(신규 라우트는 판-only 경로만 제공). | `git diff --stat`에 `Finalizer.ts` 부재, `floorRoi.ts` diff(순수 추가) |
+| ActionAgent/DMAgent·DB 스키마에 영향이 있는가 | **없음**. `slot_setup` 테이블 컬럼 추가·변경 없음(기존 `occupy_range` 컬럼에 대한 UPDATE뿐). `@parkagent/types`(공유 계약) 변경 없음 — 이번 변경 전부가 SettingAgent 내부(`src/capture`·`src/calibrate`·`src/api`·`web`)에 닫혀 있다. ActionAgent/DMAgent가 참조하는 REST 계약·공유 타입에 접촉이 없으므로 전파 경로 자체가 없다. | `git diff --stat`(SettingAgent 외부 파일 없음), `SlotLpdRow`(`src/capture/types.ts`)가 이미 `occupyRange?: string \| null` 옵셔널 필드를 갖고 있어 타입 확장도 불필요했음 |
+
+## 3. 회귀 가드 — `viewerPtzSyncCoverage.test.ts`와의 결합
+
+이 테스트는 모든 라우트가 카메라 이동 여부로 분류돼 있음을 강제하는 가드다. 신규 라우트를 등록하지 않으면 이 테스트가 실패해 "분류 누락 라우트"를 자동 검출한다 — 이번에 `/capture/slots/occupy`를 `NO_MOVE`로 등록해 통과시켰다. 이는 향후 라우트 추가에도 적용되는 기존 안전장치이며, 이번 변경이 그 계약을 준수했음을 보여준다.
+
+## 4. 확인 필요(불확실 항목)
+
+- 없음. §2의 네 항목 모두 diff·코드 경로로 직접 대조했고, 이번 변경이 건드린 파일(`floorRoi.ts`/`PlateDiscoveryJob.ts`/`captureRoutes.ts`/`web/*`) 범위가 SettingAgent 내부로 닫혀 있어 외부 전파 경로가 없다.
+
+## 5. 테스트 근거 (검증자 실행 결과 인용)
+
+- 신규 `test/slotOccupyBuild.test.ts`: 8케이스 전부 통과(공통함수 결정성, cam/preset 한정 갱신, lpd 없는 슬롯 보존, 기존 occupy 재생성, 타 프리셋·타 컬럼 불변, 전 프리셋 모드, 400 검증, GET 노출).
+- 전체 `npx vitest run`: **194 파일 / 2279 테스트 전건 통과**(회귀 0). `tsc --noEmit` 클린.
+- 라이브 검증(실서버 13020): `POST /capture/slots/occupy {cam:1,preset:1}` → `{ok:true,updated:7,skipped:0,failed:0}`. 재생성 결과를 discovery 산출 `occupy_range`와 비교 — 7슬롯 전부 소수점 5자리 마지막 자리에서만 ±0.00001 차이(반올림 경로 차이, 알고리즘 불일치 아님). 두 경로가 사실상 동일 산출임을 실증.
+- 라이브 정적자산 확인: `/viewer/`에 `#occupy-build` 버튼, `/viewer/app.js`에 `buildOccupyRange` 노출.
+
+상세 서사·코드 diff·검증 원문은 최종 문서(`docs/20260721_221700_점유영역생성_버튼_공통진입점.md`)를 참고.
 
 ---
 
-## 반전 요약
-이터레이션 1은 "줌 사다리 알고리즘이 옆차를 확대한다"는 가설로 마감됐다. 마스터 실카 라이브 실측 후 로그 분석으로 **진짜 원인은 `RealPtzSource`의 `zoomRange` 오설정([0,65535], 실제 장비 상한은 16384)**임이 확정됐다. 사다리 알고리즘(게이트 스케일링·배율·rung 예산)은 이터레이션 2에서 **한 줄도 수정되지 않았다** — 전부 그 주변(zoom 범위·UI 상태 동기화·조준/줌 정착 대기·상한 도달 시 성공 판정)에 대한 대응이다.
+# 영향도 분석(추가) — 점유영역(occupy_range) 생성식 정본 교체(번호판 기준 사다리꼴)
 
-## 변경 파일 (이터레이션 2, git diff 기준)
-- `src/viewer/RealPtzSource.ts` — `waitUntilStopped()`(신규) · `centerOnPoint`가 `settled` 필드 반환 · `waitUntilSettled`에 `stopped_short`/`no_motion` 조기 반환 추가. `HUCOMS_DEFAULT_ZOOM_RANGE` 값 자체는 **무변경**([0,65535] 유지 — 다른 실측 모델 보호 목적, config로 override)
-- `src/calibrate/platePtz.ts` — `recenterTo`가 `settled:false`→`aim_failed` 전파 · `LADDER_ZOOM_STALL_*` 정체 판정(수정 11) · `saturatedOutcome`(수정 13, 성공 경계 변경) · 진단 로그 필드 4종(`zoomCmd`/`zoomAct`/`bytes`/`sha`) 가산. **사다리 게이트 스케일링·배율(2.0/1.3)·rung 예산은 무변경**(구현자·QA 매 수정마다 재확인)
-- `src/config/toolsConfig.ts` — `CameraSourceConfigSchema.ptz.{panRange,tiltRange,zoomRange}` 개별 `.optional()`화(**리더 파이프라인 밖 핫픽스**, 경위는 아래 참조)
-- `config/tools.config.json` / `tools.config.example.json` — `real-camera-1`·`real-camera-2`에 `"ptz":{"zoomRange":[0,16384]}` 추가(**운영 데이터 변경**)
-- `web/app.js` — `syncPtzAfterJob` 신규 헬퍼 + 배선 6곳(수정 7 최초 4곳 + 수정 14 신규 2곳: `runLiveDetect`·`pollPipeline` discovering 전이) + 완료 메시지 문구(수정 13)
-- 신규 테스트: `test/toolsConfigPtzOptional.test.ts`(11) · `test/viewerPtzSyncCoverage.test.ts`(11) · `test/realPtzSourceCenterSettle.test.ts`(+9, 누적 14) · `test/platePtzLadder.test.ts`(+L4/L5/L6)
+작성: 2026-07-21 · documenter
+최종 문서: `docs/20260721_225200_점유영역_정본교체_사다리꼴.md`
+변경 파일: 신규 `src/domain/occupancyRegion.ts` · `src/api/captureRoutes.ts`(생성식 교체, 계약 무변경) · `src/calibrate/PlateDiscoveryJob.ts`(같은 교체) · `src/capture/floorRoi.ts`(직전 추가분 원복 — diff 없음)
 
-## 리더 핫픽스 경위 (숨기지 않음)
-수정 10(config에 `zoomRange` 단독 추가) 직후 **마스터 서버가 ZodError로 기동 실패**했다 — 스키마가 `ptz` 세 필드를 함께 요구했는데 `RealPtzSource.ts:132~134`는 이미 축별 `?? 기본값` 폴백이라 코드는 그럴 필요가 없었다. 리더가 급히 세 필드를 각각 `.optional()`로 바꿔 **유닛테스트 없이 `tsc` 통과만 확인**하고 반영했다. 이후 QA가 최우선으로 검증(§S1): 기존 3축 config·`zoomRange`만 지정(현재 실카)·`ptz` 미지정(시뮬)·실제 config 로드·축별 optional↔`RealPtzSource` 폴백 정합·3-튜플 아닌 값은 여전히 거부됨을 전부 확인했고, `test/toolsConfigPtzOptional.test.ts`(11케이스, 영구 테스트)로 회귀 가드를 봉인했다.
+## 1. 변경 범위 요약
 
-## 무접촉/무변경 확인
-- `src/api/calibrateRoutes.ts` — 이터레이션 2에서도 **무접촉**(reason/필드는 그대로 통과).
-- 사다리 알고리즘 핵심(게이트 스케일링 `k=zoom/aimZoom`·`preLatchZoomStepRatio`·`ladderRungBudget`) — **이터레이션 2 전체에서 무변경**. 원인이 알고리즘이 아니라 zoom 범위 설정이었다는 §반전 요약의 직접적 증거.
-- 배치 경로 코드(`calibrateSlot`/`acquireAndCenter`/`zoomToWidthWithRecovery`) — 무변경. 단 zoomRange 정정으로 **물리적 도달 가능 범위가 3.7배 넓어져 동작 결과가 달라질 수 있다**(재측정 필요, 아래 확인 필요 참조).
-- `@parkagent/types`(공유 패키지) — 변경 없음. 신규 필드(`settled`/`widthShortfall`/`zoomCmd` 등)는 전부 SettingAgent 내부 로컬 타입. **타 에이전트(ActionAgent/DMAgent) 전파 없음.**
+직전 작업(§ 위 섹션, `221700` 문서)이 만든 `buildOccupyRangeFromPlate`(판 bounding rect를 차량 대리로 써 `buildPlateAnchoredQuad`를 호출 — 결과적으로 번호판 크기의 작은 박스)를 폐기하고, 뷰어 라이브 오버레이가 이미 쓰던 기존 정본(`web/occupancyRegion.js`의 번호판 기준 사다리꼴 알고리즘)을 서버 TS로 옮긴 `src/domain/occupancyRegion.ts`의 `buildOccupyRegionsBySlot`으로 discovery·수동 생성 두 경로 모두 교체했다. REST 계약(`POST /capture/slots/occupy`의 요청/응답 shape)과 DB 스키마는 무변경 — **생성되는 값의 형상만** 바뀐다.
 
-## REST 계약 변경
-- 엔드포인트·요청·응답 shape **무변경**(이터레이션 1과 동일).
-- `saturatedOutcome`으로 새로 열리는 성공 출구: `ok:true` + `widthShortfall:true`(신규 옵셔널 필드) — 폭 미달이라도 신원·정렬이 실측 검증되면 성공. 하위호환.
-- `settled?: boolean`이 `Ptz`를 확장(`CameraClient.NativeCenterResult`) — 기존 구현·호출부 전부 호환.
+## 2. 파급 항목별 결론
 
-## config 스키마·운영 데이터 변경
-- `CameraSourceConfigSchema.ptz` 3필드 개별 optional화 — 기존 config 그대로 유효, 완화만 됨(형태 검증력은 유지: 3-튜플 아닌 값은 여전히 거부).
-- `config/tools.config.json`의 `real-camera-1`/`real-camera-2`에 `zoomRange:[0,16384]` 추가 — **실제 운영 값 변경**이며 zoom 계산 전체(사다리·배치·UI 수동 줌·acquire 사다리)의 물리적 상한이 바뀐다.
+| 항목 | 영향 | 근거 |
+|---|---|---|
+| discovery 산출 `occupy_range`(DB) | **형상 변경**. 기존에 저장된 값(번호판 크기 박스)은 자동 재계산되지 않는다 — 다음 discovery 실행 또는 "점유영역 생성" 버튼 재클릭 시에만 새 형상(큰 사다리꼴)으로 갱신된다 | `PlateDiscoveryJob.saveSlotLpd`/`captureRoutes.ts` 라우트 둘 다 조건 없이 `buildOccupyRegionsBySlot` 호출로 교체됨 — 과거 행을 스캔해 일괄 보정하는 마이그레이션은 이번 변경에 없음 |
+| 뷰어 라이브 오버레이(`web/app.js` `updateLogicOccupancy`, `web/occupancyRegion.js`) | **무변경**. 애초에 이 형상의 정본이었다 | `git diff --stat`에 `web/occupancyRegion.js` 부재, `web/app.js`는 이번 세션 diff에 없음(이전 세션 변경만 존재) |
+| Finalizer(차량 VPD bbox 기반 `buildPlateAnchoredQuad` 직접 호출 경로) | **무변경**. 함수 시그니처·본문 그대로, 이번 교체는 "판-only 대리" 경로만 폐기했을 뿐 차량 bbox가 실제로 있는 정상 경로는 건드리지 않음 | `git diff`에 `Finalizer.ts` 부재, `floorRoi.ts`는 직전 추가분을 되돌려 HEAD와 diff 없음(`buildPlateAnchoredQuad` 그대로) |
+| `setup_result.json`(최종 저장물)의 `occupy_roi` 값 | **형상이 커진다**(번호판 폭의 3.5~4배 폭, 위 0.90/아래 0.60 비대칭 사다리꼴). 저장 로직 자체는 무변경 — DB의 `occupy_range`를 그대로 실어 내는 경로이므로 DB 값이 바뀌면 다음 최종저장 시 자동으로 반영됨 | §1 확인 필요 — 실제 `setup_result.json` 재생성·비교는 미실행(문서화 단계에서 신규 검증 안 함), 코드 경로상 인과관계만 확인 |
+| ActionAgent / DMAgent / DB 스키마 | **무영향**. `slot_setup.occupy_range` 컬럼 추가·타입 변경 없음, `@parkagent/types` 무변경. 이번 변경 전부가 SettingAgent 내부(`src/domain`·`src/api`·`src/calibrate`·`src/capture`)에 닫혀 있어 외부 전파 경로 자체가 없음 | `git diff --stat`(SettingAgent 외부 파일 없음) |
+| 구현 2벌(`web/occupancyRegion.js` ↔ `src/domain/occupancyRegion.ts`) 유지보수 규약 | 정적 배포 경계(서버가 브라우저 ESM import 불가)로 알고리즘이 두 벌 존재. **형상 상수(배율 3.5~4.0·`topWidthRatio`·`upRatio`/`downRatio`) 변경 시 양쪽을 함께 고치고 `test/occupancyRegionParity.test.ts`를 반드시 통과시켜야 한다** — 이 테스트가 두 구현의 출력 동일성을 강제하는 유일한 안전장치 | 신규 `test/occupancyRegionParity.test.ts`(10케이스 + 상수 고정 케이스) |
 
-## ★ 운영 주의사항 (필독)
-1. **`web/`은 nodemon 감시 밖이다.** 수정 7·13·14의 UI 동작(PTZ 동기화·완료 메시지·VPD/discovery 동기화)을 반영하려면 **마스터가 브라우저를 강력 새로고침(Ctrl+F5)** 해야 한다. 서버 자동 재기동으로는 반영되지 않는다.
-2. **`config/`는 서버 재기동이 필요하다.** `loadToolsConfig()`는 기동 시 1회 로드이며 핫리로드가 아니다. `zoomRange:[0,16384]` 정정을 포함해 `config/tools.config.json` 변경 후 **서버를 재기동하지 않으면 구 설정으로 계속 동작한다.**
+## 3. 확인 필요(불확실 항목)
 
-## 공유 도메인 타입 파급
-이터레이션 1과 동일 — `@parkagent/types` 무변경, 전파 없음.
+- `setup_result.json`(및 그 아카이브본)에 이미 기록된 과거 `occupy_roi` 값이 실제로 작은 박스 형상으로 남아있는지, 재생성 없이는 갱신되지 않는다는 사실을 운영자가 인지하고 있는지 — 이번 세션에서 일괄 마이그레이션은 수행하지 않았다.
 
-## 검증 상태 요약 (03_qa_report.md 인용, 사실 그대로)
-- 리더 독립 확인 최종 수치: **191파일 / 2246테스트 전건 통과**(`tsc --noEmit` 클린).
-- QA가 **직접 실행해 구현자 보고와 일치를 확인**한 지점: 187/2192(이터레이션1 재검증) · 189/2220(이터레이션2 기준선) · 190/2231(신규 회귀테스트 추가 후).
-- 189/2213(수정 7~9 직후)·191/2246(수정 14~16 직후)은 **구현자 자체 보고**이며, `03_qa_report.md`에는 이 두 시점에 대한 QA의 독립 재실행 기록이 없다. 191/2246은 리더가 이 문서화 지시 시점에 별도로 독립 확인했다.
-- 이터레이션 2에서 QA가 새로 발견한 결함 8건(전부 "거짓 성공 아님"으로 분류, `03_qa_report.md` §S9): S6-①/② 중간(동기화 누락 2곳, 수정 14로 해소) · S4 중간(저속 지속 이동 장비 rung당 15초 유지) · S7 중간(영속 zoom 17건 물리적 의미 변화, 수정 16으로 시뮬 출처 확정·조치불요 결론) · S3-①/S6-③/S2-①/S5 낮음(사유 오보·source 불일치·UX 경계·no-op 구별 불가, 전부 미해결로 남김).
-- 수정 13(성공 경계 변경) 금지선은 QA가 반례 7건을 별도 설계해 전건 차단을 확인했다(§S2) — 위장 성공 금지 원칙 유지.
+## 4. 테스트 근거 (documenter 자체 실행)
 
-## 확인 필요(불확실 — 단정하지 않음)
-- **마스터 실카 재검증이 아직 수행되지 않았다.** zoomRange 정정 이후 실제 클릭 성공률은 미실측.
-- **`real-camera-2`(192.168.0.154)의 `zoomRange:[0,16384]`는 미실측**이다(같은 기종이라 같은 값을 넣었으나 확인 안 됨).
-- **배치 센터라이징 폭 수렴률 재측정 미수행** — zoomRange 정정으로 천장이 넓어진 효과가 과거 미수렴 슬롯에 어떤 영향을 줬는지 확인되지 않음.
-- **S6-③(배치 잡이 `source`를 동봉하지 않는데 동기화는 `state.source`를 조회하는 구조적 불일치)**은 이번 범위 밖으로 남겨져 리더 판단 대기 중.
-- 189/2213·191/2246에 대한 QA 독립 재실행 기록 부재 — 191/2246은 리더가 별도 확인했으나 정식 QA 산출물(`03_qa_report.md`)에는 반영되지 않았다.
+- `npx vitest run`: **195 파일 / 2289 테스트 전건 통과**(직전 세션 대비 신규 `test/occupancyRegionParity.test.ts` 1파일 10케이스 추가, 회귀 0).
+- `npx tsc --noEmit`: 클린.
+- 라이브 검증(포트 13020): `POST /capture/slots/occupy {cam:1,preset:1}` → `{ok:true,updated:7,skipped:0,failed:0}`. sharp로 실 프레임(1920×1080) 위에 합성해 육안 확인 — 참조 이미지(`etc/주차면점유영역_02.jpg`)와 동일 형상(번호판 평행·차량 앞면 덮음·주차면 아래선까지)으로 7면 모두 정상.
+
+상세 서사·코드 diff·검증 원문은 최종 문서(`docs/20260721_225200_점유영역_정본교체_사다리꼴.md`)를 참고.
+
+---
+
+# 영향도 분석(추가) — 'result 파일 생성' 버튼(DB slot_setup → 최종 결과물 파일 2벌, 공통 진입점 추출)
+
+작성: 2026-07-21 · documenter
+최종 문서: `docs/20260721_230807_result파일생성_버튼_DB기반.md`
+변경 파일: `src/store/setupResult.ts`(신규 export) · `src/calibrate/PtzCalibrator.ts`(공통 진입점 위임) · `src/api/captureRoutes.ts`(신규 라우트) · `web/index.html` · `web/app.js` (+ 신규 `test/setupResultRoute.test.ts`, `test/viewerPtzSyncCoverage.test.ts` 1행 추가)
+
+## 1. 변경 범위 요약
+
+`PtzCalibrator.saveSetupSnapshot`이 인라인으로 갖던 "1회 변환 → 이력본/고정본 2벌 best-effort 저장" 로직을 `writeSetupResultFiles`(신규 export, `src/store/setupResult.ts`)로 추출해, 센터라이징 잡 done 경로(`PtzCalibrator`)와 신규 수동 라우트(`POST /capture/setup-result`)가 같은 함수를 호출하게 했다. 새 변환/생성 로직은 없다 — 기존 `buildSetupResult` 변환과 `SaveStore.saveSnapshot` 저장 방식을 그대로 재사용한다.
+
+## 2. 확인 항목별 결론
+
+| 확인 항목 | 결론 | 근거 |
+|---|---|---|
+| `PtzCalibrator.saveSetupSnapshot` 리팩토링이 동작 불변인가 | **불변**. 기존 2개의 인라인 `try/catch`(이력본 저장, 고정본 저장)를 `writeSetupResultFiles(this.store.getSlotSetup(), this.saveStore)` 한 줄로 축소했을 뿐, 호출 인자(`getSlotSetup()` 결과)·저장 순서(이력본→고정본)·실패 시 로그 흡수 방식이 모두 동일하다. 더 이상 쓰지 않는 `setupSaveName`/`buildSetupResult`/`SETUP_RESULT_NAME` 직접 import를 제거했다(고아 import 정리) | `git diff src/calibrate/PtzCalibrator.ts` |
+| 신규 라우트가 잡 done 경로와 산출물이 갈릴 수 있는가 | **갈리지 않는다**. 두 경로 모두 `writeSetupResultFiles(slots, saveStore)`를 호출하고, `slots`는 항상 `store.getSlotSetup()`(DB 정본 현재 값)이다. 변환(`buildSetupResult`)도 함수 내부에서 1회만 수행되므로 이력본·고정본 내용이 항상 동일 — `test/setupResultRoute.test.ts` 1번 케이스가 두 파일 바이트 동일을 직접 단언 | `src/store/setupResult.ts` `writeSetupResultFiles` 본문, 테스트 §6.1-1 |
+| `saveStore` 타입을 넓히지 않았는가 | **넓히지 않음**. `writeSetupResultFiles`의 파라미터 타입이 `Pick<SaveStore, 'saveSnapshot'>` — 기존 `PtzCalibrator`가 필드에서 이미 좁혀 쓰던 타입 그대로다. `captureRoutes.ts`는 `SaveStore` 전체 인스턴스를 그대로 넘기므로(구조적 타이핑) 호출부 수정 없이 정합 | `src/store/setupResult.ts:70`, `src/api/captureRoutes.ts` 신규 라우트 |
+| `saveStore` 미주입 서버에 영향이 있는가 | **라우트 자체가 존재하지 않는다**. 신규 라우트는 기존 `if (deps.saveStore) { ... }` 블록 안에 등록되므로, 정밀수집 저장 기능이 비활성인 구성에서는 등록되지 않는다 — 이 경우 버튼 클릭은 404가 되고 UI가 실패 메시지를 그대로 표시한다(위장 없음, 기존 save 블록 라우트들과 동일한 조건부 등록 규약을 따랐을 뿐) | `git diff src/api/captureRoutes.ts`(신규 라우트가 `if (deps.saveStore)` 블록 내부에 위치) |
+| `save/` 디렉터리 파일 수 증가 | **이력본이 클릭마다 누적**된다. 고정본(`setup_result.json`)은 항상 1개로 덮어쓰기지만, 이력본(`Setup_YYYYMMDD_HHMMSS.json`)은 버튼을 누를 때마다 새 파일이 생긴다 — 기존에도 센터라이징 완료마다 쌓이던 것과 동일한 증가 패턴이 수동 트리거로도 발생할 뿐, 새로운 파일 종류나 무한정 증가 위험은 아니다 | `writeSetupResultFiles`가 `setupSaveName(now)`(초 단위 타임스탬프)를 매 호출 새 이름으로 사용 |
+| 고정본을 읽는 소비측(외부 도구·다음 파이프라인 단계)에 영향이 있는가 | **의도된 즉시 최신화**. 버튼 사용 시 `setup_result.json`이 DB 현재 값으로 즉시 덮어써지므로, 이 파일을 고정 경로로 읽는 소비측은 클릭 시점부터 새 값을 본다. 파일 스키마(`SetupResult`/`SetupResultSlot`)는 무변경이므로 스키마 파급은 없음 | `src/store/setupResult.ts`의 `SetupResult`/`SetupResultSlot` 인터페이스 diff 없음(신규 export만 추가) |
+| DB 스키마·ActionAgent/DMAgent·`@parkagent/types`에 영향이 있는가 | **없음**. `slot_setup` 테이블 읽기 전용 조회(`getSlotSetup()`)만 관여하고 쓰기는 없다. `@parkagent/types`(공유 계약) 변경 없음. 이번 변경 전부가 SettingAgent 내부(`src/store`·`src/calibrate`·`src/api`·`web`)에 닫혀 있어 ActionAgent/DMAgent로의 전파 경로 자체가 없음 | `git diff --stat`(SettingAgent 외부 파일 없음) |
+
+## 3. 회귀 가드 — `viewerPtzSyncCoverage.test.ts`와의 결합
+
+이 테스트는 모든 라우트가 카메라 이동 여부로 분류돼 있음을 강제하는 가드다. 신규 라우트를 등록하지 않으면 이 테스트가 실패해 "분류 누락 라우트"를 자동 검출한다 — 이번에 `/capture/setup-result`를 `NO_MOVE`(파일 IO)로 등록해 통과시켰다.
+
+## 4. 확인 필요(불확실 항목)
+
+- 없음. §2의 모든 항목을 diff·코드 경로로 직접 대조했고, 이번 변경이 건드린 파일(`setupResult.ts`/`PtzCalibrator.ts`/`captureRoutes.ts`/`web/*`) 범위가 SettingAgent 내부로 닫혀 있어 외부 전파 경로가 없다.
+
+## 5. 테스트 근거 (검증자 실행 결과 인용)
+
+- 신규 `test/setupResultRoute.test.ts`: 6케이스 전부 통과(2벌 생성·내용 동일, DB 정본 반영(미센터라이징 null), 고정본 덮어쓰기/이력본 누적, 빈 DB 시 파일 생성, 한쪽 저장 실패 시 나머지 기록+null 보고, 뷰어 결선).
+- 전체 `npx vitest run`: **196 파일 / 2295 테스트 전건 통과**(회귀 0). `tsc --noEmit` 클린.
+- 라이브 검증(실서버 13020): `POST /capture/setup-result` → `{"ok":true,"slots":17,"archive":"Setup_20260721_230646","fixed":"setup_result"}`. `save/`에 두 파일 생성 확인, `setup_result.json` 17슬롯·`occupy_roi` 결측 0건. `/viewer/`에 `#cal-result-file` 노출 확인. slot1의 `centering: null`은 해당 슬롯 미센터라이징 상태를 DB 그대로 반영한 것(결함 아님).
+
+상세 서사·코드 diff·검증 원문은 최종 문서(`docs/20260721_230807_result파일생성_버튼_DB기반.md`)를 참고.

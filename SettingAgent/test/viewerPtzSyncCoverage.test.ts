@@ -51,6 +51,8 @@ const NO_MOVE: Record<string, string> = {
   '/capture/refframe': 'requestImage(cam,preset) — ptz 미지정 → mode preset',
   '/capture/slots': '조회',
   '/capture/slots/lpd': '조회',
+  '/capture/slots/occupy': 'DB(lpd→occupy_range 재생성)',
+  '/capture/setup-result': '파일 IO(DB→setup_result.json)',
   '/capture/slots/reset': 'DB',
   '/capture/status': '상태 조회',
   '/capture/stop': '잡 중지 신호(이동 없음)',

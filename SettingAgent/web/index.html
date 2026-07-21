@@ -40,7 +40,7 @@
             <label><input id="roi-plate" type="checkbox" checked /> 번호판</label>
             <label><input id="roi-floor" type="checkbox" checked /> 바닥</label>
             <label><input id="roi-occupancy" type="checkbox" checked /> 점유</label>
-            <label title="DB(slot_setup)에 저장된 VPD/LPD/점유영역을 표시(라이브 검출이 없는 프리셋의 폴백). 체크 시에만 DB 소스 오버레이가 보인다"><input id="roi-db" type="checkbox" /> DB 보기</label>
+            <label title="체크하면 차량(VPD)·번호판(LPD)·점유영역의 소스를 DB(slot_setup)로 전환해 표시한다(라이브 검출 대체). DB에 값이 없는 항목(예: vpd_bbox=null)은 아무것도 그려지지 않는다"><input id="roi-db" type="checkbox" /> DB 보기</label>
             <label title="주차면을 3D 육면체로 표시(지면모델 기반). 기존 바닥 ROI 는 그대로 유지">
               <input id="roi-cuboid" type="checkbox" /> 육면체
             </label>
@@ -205,6 +205,7 @@
                 <p>센터라이징은 번호판 중심을 기준으로 각 주차면의 Pan·Tilt·Zoom을 미세 조정합니다. 완료 결과는 <code>slot_ptz.json</code>과 DB <code>centering_slot</code>에 저장됩니다.</p>
               </div>
               <button id="cal-start" class="primary">센터라이징</button>
+              <button id="cal-result-file" title="DB(slot_setup) 정본으로 최종 결과물을 지금 생성한다. save/setup_result.json(고정본 덮어쓰기) + save/Setup_YYYYMMDD_HHMMSS.json(이력본) 2벌. 센터라이징 완료 시 자동 생성되는 것과 같은 내용">result 파일 생성</button>
               <label class="field" title="선택 후 라이브뷰를 클릭 — center: 클릭 지점을 화면 중앙으로(pan/tilt만, zoom 불변) / center+zoom: 클릭 최근접 번호판 center+zoom. 둘 다 저장 안 함">개별 센터라이징
                 <select id="cal-click-mode">
                   <option value="off" selected>사용 안 함</option>
@@ -239,6 +240,7 @@
             </label>
             <button id="lpd-run" class="primary">실행</button>
             <button id="lpd-db-add" title="현재 프리셋 라이브 LPD 검출을 slot_setup.lpd 에 저장">DB에 추가</button>
+            <button id="occupy-build" title="현재 프리셋에서 slot_setup.lpd(번호판)로 점유영역(occupy_range)을 결정형 재생성해 DB에 저장. 번호판이 없는 슬롯은 건너뜀(기존 값 보존)">점유영역 생성</button>
             </div>
             <div class="cap-progress operation-progress">
               <progress id="disc-bar" max="100" value="0"></progress>

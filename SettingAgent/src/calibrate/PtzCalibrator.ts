@@ -9,8 +9,8 @@ import type { NormalizedPoint, NormalizedRect } from '../domain/types.js';
 import { resolvePresetPtz } from '../capture/detectPipeline.js';
 import { expandPlateTargetsFromSlotSetup, writeSlotPtz } from './slotPtzWriter.js';
 import { buildSlotPtzJson, aimPtzForPoint, zoomForWidth } from './controlMath.js';
-import { setupSaveName, type SaveStore } from '../store/SaveStore.js';
-import { buildSetupResult, SETUP_RESULT_NAME } from '../store/setupResult.js';
+import type { SaveStore } from '../store/SaveStore.js';
+import { writeSetupResultFiles } from '../store/setupResult.js';
 import { PlatePtz, type PlatePtzOpts, type PlatePtzResult } from './platePtz.js';
 import type { PlateTarget, Ptz, SlotPtzItem, CalibrateState, CalibrateStatus } from './types.js';
 
@@ -382,17 +382,7 @@ export class PtzCalibrator {
    */
   private saveSetupSnapshot(): void {
     if (!this.saveStore) return;
-    const result = buildSetupResult(this.store.getSlotSetup()); // 1회 변환 → 2벌 동일 내용 보장.
-    try {
-      this.saveStore.saveSnapshot(setupSaveName(new Date()), result);
-    } catch (e) {
-      logger.warn({ err: e }, 'Setup_* 이력본 저장 실패(격리 — slot_ptz.json·DB 는 정상)');
-    }
-    try {
-      this.saveStore.saveSnapshot(SETUP_RESULT_NAME, result);
-    } catch (e) {
-      logger.warn({ err: e }, 'setup_result.json 저장 실패(격리 — slot_ptz.json·DB 는 정상)');
-    }
+    writeSetupResultFiles(this.store.getSlotSetup(), this.saveStore); // 공통 진입점(수동 버튼과 동일 산출).
   }
 
   /** 종단 완료 콜백 통지(옵셔널). throw 흡수 — 콜백이 잡을 죽이지 않는다. */

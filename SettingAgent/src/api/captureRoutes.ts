@@ -31,6 +31,9 @@ import type { ToolsConfig } from '../config/toolsConfig.js';
 import type { SaveStore } from '../store/SaveStore.js';
 import { validateArtifactBody } from './artifactSchema.js';
 import { stringify5 } from '../util/round.js';
+import { buildOccupyRegionsBySlot } from '../domain/occupancyRegion.js';
+import { writeSetupResultFiles } from '../store/setupResult.js';
+import type { SlotLpdRow } from '../capture/types.js';
 
 /** POST /capture/slots/lpd — 라이브 LPD 검출을 slot_setup.lpd 에 저장. plates 빈 배열 허용(0건). */
 const SlotLpdSaveSchema = z.object({
@@ -43,6 +46,14 @@ const SlotLpdSaveSchema = z.object({
     }),
   ),
 });
+
+/** POST /capture/slots/occupy — DB lpd 로 점유영역 생성. cam/preset 미지정 시 전 프리셋. */
+const SlotOccupyBuildSchema = z
+  .object({
+    cam: z.number().int().positive().optional(),
+    preset: z.number().int().positive().optional(),
+  })
+  .default({});
 
 const TargetSchema = z.object({
   camIdx: z.number().int().positive(),
@@ -347,6 +358,49 @@ export function registerCaptureRoutes(app: FastifyInstance, deps: CaptureRouteDe
     return { ok: true, updated: rows.length, assigned: assignedOut, unassigned: plates.length - assigned.size };
   });
 
+  // slot_setup.lpd(정본) → 점유영역(occupy_range) 결정형 재생성(수동 "점유영역 생성" 버튼).
+  // 소스는 DB lpd 뿐 — 라이브 검출·차량 VPD 무관. lpd 없는 슬롯은 스킵(위장 생성 금지, 기존 값 무접촉).
+  // 생성식은 뷰어 라이브 오버레이와 같은 번호판 기준 사다리꼴(domain/occupancyRegion) — 표시=저장 정합.
+  app.post('/capture/slots/occupy', async (req, reply) => {
+    const parsed = SlotOccupyBuildSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { ok: false, error: 'invalid body' };
+    }
+    const { cam, preset } = parsed.data;
+    const views = deps.store
+      .getSlotSetup()
+      .filter((v) => (cam == null || v.camId === cam) && (preset == null || v.presetId === preset));
+    const now = new Date().toISOString();
+    // 겹침 회피 배율 탐색이 프레임 단위 집합 연산 → **프리셋별로 묶어** 한 번에 생성(뷰어 라이브와 동일 규약).
+    const byPreset = new Map<string, typeof views>();
+    for (const v of views) {
+      if (!v.lpd) continue; // lpd 부재 → 생성 근거 없음(스킵).
+      const key = `${v.camId}:${v.presetId}`;
+      const g = byPreset.get(key) ?? [];
+      g.push(v);
+      byPreset.set(key, g);
+    }
+    const rows: SlotLpdRow[] = [];
+    let withLpd = 0;
+    for (const group of byPreset.values()) {
+      withLpd += group.length;
+      const regions = buildOccupyRegionsBySlot(group.map((v) => ({ slotId: v.slotId, quad: v.lpd! })));
+      for (const v of group) {
+        const poly = regions.get(v.slotId);
+        if (!poly) continue; // 퇴화 quad·화면 밖 → 생성 실패(기존 값 보존, 위장 금지).
+        rows.push({
+          slotId: v.slotId,
+          lpdObb: stringify5(v.lpd!), // upsertSlotLpd 는 lpd 도 함께 쓰므로 현재 값을 그대로 되쓴다(무변경).
+          occupyRange: stringify5(poly),
+          updatedAt: now,
+        });
+      }
+    }
+    if (rows.length > 0) deps.store.upsertSlotLpd(rows);
+    return { ok: true, updated: rows.length, skipped: views.length - withLpd, failed: withLpd - rows.length };
+  });
+
   // 정밀수집 결과 저장/열기(save/*). saveStore 주입 시에만 등록(가산). 라우트는 위임만.
   if (deps.saveStore) {
     const saveStore = deps.saveStore;
@@ -366,6 +420,17 @@ export function registerCaptureRoutes(app: FastifyInstance, deps: CaptureRouteDe
       }
       saveStore.save(safe, v.artifact);
       return { ok: true, name: safe, slots: v.artifact.slots.length, globalCount: v.artifact.globalIndex.length };
+    });
+
+    // 최종 결과물 수동 생성(캘리브레이션 패널 'result 파일 생성'). 소스=DB slot_setup 정본(현재 값 그대로).
+    // 센터라이징 잡 done 경로와 **같은 진입점**(writeSetupResultFiles) → 이력본+고정본 2벌 동일 산출.
+    app.post('/capture/setup-result', async (_req, reply) => {
+      const write = writeSetupResultFiles(deps.store.getSlotSetup(), saveStore);
+      if (!write.archive && !write.fixed) {
+        reply.code(500);
+        return { ok: false, error: 'save failed' };
+      }
+      return { ok: true, slots: write.result.slots.length, archive: write.archive, fixed: write.fixed };
     });
 
     // 저장 목록(mtime 내림차순).

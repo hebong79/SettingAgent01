@@ -6,8 +6,8 @@ import type { SqliteStore } from '../src/capture/SqliteStore.js';
 import type { SlotLpdRow, SlotSetupView } from '../src/capture/types.js';
 import type { DiscoveryTarget, PlateDiscoveryItem, PlateDiscoveryArtifact } from '../src/calibrate/types.js';
 import type { NormalizedPoint } from '../src/domain/types.js';
-import { quadBoundingRect, rectToQuad } from '../src/domain/geometry.js';
-import { buildPlateAnchoredQuad } from '../src/capture/floorRoi.js';
+import { rectToQuad } from '../src/domain/geometry.js';
+import { buildOccupyRegionsBySlot } from '../src/domain/occupancyRegion.js';
 import { stringify5 } from '../src/util/round.js';
 
 /**
@@ -188,8 +188,9 @@ describe('PlateDiscoveryJob.saveSlotLpd 점유영역(occupy_range) 동봉 (이�
     const row = rows[0];
     expect(row.slotId).toBe(7); // globalIdx = slot_id
     expect(row.lpdObb).toBe(stringify5(lpdOrig));
-    // ★ 경계면: occupyRange = Finalizer 판-only 경로와 동일 재사용 산출과 일치.
-    const expectedOccupy = stringify5(buildPlateAnchoredQuad(quadBoundingRect(lpdOrig), lpdOrig));
+    // ★ 경계면: occupyRange = 뷰어 라이브와 같은 번호판 기준 사다리꼴(domain/occupancyRegion) 산출과 일치.
+    //   (구 buildPlateAnchoredQuad 판-only 산출은 판 크기 박스라 폐기 — 마스터 지적 2026-07-21)
+    const expectedOccupy = stringify5(buildOccupyRegionsBySlot([{ slotId: 7, quad: lpdOrig }]).get(7)!);
     expect(row.occupyRange).toBe(expectedOccupy);
     expect(row.occupyRange).not.toBeUndefined(); // found → 반드시 제공(occupy_range 갱신)
   });

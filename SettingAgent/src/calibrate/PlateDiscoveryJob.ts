@@ -14,8 +14,8 @@ import type { SlotLpdRow } from '../capture/types.js';
 import { logger } from '../util/logger.js';
 import { stringify5 } from '../util/round.js';
 import { resolvePresetPtz } from '../capture/detectPipeline.js';
-import { buildPlateAnchoredQuad } from '../capture/floorRoi.js';
-import { quadBoundingRect } from '../domain/geometry.js';
+import { buildOccupyRegionsBySlot } from '../domain/occupancyRegion.js';
+import type { NormalizedPoint } from '../domain/types.js';
 import { PlateDiscovery, type PlateDiscoveryOpts } from './plateDiscovery.js';
 import { expandDiscoveryTargets, writePlateDiscovery } from './plateDiscoveryWriter.js';
 import type {
@@ -221,22 +221,41 @@ export class PlateDiscoveryJob {
    */
   private saveSlotLpd(items: PlateDiscoveryItem[]): void {
     const updatedAt = this.now();
-    const rows: SlotLpdRow[] = [];
-    for (const it of items) {
-      if (!it.found || it.lpdOrig == null) continue;
+    const found = items.filter((it) => {
+      if (!it.found || it.lpdOrig == null) return false;
       if (it.globalIdx == null) {
         logger.warn({ slot: it.slotId, cam: it.camIdx, preset: it.presetIdx }, 'globalIdx 부재 → slot_setup.lpd 매핑 불가(스킵)');
-        continue;
+        return false;
       }
-      // 점유영역(발자국) = 발견된 판 quad 로 결정형 생성(Finalizer 판-only 경로와 동일 재사용). 계산 실패 시 생략(lpd 는 저장).
-      let occupyRange: string | undefined;
-      try {
-        occupyRange = stringify5(buildPlateAnchoredQuad(quadBoundingRect(it.lpdOrig), it.lpdOrig));
-      } catch (e) {
-        logger.warn({ err: e, slot: it.slotId, cam: it.camIdx, preset: it.presetIdx }, '점유영역 생성 실패(occupy_range 생략, lpd 는 저장)');
-      }
-      rows.push({ slotId: it.globalIdx, lpdObb: stringify5(it.lpdOrig), occupyRange, updatedAt });
+      return true;
+    });
+    // 점유영역 = 번호판 기준 사다리꼴(뷰어 라이브와 같은 규약, domain/occupancyRegion).
+    // 겹침 회피 배율이 프레임 단위 집합 연산이라 **프리셋별로 묶어** 생성한다. 미산출 슬롯은 생략(lpd 는 저장).
+    const regionBySlot = new Map<number, NormalizedPoint[]>();
+    const byPreset = new Map<string, PlateDiscoveryItem[]>();
+    for (const it of found) {
+      const key = `${it.camIdx}:${it.presetIdx}`;
+      const g = byPreset.get(key) ?? [];
+      g.push(it);
+      byPreset.set(key, g);
     }
+    for (const group of byPreset.values()) {
+      try {
+        const regions = buildOccupyRegionsBySlot(group.map((it) => ({ slotId: it.globalIdx!, quad: it.lpdOrig! })));
+        for (const [slotId, poly] of regions) regionBySlot.set(slotId, poly);
+      } catch (e) {
+        logger.warn({ err: e, cam: group[0]?.camIdx, preset: group[0]?.presetIdx }, '점유영역 생성 실패(occupy_range 생략, lpd 는 저장)');
+      }
+    }
+    const rows: SlotLpdRow[] = found.map((it) => {
+      const poly = regionBySlot.get(it.globalIdx!);
+      return {
+        slotId: it.globalIdx!,
+        lpdObb: stringify5(it.lpdOrig!),
+        occupyRange: poly ? stringify5(poly) : undefined,
+        updatedAt,
+      };
+    });
     if (rows.length === 0) return;
     try {
       this.store.upsertSlotLpd(rows);

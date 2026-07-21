@@ -515,25 +515,13 @@ function drawOccupancyOverlay(ctx) {
   if (!$('roi-occupancy').checked) return;
   const key = currentFrameKey();
   const occ = state.occComputeByKey[key];
-  const hasLive = (occ?.spaces ?? []).length > 0; // 라이브 로직 점유 유무 판단.
-  if (!hasLive) {
-    // 라이브 점유 없음 → DB(slot_setup) occupyRange 폴백. 'DB 보기'(#roi-db) 체크 시에만. 이중 렌더 회피.
-    if ($('roi-db').checked) {
-      for (const row of state.parkingSlotsByKey?.[key] ?? []) {
-        if (!row.occupyRange) continue;
-        const pts = toPixelQuad(row.occupyRange, overlay.width, overlay.height);
-        ctx.beginPath();
-        pts.forEach((p, i) => (i ? ctx.lineTo(p.px, p.py) : ctx.moveTo(p.px, p.py)));
-        ctx.closePath();
-        ctx.fillStyle = 'rgba(255, 77, 77, 0.18)';
-        ctx.fill();
-        ctx.strokeStyle = 'rgba(255, 77, 77, 0.9)';
-        ctx.lineWidth = 1.5;
-        ctx.stroke();
-      }
-    }
+  // 'DB 보기'(#roi-db) 체크 → 점유영역 소스를 DB(slot_setup) occupyRange 로 **전환**(라이브 대체, 이중 렌더 회피).
+  // VPD/LPD 와 같은 규약 — 폴백이 아니라 소스 전환이라 라이브 점유가 있어도 DB 를 그린다.
+  if ($('roi-db').checked) {
+    drawDbOccupancy(ctx, state.parkingSlotsByKey?.[key] ?? []);
     return;
   }
+  if ((occ?.spaces ?? []).length === 0) return; // 라이브 점유 없음 → 그릴 것 없음.
   // 점유영역 사다리꼴 먼저(면 레이어) → 아래 원/라벨이 그 위에 남는다.
   for (const sp of occ?.spaces ?? []) {
     if (!sp.occupied || !sp.region) continue;
@@ -999,16 +987,16 @@ function drawDetectOverlay(ctx) {
     }
   }
 
-  // ── LPD: 기존 동작 그대로(라이브 있으면 라이브, 없고 #roi-db 면 DB 폴백) — 회귀 0 ──
+  // ── LPD: #roi-db 체크 → DB 저장 lpd(읽기표시), 아니면 라이브(VPD 와 동일 규약 — 소스 전환) ──
   if (showPlate) {
-    if (d) {
+    if (dbOn) {
+      for (const row of rows) { if (row.lpd) drawPlateQuad(ctx, row.lpd, false); } // DB 번호판 OBB quad(노랑). 선택·핸들 없음.
+    } else if (d) {
       (d.vehicles ?? []).forEach((v) => { if (v.plate) drawPlateQuad(ctx, v.plate.quad, v.plate.recovered); }); // 차량 부속 번호판.
       (d.plates ?? []).forEach((p, i) => {
         drawPlateQuad(ctx, p.quad, false); // base LPD 전체(R1: LPD 모두).
         if (sel?.kind === 'plate' && sel.index === i) drawQuadHandles(ctx, toPixelQuad(p.quad, overlay.width, overlay.height));
       });
-    } else if (dbOn) {
-      for (const row of rows) { if (row.lpd) drawPlateQuad(ctx, row.lpd, false); } // DB 번호판 OBB quad(노랑, 라이브 없을 때만).
     }
     // discovery(앞면중심 LOOP) 결과 박스 — #roi-plate 게이트 공유, 현재 프리셋 키만(전환 시 자동 은닉).
     const disc = state.discoverByKey?.[key];
@@ -1027,6 +1015,25 @@ function drawDbVpd(ctx, rows) {
     ctx.strokeStyle = '#00e5ff'; // VPD 차량 bbox=청록(라이브와 동색).
     ctx.lineWidth = 2;
     ctx.strokeRect(px, py, pw, ph);
+  }
+}
+
+/**
+ * DB(slot_setup) 소스 점유영역 오버레이 — #roi-db 체크 시 라이브 점유 대신 표시.
+ * occupyRange(정규화 다각형)를 라이브와 동색(빨강 반투명)으로 채운다. null 필드는 skip.
+ */
+function drawDbOccupancy(ctx, rows) {
+  for (const row of rows) {
+    if (!row.occupyRange) continue;
+    const pts = toPixelQuad(row.occupyRange, overlay.width, overlay.height);
+    ctx.beginPath();
+    pts.forEach((p, i) => (i ? ctx.lineTo(p.px, p.py) : ctx.moveTo(p.px, p.py)));
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(255, 77, 77, 0.18)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255, 77, 77, 0.9)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
   }
 }
 
@@ -2341,6 +2348,24 @@ async function saveLpdToDb() {
   renderSlotList();
 }
 
+// 현재 프리셋의 DB 번호판(slot_setup.lpd)으로 점유영역(occupy_range)을 재생성해 DB에 저장("점유영역 생성").
+// 생성식은 서버가 discovery 와 공유(buildOccupyRangeFromPlate) — 프런트는 트리거·표시 갱신만 한다.
+async function buildOccupyRange() {
+  const cam = state.capFrameKey2?.cam ?? state.cam;
+  const preset = state.capFrameKey2?.preset ?? state.preset;
+  const res = await fetch('/capture/slots/occupy', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ cam: Number(cam), preset: Number(preset) }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.ok) { $('disc-msg').textContent = `점유영역 생성 실패: ${data.error ?? res.status}`; return; }
+  $('disc-msg').textContent = `점유영역 생성: ${data.updated} 슬롯 (번호판 없음 ${data.skipped}${data.failed ? `, 실패 ${data.failed}` : ''})`;
+  await loadParkingSlots(); // #roi-db(slot_setup 소스) 오버레이 정합 갱신.
+  drawRoiOverlay();
+  renderSlotList();
+}
+
 // --- 센터라이징(주차면별 번호판 중심정렬·줌 → slot_ptz.json · DB centering_slot) ------
 // capPoll 패턴 차용(pollPlan 재사용). 절대경로 /calibrate/* 직접 폴링.
 let calPollTimer = null;
@@ -2384,6 +2409,18 @@ function stopCalFramePolling() {
     clearInterval(calFrameTimer);
     calFrameTimer = null;
   }
+}
+
+// 최종 결과물(save/setup_result.json + Setup_* 이력본)을 DB(slot_setup) 정본으로 지금 생성.
+// 센터라이징 완료 시 자동 생성되는 것과 같은 진입점 — 잡을 다시 돌리지 않고 현재 DB 상태로 파일만 만든다.
+async function makeSetupResultFile() {
+  $('cal-msg').textContent = '결과 파일 생성 중…';
+  const res = await fetch('/capture/setup-result', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.ok) { $('cal-msg').textContent = `결과 파일 생성 실패: ${data.error ?? res.status}`; return; }
+  // 두 파일은 각자 best-effort — 한쪽만 성공했으면 성공한 쪽만 알린다(위장 금지).
+  const files = [data.fixed && `${data.fixed}.json`, data.archive && `${data.archive}.json`].filter(Boolean).join(', ');
+  $('cal-msg').textContent = `결과 파일 생성: ${data.slots}개 슬롯 → save/${files}`;
 }
 
 async function calStart() {
@@ -3514,6 +3551,7 @@ function wire() {
   }
   $('cap-finalize').addEventListener('click', capFinalize);
   $('cal-start').addEventListener('click', calStart);
+  $('cal-result-file').addEventListener('click', makeSetupResultFile); // DB → 최종 결과물 파일 수동 생성.
   // 개별 센터라이징 콤보: 활성(off 아님) 시 오버레이 커서를 crosshair 로 전환(클릭 조준 피드백).
   $('cal-click-mode').addEventListener('change', (e) => {
     overlay.classList.toggle('click-centering', e.target.value !== 'off');
@@ -3618,7 +3656,12 @@ function wire() {
   $('roi-plate').addEventListener('change', drawRoiOverlay);
   $('roi-floor').addEventListener('change', drawRoiOverlay);
   $('roi-occupancy').addEventListener('change', drawRoiOverlay); // 점유 오버레이 토글.
-  $('roi-db').addEventListener('change', drawRoiOverlay); // DB(slot_setup) 소스 오버레이 표시 토글(폴백 vpd/lpd/occupy).
+  // DB(slot_setup) 소스 오버레이 토글(vpd/lpd/occupy 를 DB 소스로 전환).
+  // 소스가 아직 없으면(정밀수집 탭 미방문 등) 그 자리에서 1회 로드 — 어느 탭에서 켜도 표시되게.
+  $('roi-db').addEventListener('change', async (e) => {
+    if (e.target.checked && !state.parkingSlotsByKey) await loadParkingSlots();
+    drawRoiOverlay();
+  });
   $('cap-floor-llm').addEventListener('change', drawRoiOverlay); // 바닥 ROI 소스(LLM/파일) 모드 전환 → 즉시 재렌더.
   $('roi-cuboid').addEventListener('change', drawRoiOverlay); // 3D 육면체 레이어 토글(기본 off → 회귀 0).
   $('roi-mask').addEventListener('change', drawRoiOverlay); // VPD seg 마스크 오버레이 토글(순수 렌더 — masks 는 detect 응답에 동승, 별도 로드 불필요).
@@ -3649,6 +3692,7 @@ function wire() {
     else if (mode === 'lpd-live') runModeLpdLive();
   });
   $('lpd-db-add').addEventListener('click', saveLpdToDb); // 라이브 LPD 검출 → slot_setup.lpd 저장.
+  $('occupy-build').addEventListener('click', buildOccupyRange); // DB lpd → occupy_range 결정형 재생성.
   $('roi-clear').addEventListener('click', resetOverlayDisplay); // #5: 표시 초기화 — 모든 오버레이 토글 off(데이터 보존).
   $('cap-reset-db').addEventListener('click', resetSlotSetupDb); // 검출·센터링 DB 초기화(slot_setup vpd/lpd/occupy/ptz 비움).
   // 산출물(setup_artifact) 편집·결과 파일 도구(분석 탭으로 이관 — 핸들러·id 는 동일).
