@@ -64,8 +64,11 @@ export interface PtzCalibratorDeps {
   cfg: ToolsConfig['calibrate'];
   /** 센터라이징 소스(slot_setup 조회) + centering_slot 미러 저장. 잡의 유일 데이터 소스이므로 필수. */
   store: Pick<SqliteStore, 'upsertSlotCentering' | 'getSlotSetup'>;
-  /** PlatePtz 팩토리 주입(테스트 시임). 기본=new PlatePtz({camera, lpd, sleep}, opts). */
-  makePlatePtz?: (opts: PlatePtzOpts) => PlatePtzApi;
+  /**
+   * PlatePtz 팩토리 주입(테스트 시임). 기본=new PlatePtz({camera, lpd, sleep}, opts).
+   * 2번째 인자는 **개별(클릭) 경로 전용 카메라 오버라이드**(뷰어가 보고 있는 소스). 미전달 시 deps.camera.
+   */
+  makePlatePtz?: (opts: PlatePtzOpts, camera?: ICameraClient) => PlatePtzApi;
   /** slot_ptz.json writer 주입(테스트는 캡처 stub). 기본=writeSlotPtz. */
   writer?: (artifact: ReturnType<typeof buildSlotPtzJson>, outFile: string) => void;
   /**
@@ -103,7 +106,7 @@ export class PtzCalibrator {
   private readonly camera: ICameraClient;
   private readonly cfg: ToolsConfig['calibrate'];
   private readonly store: Pick<SqliteStore, 'upsertSlotCentering' | 'getSlotSetup'>;
-  private readonly makePlatePtz: (opts: PlatePtzOpts) => PlatePtzApi;
+  private readonly makePlatePtz: (opts: PlatePtzOpts, camera?: ICameraClient) => PlatePtzApi;
   private readonly writer: (artifact: ReturnType<typeof buildSlotPtzJson>, outFile: string) => void;
   private readonly now: () => string;
   /** 잡 종단 완료 콜백(옵셔널·가산 — 파이프라인 배선). 미주입 시 no-op. */
@@ -125,7 +128,7 @@ export class PtzCalibrator {
     const onFrame = (jpeg: Buffer, camIdx: number, presetIdx: number): void => {
       this.lastFrame = { jpeg, camIdx, presetIdx };
     };
-    this.makePlatePtz = deps.makePlatePtz ?? ((opts) => new PlatePtz({ camera: deps.camera, lpd: deps.lpd, sleep, onFrame }, opts));
+    this.makePlatePtz = deps.makePlatePtz ?? ((opts, camera) => new PlatePtz({ camera: camera ?? deps.camera, lpd: deps.lpd, sleep, onFrame }, opts));
     this.writer = deps.writer ?? writeSlotPtz;
     this.now = deps.now ?? (() => new Date().toISOString());
     this.onFinished = deps.onFinished;
@@ -153,31 +156,35 @@ export class PtzCalibrator {
    * pan/tilt 정렬(+옵션 zoom). 배치 start()/run() 경로·저장(writer·DB·스냅샷)과 **완전 분리** — 어디에도 기록하지 않는다.
    *
    * 1. 상호배타 가드: 배치 진행(state==='running')·개별 진행(pointBusy) 중이면 throw(라우트 409 매핑).
-   * 2. startPtzFor 로 프리셋 base PTZ 해석(ptzByKey 캐시 재사용 — cam/preset 만 사용).
+   * 2. currentPtzFor 로 **현재 PTZ** 를 기준으로 잡는다(조회 실패 시 프리셋 폴백). 클릭은 "지금 보이는 화면" 기준이고,
+   *    실카 소스는 프리셋 PTZ 테이블이 없어 프리셋 해석이 0/0/1 폴백으로 떨어져 카메라를 엉뚱한 곳으로 날린다.
+   *    ★ 개별 경로 한정 — 배치(calibrateSlot)는 프리셋 정본 유지.
    * 3. plateRoi=클릭점(w/h=0) prior 로 centerOnPlate — peerOffsets 미주입 → pickNearestPlate(클릭 최근접).
    * 4. center 성공 & zoom!==false 이면 center.gain 체이닝으로 zoomToPlateWidth 1회 마감(성공 시 z, 실패 시 center 반환 — 정직).
    * 5. 저장 호출 없음(writer/saveCenteringSlots/saveSetupSnapshot/upsertSlotCentering 미호출).
    *    onFrame 은 makePlatePtz 생성자에 이미 배선되어 진행 중 lastFrame 갱신(/calibrate/frame 폴링 자동).
+   * 6. opts.camera 주입 시 그 카메라로만 동작(뷰어가 보고 있는 소스 = 명령 대상). 미주입이면 파이프라인 카메라.
    */
   async centerOnPoint(
     camIdx: number,
     presetIdx: number,
     point: NormalizedPoint,
-    opts?: { zoom?: boolean },
+    opts?: { zoom?: boolean; camera?: ICameraClient },
   ): Promise<{ ok: boolean; ptz: Ptz; plateWidth: number | null; reason?: string }> {
     if (this.state === 'running') throw new Error('calibrate already running');
     if (this.pointBusy) throw new Error('point centering busy');
     this.pointBusy = true;
     try {
-      const startPtz = await this.startPtzFor({ camIdx, presetIdx } as PlateTarget);
+      const cam = opts?.camera;
+      const startPtz = await this.currentPtzFor(camIdx, presetIdx, cam);
       const prior: NormalizedRect = { x: point.x, y: point.y, w: 0, h: 0 };
-      const centered = await this.makePlatePtz({ ...this.baseOpts(), plateRoi: prior }).centerOnPlate(camIdx, presetIdx, startPtz);
+      const centered = await this.makePlatePtz({ ...this.baseOpts(), plateRoi: prior }, cam).centerOnPlate(camIdx, presetIdx, startPtz);
       if (centered.ok && opts?.zoom !== false) {
         const z = await this.makePlatePtz({
           ...this.baseOpts(),
           plateRoi: quadBoundingRect(centered.plate!.quad),
           gain: centered.gain,
-        }).zoomToPlateWidth(camIdx, presetIdx, centered.ptz);
+        }, cam).zoomToPlateWidth(camIdx, presetIdx, centered.ptz);
         if (z.ok) return { ok: z.ok, ptz: z.ptz, plateWidth: z.plateWidth, ...(z.reason ? { reason: z.reason } : {}) };
       }
       return { ok: centered.ok, ptz: centered.ptz, plateWidth: centered.plateWidth, ...(centered.reason ? { reason: centered.reason } : {}) };
@@ -200,20 +207,23 @@ export class PtzCalibrator {
     camIdx: number,
     presetIdx: number,
     point: NormalizedPoint,
+    opts?: { camera?: ICameraClient },
   ): Promise<{ ok: boolean; ptz: Ptz; plateWidth: null; mode: 'native' | 'geometric'; reason?: string }> {
     if (this.state === 'running') throw new Error('calibrate already running');
     if (this.pointBusy) throw new Error('point centering busy');
     this.pointBusy = true;
     try {
+      // 카메라 오버라이드(뷰어가 보고 있는 소스) 우선 — 미주입이면 파이프라인 카메라.
+      const camera = opts?.camera ?? this.camera;
       // 네이티브 분기가 먼저 — 장비가 스스로 계산하므로 기준 PTZ 조회(왕복 1회)가 불필요하다.
-      const native = this.camera.centerOnPoint;
+      const native = camera.centerOnPoint;
       if (native) {
-        const ptz = await native.call(this.camera, camIdx, point);
+        const ptz = await native.call(camera, camIdx, point);
         return { ok: true, ptz, plateWidth: null, mode: 'native' };
       }
-      const cur = await this.currentPtzFor(camIdx, presetIdx);
+      const cur = await this.currentPtzFor(camIdx, presetIdx, opts?.camera);
       const aim = aimPtzForPoint(point, cur, this.gainRef(), PREAIM_MAX_STEP);
-      const ok = await this.camera.move(camIdx, aim.pan, aim.tilt, aim.zoom);
+      const ok = await camera.move(camIdx, aim.pan, aim.tilt, aim.zoom);
       // 이동 거절(false)은 조용히 200 ok:false 로 나가면 UI 가 '종료(200)' 로 보인다 — 사유를 붙인다.
       return { ok, ptz: aim, plateWidth: null, mode: 'geometric', ...(ok ? {} : { reason: 'move_failed' }) };
     } finally {
@@ -221,13 +231,17 @@ export class PtzCalibrator {
     }
   }
 
-  /** 클릭 조준 기준 PTZ = 장비 현재 PTZ. 조회 실패 시 프리셋 PTZ 폴백(+warn — 조용한 강등 금지). */
-  private async currentPtzFor(camIdx: number, presetIdx: number): Promise<Ptz> {
+  /**
+   * 개별(클릭) 경로 기준 PTZ = 장비 현재 PTZ. 조회 실패 시 프리셋 PTZ 폴백(+warn — 조용한 강등 금지).
+   * override 는 뷰어가 보고 있는 소스의 카메라(미주입 시 파이프라인 카메라).
+   */
+  private async currentPtzFor(camIdx: number, presetIdx: number, override?: ICameraClient): Promise<Ptz> {
+    const camera = override ?? this.camera;
     try {
-      return await this.camera.getPtz(camIdx);
+      return await camera.getPtz(camIdx);
     } catch (err) {
       logger.warn({ cam: camIdx, preset: presetIdx, err: String(err) }, '현재 PTZ 조회 실패 → 프리셋 PTZ 로 조준(오차 가능)');
-      return this.startPtzFor({ camIdx, presetIdx } as PlateTarget);
+      return this.startPtzFor({ camIdx, presetIdx } as PlateTarget, override);
     }
   }
 
@@ -526,17 +540,21 @@ export class PtzCalibrator {
     };
   }
 
-  /** 시작 PTZ = 프리셋 정본(GET /cameras). 키별 1회 조회 캐시. 실패·미보유 → 0/0/1 폴백 + warn. */
-  private async startPtzFor(t: PlateTarget): Promise<Ptz> {
+  /**
+   * 시작 PTZ = 프리셋 정본(GET /cameras). 키별 1회 조회 캐시. 실패·미보유 → 0/0/1 폴백 + warn.
+   * override(개별 경로의 뷰어 소스) 주입 시엔 그 소스로 조회하고 **캐시를 쓰지 않는다** —
+   * 캐시 키는 cam/preset 뿐이라 소스가 다르면 서로 다른 PTZ 테이블이 섞인다.
+   */
+  private async startPtzFor(t: PlateTarget, override?: ICameraClient): Promise<Ptz> {
     const key = `${t.camIdx}:${t.presetIdx}`;
-    const hit = this.ptzByKey.get(key);
+    const hit = override ? undefined : this.ptzByKey.get(key);
     if (hit) return hit;
-    const ptz = await resolvePresetPtz(this.camera, t.camIdx, t.presetIdx);
+    const ptz = await resolvePresetPtz(override ?? this.camera, t.camIdx, t.presetIdx);
     if (!ptz) {
       logger.warn({ cam: t.camIdx, preset: t.presetIdx }, '프리셋 PTZ 미해결 → 0/0/1 시작(시야 열화 가능)');
     }
     const resolved = ptz ?? FALLBACK_START_PTZ;
-    this.ptzByKey.set(key, resolved);
+    if (!override) this.ptzByKey.set(key, resolved);
     return resolved;
   }
 

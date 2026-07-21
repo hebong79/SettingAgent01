@@ -2361,7 +2361,8 @@ async function calPointCenter(nx, ny, mode) {
     res = await fetch('/calibrate/point', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ cam, preset, point: { x: nx, y: ny }, mode }),
+      // source 동봉: 뷰어에서 보고 있는 소스 = 명령 대상(미동봉이면 서버 기동 시 고정된 파이프라인 카메라로 간다).
+      body: JSON.stringify({ cam, preset, point: { x: nx, y: ny }, mode, source: state.source || undefined }),
     });
     data = await res.json().catch(() => ({}));
   } catch (err) {

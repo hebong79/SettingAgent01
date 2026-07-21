@@ -2,6 +2,10 @@ import { existsSync, readFileSync } from 'node:fs';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { PtzCalibrator } from '../calibrate/PtzCalibrator.js';
+import type { ICameraClient } from '../clients/CameraClient.js';
+import { CameraSourceClient } from '../clients/CameraSourceClient.js';
+import type { CameraSource } from '../viewer/CameraSource.js';
+import type { ToolsConfig } from '../config/toolsConfig.js';
 
 const StartBodySchema = z.object({ slotIds: z.array(z.string()).optional() }).default({});
 
@@ -14,12 +18,18 @@ const PointBodySchema = z.object({
   // 미전달 시 legacy zoom 불리언 경로(하위호환).
   mode: z.enum(['point', 'plate', 'plate-zoom']).optional(),
   zoom: z.boolean().optional(),
+  // 명령 대상 카메라 소스 id(뷰어가 보고 있는 소스). 미지정 시 파이프라인 카메라(기존 동작).
+  source: z.string().min(1).optional(),
 });
 
 export interface CalibrateRouteDeps {
   calibrator: PtzCalibrator;
   /** slot_ptz.json 경로(GET /calibrate/result). */
   outFile: string;
+  /** 카메라 소스 레지스트리(옵셔널·가산). 주입 시에만 POST /calibrate/point 의 source 지정을 처리한다. */
+  sources?: Map<string, CameraSource>;
+  /** CameraSourceClient 조립용 카메라 설정(zoom 클램프). sources 와 함께 주입된다. */
+  cameraCfg?: ToolsConfig['camera'];
 }
 
 /**
@@ -51,15 +61,26 @@ export function registerCalibrateRoutes(app: FastifyInstance, deps: CalibrateRou
       reply.code(400);
       return { error: 'invalid body', detail: p.error.flatten() };
     }
+    // source 지정 시 그 소스로만 명령한다(뷰어에서 보고 있는 카메라 = 명령 대상).
+    // 요청마다 얇은 어댑터를 새로 만든다(상태 없음). 미지정이면 기존 파이프라인 카메라 그대로.
+    let camera: ICameraClient | undefined;
+    if (p.data.source) {
+      const src = deps.cameraCfg ? deps.sources?.get(p.data.source) : undefined;
+      if (!src) {
+        reply.code(400);
+        return { error: 'source not found' };
+      }
+      camera = new CameraSourceClient(src, deps.cameraCfg!);
+    }
     try {
       if (p.data.mode === 'point') {
         // 클릭 지점 조준: 검출·저장 없이 그 지점을 화면중앙으로(zoom 불변).
-        const a = await deps.calibrator.aimPointToCenter(p.data.cam, p.data.preset, p.data.point);
+        const a = await deps.calibrator.aimPointToCenter(p.data.cam, p.data.preset, p.data.point, camera ? { camera } : undefined);
         return { ok: a.ok, ptz: a.ptz, plateWidth: a.plateWidth, mode: a.mode, ...(a.reason ? { reason: a.reason } : {}) };
       }
       // 번호판 기반 centerOnPlate. mode 우선(plate=center만/plate-zoom=center+zoom), 없으면 legacy zoom 불리언.
       const zoom = p.data.mode ? p.data.mode === 'plate-zoom' : p.data.zoom;
-      const r = await deps.calibrator.centerOnPoint(p.data.cam, p.data.preset, p.data.point, { zoom });
+      const r = await deps.calibrator.centerOnPoint(p.data.cam, p.data.preset, p.data.point, { zoom, ...(camera ? { camera } : {}) });
       return { ok: r.ok, ptz: r.ptz, plateWidth: r.plateWidth, ...(r.reason ? { reason: r.reason } : {}) };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

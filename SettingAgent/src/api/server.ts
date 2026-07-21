@@ -95,8 +95,10 @@ export interface ApiDeps {
   pipeline?: SetupPipeline;
   /** 웹 뷰어 설정. enabled=true && sources 주입 시에만 뷰어 라우트·정적 등록(헤드리스 보존). */
   viewer?: ToolsConfig['viewer'];
-  /** 카메라 소스 레지스트리(뷰어 카메라 라우트용). */
+  /** 카메라 소스 레지스트리(뷰어 카메라 라우트 + /calibrate/point 의 source 지정용). */
   sources?: Map<string, CameraSource>;
+  /** 카메라 설정(zoom 클램프). sources 로 요청별 CameraSourceClient 를 조립할 때 사용. */
+  cameraCfg?: ToolsConfig['camera'];
   /** 웹 옵션 페이지(/settings) 편집 대상 config 파일 경로. 미지정 시 기본 config 경로. */
   settingsPaths?: SettingsPaths;
   /** DB 뷰어(/db/*) read-only 조회 대상 SQLite 파일. 주입 시에만 등록(가산·독립, R4). */
@@ -264,7 +266,13 @@ export function buildServer(deps: ApiDeps): FastifyInstance {
 
   // 주차면별 번호판 중심정렬·줌 PTZ 캘리브레이션(/calibrate/*). 의존성 주입 시에만 등록(가산).
   if (deps.calibrator && deps.calibrate) {
-    registerCalibrateRoutes(app, { calibrator: deps.calibrator, outFile: deps.calibrate.outFile });
+    // sources/cameraCfg 는 옵셔널 전달 — 주입돼야 POST /calibrate/point 의 source 지정이 살아난다(헤드리스 보존).
+    registerCalibrateRoutes(app, {
+      calibrator: deps.calibrator,
+      outFile: deps.calibrate.outFile,
+      sources: deps.sources,
+      cameraCfg: deps.cameraCfg,
+    });
   }
 
   // 번호판 탐색·확대반복·역계산(/discover/*). 센터라이징 상류 잡. 주입 시에만 등록(가산).

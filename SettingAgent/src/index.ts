@@ -114,7 +114,7 @@ async function main(): Promise<void> {
     calibrator, calibrate: tools.calibrate,
     plateDiscovery, discoverOutFile,
     pipeline,
-    viewer: tools.viewer, sources, rpc,
+    viewer: tools.viewer, sources, rpc, cameraCfg: tools.camera,
     dbFile: tools.capture.dbFile,
   });
   await app.listen({ port: tools.server.port, host: '0.0.0.0' });
