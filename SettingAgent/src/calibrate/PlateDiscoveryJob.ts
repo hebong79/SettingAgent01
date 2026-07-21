@@ -132,6 +132,9 @@ export class PlateDiscoveryJob {
     this.current = undefined;
     this.startedAt = this.now();
     this.endedAt = undefined;
+    // 직전 실행 프레임 무효화 — 새 실행이 첫 캡처를 넣기 전까지 /discover/frame 이 과거 화면을 서빙하면
+    // 카메라 위치와 화면이 어긋나 보인다(PtzCalibrator 와 동일 병).
+    this.lastFrame = undefined;
     void this.run(targets);
     return { total: targets.length };
   }

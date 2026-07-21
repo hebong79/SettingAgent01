@@ -319,6 +319,55 @@ async function refreshCurrentPtz({ quiet = false } = {}) {
   }
 }
 
+/**
+ * 카메라를 움직인 **서버 잡이 끝난 뒤** state.ptz 를 실제 위치로 재동기화한다.
+ *
+ * 방향 버튼(stepPtz)·절대이동(resolveAbsPtz)은 **state.ptz 를 기준으로 절대 목표를 계산**하는데,
+ * 서버 잡(개별/배치 센터라이징·discovery·수집)이 카메라를 움직여도 여기서 갱신하지 않으면
+ * state.ptz 가 낡은 채로 남아 **다음 UI 조작이 그전 위치로 되돌아갔다가 한 스텝 움직인다**(마스터 실측 증상).
+ *
+ * 실카는 응답의 명령값을 믿지 않고 장비 실측을 읽는다 — 명령값은 슬루 중간에 잘리거나(정착 미보장)
+ * 광학 한계에서 클램프될 수 있어 실제 위치와 다르다. 시뮬은 응답 ptz 로 충분하다(즉시 반영).
+ */
+async function syncPtzAfterJob(responsePtz) {
+  if (selectedSourceIsReal()) {
+    await refreshCurrentPtz({ quiet: true });
+    return;
+  }
+  if (responsePtz && Number.isFinite(responsePtz.pan) && Number.isFinite(responsePtz.tilt) && Number.isFinite(responsePtz.zoom)) {
+    state.ptz = { pan: responsePtz.pan, tilt: responsePtz.tilt, zoom: responsePtz.zoom };
+    updatePtzDisplay();
+    return;
+  }
+  // 응답이 PTZ 를 주지 않는 잡(배치 센터라이징·discovery·수집)은 서버에 물어본다.
+  await refreshCurrentPtz({ quiet: true });
+}
+
+/**
+ * (수정 19) **이동 기준 PTZ 를 장비에서 직접 읽는다.**
+ *
+ * 방향 버튼·절대이동의 "빈 칸 유지"는 본질적으로 **상대 명령**("왼쪽으로 2도")인데, 지금까지는 브라우저가 든
+ * **절대 좌표 캐시(state.ptz)** 를 기준으로 절대 목표를 계산했다. 캐시가 낡는 경로는 계속 생긴다 —
+ * 다른 클라이언트, 장비 자체 컨트롤러, 동기화 실패, **캐시된 옛 스크립트**(라이브에서 실제로 이 형태로 재현됐다:
+ * 센터링이 끝난 3512/1184 대신 그 이전 값 4721/1116 이 명령으로 나갔다).
+ * → 실카는 **이동 직전에 장비 현재 PTZ 를 읽어** 그것을 기준으로 삼는다. 그러면 캐시가 낡을 수가 없다.
+ *
+ * 조회 실패 시 **낡은 값으로 조용히 이동하지 않는다** — null 을 돌려 호출측이 이동을 취소하게 한다
+ * (조용한 장비 점프가 바로 이번 증상이다).
+ *
+ * 시뮬은 기존 경로 유지: 명령이 곧 상태이고(응답 즉시 반영) 라이브뷰도 state.ptz override 로 렌더돼
+ * 캐시가 낡을 구조적 경로가 없다. 왕복 1회를 추가할 근거가 없다.
+ */
+async function moveBasePtz() {
+  if (!selectedSourceIsReal()) return state.ptz;
+  const ok = await refreshCurrentPtz({ quiet: true });
+  if (!ok) {
+    $('ptz-control-status').textContent = '현재 PTZ 조회 실패 — 낡은 좌표로 이동하지 않습니다. 다시 시도하세요.';
+    return null;
+  }
+  return state.ptz;
+}
+
 async function loadSources() {
   // health 응답의 sources/sourceDetails로 소스 셀렉트와 스트림 전송방식을 함께 구성.
   try {
@@ -998,8 +1047,15 @@ async function runLiveDetect(vpdEnabled = false, ptz) {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
   });
-  if (!res.ok) return; // 실패는 조용히 미표시(기존 검출 결과 유지).
+  // ★ 이 라우트는 카메라를 **실제로 움직인다**: detectPipeline 이 미귀속 차량마다 확대 PTZ 로 requestImage 하고
+  //   루프 종료 후 원위치로 복귀하지 않는다 → state.ptz 가 낡는다. 실패 경로에서도 이미 움직였을 수 있으므로
+  //   **반환 전에 반드시** 동기화한다(성공 분기에만 걸면 실패 시 같은 버그가 남는다).
+  if (!res.ok) {
+    await syncPtzAfterJob(null);
+    return; // 실패는 조용히 미표시(기존 검출 결과 유지).
+  }
   const detect = await res.json();
+  await syncPtzAfterJob(null);
   // 수집 시점 dedup: VPD 겹침 박스를 차량당 1개(마지막 검지)로 정제해 저장 — 렌더·선택·목록·점유 소비처를 자동 정합.
   state.detectByKey[presetKey(cam, preset)] = { ...detect, vehicles: dedupeVehicles(detect.vehicles ?? []) }; // 프리셋 키별 보존(덮어쓰기 아님).
   // 차량 육면체는 **검출 응답에 인라인**으로 온다(서버가 base 프레임에서 산출 — 추가 왕복 0).
@@ -2093,6 +2149,7 @@ async function capPoll() {
   if (wasActive && (st === 'done' || st === 'stopped' || st === 'error')) {
     await fetchOccupancy();
     showCaptureResult(status);
+    await syncPtzAfterJob(null); // 수집이 프리셋을 돌며 카메라를 움직였다 → UI 기준 PTZ 재동기화.
     // 얼어붙은 마지막 프레임을 라이브 배경으로 되돌린다. 검출/점유/육면체 데이터는 보존 —
     // 종료 후에도 VPD/LPD/점유영역 박스가 오버레이 레이어로 라이브 배경 위에 남는다.
     startLive();                                       // 라이브 MJPEG 재연결(얼어붙은 마지막 프레임 대체).
@@ -2136,6 +2193,12 @@ async function pollPipeline() {
   }
   // 백엔드가 센터라이징을 발화 → calibrate 폴 재기동(idle 에서 멈춰 있던 calPoll 을 running 추종 상태로).
   if (prevPipelineStage !== 'calibrating' && stage === 'calibrating') calPoll();
+  // 탐색 단계도 카메라를 돌린다(SetupPipeline 의 전 프리셋 앵커 loop LPD) → discovery 폴도 같이 재기동해야
+  // discPoll 의 running→done 전이가 성립하고 그 안의 PTZ 동기화가 발화한다.
+  if (prevPipelineStage !== 'discovering' && stage === 'discovering') discPoll();
+  // 체인이 discovering 에서 곧바로 끝나는 두 종결(탐색 실패 / LPD 타깃 0 → 센터라이징 스킵)은
+  // calibrating 을 거치지 않아 위 폴 전이만으로는 동기화를 보장할 수 없다 → 체인 종단에서 한 번 더 맞춘다.
+  if (prevPipelineStage !== stage && (stage === 'done' || stage === 'failed')) await syncPtzAfterJob(null);
   // 상태 메시지(무장 중 cap-msg 는 파이프라인이 소유).
   if (stage === 'finalizing') {
     $('cap-msg').textContent = '자동 최종화 중…';
@@ -2374,11 +2437,19 @@ async function calPointCenter(nx, ny, mode) {
   if (res && res.status === 409) {
     $('cal-msg').textContent = '센터라이징(전체) 진행 중 — 잠시 후 다시 시도하세요';
   } else if (res && res.ok && data && data.ok) {
-    $('cal-msg').textContent = '개별 센터라이징 완료';
+    // ok:true + reason 은 "장비가 할 수 있는 일을 전부 했으나 목표 폭엔 미달"(장비 최대 배율) 케이스다.
+    // 완료로 보이되 사유를 숨기지 않는다 — 마스터가 더 확대되지 않는 이유를 알 수 있어야 한다.
+    // 사유는 zoom_saturated(장비 배율 상한) / zoom_resolution_limit(줌 해상도 한계) 등으로 갈린다 →
+    // 특정 원인을 단정하지 말고 "목표 폭 미달"이라는 사실 + 사유 문자열을 그대로 보여준다.
+    $('cal-msg').textContent = data.reason
+      ? `개별 센터라이징 완료 — 목표 폭 미달(${data.reason})`
+      : '개별 센터라이징 완료';
   } else {
     const why = (data && (data.reason || data.error)) ?? (res ? res.status : 'error');
     $('cal-msg').textContent = `종료(${why})`;
   }
+  // 개별 센터라이징(point/plate/plate-zoom 전부)은 카메라를 움직인다 → UI 기준 PTZ 재동기화.
+  await syncPtzAfterJob(data && data.ptz);
   if (mode !== 'point') startLive(); // 얼어붙은 마지막 프레임을 라이브 스트림으로 대체(point 는 라이브를 끊은 적 없음).
   calPointBusy = false;
 }
@@ -2406,6 +2477,7 @@ async function calPoll() {
   if (prevCalState === 'running' && st !== 'running') {
     if (st === 'done') await renderCalResult();
     else $('cal-msg').textContent = `종료(${st})`;
+    await syncPtzAfterJob(null); // 배치 센터라이징이 카메라를 움직였다 → UI 기준 PTZ 재동기화.
     startLive(); // 얼어붙은 마지막 센터라이징 프레임을 라이브 스트림으로 대체.
   }
   prevCalState = st;
@@ -2521,6 +2593,7 @@ async function discPoll() {
   if (prevDiscState === 'running' && st !== 'running') {
     if (st === 'done') await renderDiscResult();
     else $('disc-msg').textContent = `종료(${st})`;
+    await syncPtzAfterJob(null); // discovery 가 카메라를 움직였다 → UI 기준 PTZ 재동기화.
     startLive(); // 얼어붙은 마지막 탐색 프레임을 라이브 스트림으로 대체.
   }
   prevDiscState = st;
@@ -3616,16 +3689,22 @@ function wire() {
   wireOverlayEditing();
 
   document.querySelectorAll('[data-dir]').forEach((b) =>
-    b.addEventListener('click', () => {
+    b.addEventListener('click', async () => {
       const step = Number($('step').value) || 2;
-      move(stepPtz(state.ptz, b.dataset.dir, step));
+      // 실카는 캐시가 아니라 **장비 실측**을 기준으로 스텝을 계산한다(수정 19). 조회 실패 시 이동하지 않는다.
+      const base = await moveBasePtz();
+      if (!base) return;
+      move(stepPtz(base, b.dataset.dir, step));
     }),
   );
 
-  $('btn-abs').addEventListener('click', () => {
+  $('btn-abs').addEventListener('click', async () => {
     // 빈 칸은 현재 PTZ 유지(0/1 리셋 금지) — zoom 만 채워 이동해도 pan/tilt 프레이밍 보존.
+    // 그 "현재 PTZ"도 실카에서는 장비 실측이어야 한다(수정 19) — 캐시면 빈 칸이 낡은 값으로 굳는다.
+    const base = await moveBasePtz();
+    if (!base) return;
     move(
-      resolveAbsPtz(state.ptz, {
+      resolveAbsPtz(base, {
         pan: $('abs-pan').value,
         tilt: $('abs-tilt').value,
         zoom: $('abs-zoom').value,

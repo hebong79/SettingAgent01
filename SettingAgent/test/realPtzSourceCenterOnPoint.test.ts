@@ -40,6 +40,12 @@ function stubClient(source: RealPtzSource) {
   return { centerCalls, ptzCalls: () => ptzCalls };
 }
 
+/**
+ * 정착 폴링 타이밍 주입(수정 8 이후). centerOnPoint 는 이제 "정지 확인"까지 기다리므로
+ * 기본값(150ms×7폴)이면 케이스마다 1초씩 실시간 대기가 붙는다 — 검증 대상은 인자 계약이라 주기를 0 으로 낮춘다.
+ */
+const fastSettle = { pollMs: 0, timeoutMs: 200, sleep: async (): Promise<void> => {} };
+
 const stubCfg: CameraSourceConfig = {
   id: 'ptz1', kind: 'hucoms', host: '127.0.0.1', port: 1,
   ptz: { panRange: [0, 35999], tiltRange: [-2000, 9000], zoomRange: [0, 65535] },
@@ -48,7 +54,7 @@ const stubCfg: CameraSourceConfig = {
 // ── (A) HucomsClient 스텁 — 인자 계약 ───────────────────────────────────────────
 describe('RealPtzSource.centerOnPoint — 정규화→픽셀 변환(스텁)', () => {
   it('(0.5,0.5) → center.pointX/Y = 960/540, type="point", centerPtz 1회', async () => {
-    const source = new RealPtzSource(stubCfg);
+    const source = new RealPtzSource(stubCfg, 7000, undefined, fastSettle);
     const spy = stubClient(source);
     await source.centerOnPoint(1, { x: 0.5, y: 0.5 });
     expect(spy.centerCalls).toHaveLength(1);
@@ -56,7 +62,7 @@ describe('RealPtzSource.centerOnPoint — 정규화→픽셀 변환(스텁)', ()
   });
 
   it('일반 지점: 1920×1080 선형 매핑 + 정수 반올림', async () => {
-    const source = new RealPtzSource(stubCfg);
+    const source = new RealPtzSource(stubCfg, 7000, undefined, fastSettle);
     const spy = stubClient(source);
     await source.centerOnPoint(1, { x: 0.117, y: 0.69 }); // 리더 라이브 검증 클릭 좌표.
     expect(spy.centerCalls[0].pointX).toBe(Math.round(0.117 * 1920)); // 224.64 → 225
@@ -66,7 +72,7 @@ describe('RealPtzSource.centerOnPoint — 정규화→픽셀 변환(스텁)', ()
   });
 
   it('경계: (0,0)→(0,0), (1,1)→(1920,1080)', async () => {
-    const source = new RealPtzSource(stubCfg);
+    const source = new RealPtzSource(stubCfg, 7000, undefined, fastSettle);
     const spy = stubClient(source);
     await source.centerOnPoint(1, { x: 0, y: 0 });
     await source.centerOnPoint(1, { x: 1, y: 1 });
@@ -75,7 +81,7 @@ describe('RealPtzSource.centerOnPoint — 정규화→픽셀 변환(스텁)', ()
   });
 
   it('범위 밖 클릭 clamp: 음수·1 초과는 0/최대로 접힘(HucomsValidationError 미발생)', async () => {
-    const source = new RealPtzSource(stubCfg);
+    const source = new RealPtzSource(stubCfg, 7000, undefined, fastSettle);
     const spy = stubClient(source);
     await source.centerOnPoint(1, { x: -0.4, y: 1.9 });
     expect(spy.centerCalls[0]).toMatchObject({ pointX: 0, pointY: 1080 });
@@ -84,17 +90,19 @@ describe('RealPtzSource.centerOnPoint — 정규화→픽셀 변환(스텁)', ()
   });
 
   it('setcenter 후 PTZ 조회로 확정해 Viewer 좌표계 Ptz 반환(echo 없음 → 장비 조회 위임)', async () => {
-    const source = new RealPtzSource(stubCfg);
+    const source = new RealPtzSource(stubCfg, 7000, undefined, fastSettle);
     const spy = stubClient(source);
     const ptz: Ptz = await source.centerOnPoint(1, { x: 0.3, y: 0.7 });
-    expect(spy.ptzCalls()).toBe(1);
+    // 수정 8: setcenter 후 "정지 확인" 폴링이 추가돼 조회는 여러 번 일어난다.
+    // 이 케이스의 계약은 "echo 가 없으니 **장비 조회로 확정**한다"이지 "정확히 1회"가 아니다.
+    expect(spy.ptzCalls()).toBeGreaterThanOrEqual(1);
     expect(ptz.pan).toBeCloseTo(0, 1);   // 17999/35999 → 중앙 → 0°
     expect(ptz.tilt).toBeCloseTo(0, 1);  // 3500 ∈ [-2000,9000] 중앙 → 0°
     expect(ptz.zoom).toBeCloseTo(18.5, 1);
   });
 
   it('centerPtz 실패는 삼키지 않고 전파(조용한 강등 금지)', async () => {
-    const source = new RealPtzSource(stubCfg);
+    const source = new RealPtzSource(stubCfg, 7000, undefined, fastSettle);
     Reflect.set(source, 'client', {
       centerPtz: async () => { throw new Error('setcenter http 500'); },
       getPtzfPosition: async () => ({ values: {} }),

@@ -58,9 +58,10 @@ export interface CameraSource {
   streamMjpeg?(cam: number, presetIdx: number, signal: AbortSignal, ptz?: Ptz): AsyncGenerator<Buffer>;
   /**
    * (선택) 장비 네이티브 지점 센터링 — 정규화 지점(0~1)을 화면 중앙으로 보낸다(pan/tilt 만, zoom 불변).
-   * 미구현 소스는 호출측이 게인 기하로 폴백한다. 반환은 이동 후 PTZ.
+   * 미구현 소스는 호출측이 게인 기하로 폴백한다. 반환은 이동 후 PTZ + (선택) 정착 확인 여부.
+   * settled:false = 장비가 멈춘 것을 확인하지 못함(호출측은 그 PTZ 를 다음 명령 기준으로 쓰면 안 된다).
    */
-  centerOnPoint?(cam: number, point: { x: number; y: number }): Promise<Ptz>;
+  centerOnPoint?(cam: number, point: { x: number; y: number }): Promise<Ptz & { settled?: boolean }>;
   /** (선택) 실 PTZ 소스 로그인. sim 소스는 미구현. */
   login?(user: string, pass: string): Promise<boolean>;
   toNativePtz(viewerPtz: Ptz): unknown;

@@ -133,7 +133,8 @@
       "baseUrl": "http://192.168.0.153:80",
       "username": "admin",
       "password": "admin",
-      "rtspUrl": "rtsp://192.168.0.153:554/stream1"
+      "rtspUrl": "rtsp://192.168.0.153:554/stream1",
+      "ptz": { "zoomRange": [0, 16384] }
     },
     {
       "id": "real-camera-2",
@@ -143,7 +144,8 @@
       "baseUrl": "http://192.168.0.154:80",
       "username": "admin",
       "password": "",
-      "rtspUrl": "rtsp://192.168.0.154:554/stream1"
+      "rtspUrl": "rtsp://192.168.0.154:554/stream1",
+      "ptz": { "zoomRange": [0, 16384] }
     }
   ],
   "cameraMode": "simulator"

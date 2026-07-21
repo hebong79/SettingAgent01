@@ -1,7 +1,7 @@
 import type { ToolsConfig } from '../config/toolsConfig.js';
 import type { CapturedImage } from '../domain/types.js';
 import type { CameraList, CameraSource, Ptz } from '../viewer/CameraSource.js';
-import type { ICameraClient } from './CameraClient.js';
+import type { ICameraClient, NativeCenterResult } from './CameraClient.js';
 
 /**
  * 선택된 Viewer CameraSource를 SettingAgent의 셋업·수집 공통 ICameraClient로 연결한다.
@@ -12,7 +12,7 @@ export class CameraSourceClient implements ICameraClient {
    * (선택) 장비 네이티브 지점 센터링. **소스가 지원할 때만** 정의된다 —
    * 무조건 메서드로 두면 미지원 소스(시뮬)까지 "지원"으로 보여 호출측 능력 판정이 무너진다.
    */
-  centerOnPoint?: (camIdx: number, point: { x: number; y: number }) => Promise<Ptz>;
+  centerOnPoint?: (camIdx: number, point: { x: number; y: number }) => Promise<NativeCenterResult>;
 
   constructor(
     private readonly source: CameraSource,

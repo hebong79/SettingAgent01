@@ -152,6 +152,19 @@ export class PtzCalibrator {
     return this.lastFrame;
   }
 
+  /**
+   * 카메라를 움직이는 잡 **시작 시** 직전 실행의 프레임 버퍼를 버린다.
+   *
+   * ★ 없으면 표시 버그가 된다(마스터 신고): 새 실행이 첫 캡처를 넣기 전까지 `/calibrate/frame` 이
+   *   **직전 실행의 마지막 프레임**(예: 36배 확대 화면)을 계속 서빙하고, 뷰어는 그 사이 라이브를 끊고
+   *   이 라우트를 폴링하므로 **카메라는 새 위치로 갔는데 화면만 과거를 보여준다**.
+   * 비운 뒤에는 라우트가 404(기존 "버퍼 없음" 계약)를 돌려주고 뷰어는 갱신을 스킵해
+   *   **클릭 시점의 라이브 프레임에 머문다** — 과거 실행 이미지를 현재인 양 보여주는 것보다 정직하다.
+   */
+  private clearLastFrame(): void {
+    this.lastFrame = undefined;
+  }
+
   getStatus(): CalibrateStatus {
     return {
       state: this.state,
@@ -189,6 +202,7 @@ export class PtzCalibrator {
     if (this.state === 'running') throw new Error('calibrate already running');
     if (this.pointBusy) throw new Error('point centering busy');
     this.pointBusy = true;
+    this.clearLastFrame(); // 직전 실행 프레임이 새 실행 화면으로 새는 것을 막는다.
     try {
       const cam = opts?.camera;
       const startPtz = await this.currentPtzFor(camIdx, presetIdx, cam);
@@ -238,6 +252,7 @@ export class PtzCalibrator {
     if (this.state === 'running') throw new Error('calibrate already running');
     if (this.pointBusy) throw new Error('point centering busy');
     this.pointBusy = true;
+    this.clearLastFrame(); // 검출은 없지만 카메라는 움직인다 → 직전 프레임은 이 시점부터 과거다.
     try {
       // 카메라 오버라이드(뷰어가 보고 있는 소스) 우선 — 미주입이면 파이프라인 카메라.
       const camera = opts?.camera ?? this.camera;
@@ -314,6 +329,7 @@ export class PtzCalibrator {
     this.current = undefined;
     this.startedAt = this.now();
     this.endedAt = undefined;
+    this.clearLastFrame(); // 직전 실행 프레임 무효화(배치도 동일 병).
     void this.run(targets);
     return { total: targets.length };
   }
