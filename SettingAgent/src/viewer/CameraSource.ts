@@ -56,6 +56,11 @@ export interface CameraSource {
    * ptz 제공 시 수동 PTZ override(pan/tilt/zoom)를 스트림에 실어 렌더(루프3). 미제공 시 preset 기본.
    */
   streamMjpeg?(cam: number, presetIdx: number, signal: AbortSignal, ptz?: Ptz): AsyncGenerator<Buffer>;
+  /**
+   * (선택) 장비 네이티브 지점 센터링 — 정규화 지점(0~1)을 화면 중앙으로 보낸다(pan/tilt 만, zoom 불변).
+   * 미구현 소스는 호출측이 게인 기하로 폴백한다. 반환은 이동 후 PTZ.
+   */
+  centerOnPoint?(cam: number, point: { x: number; y: number }): Promise<Ptz>;
   /** (선택) 실 PTZ 소스 로그인. sim 소스는 미구현. */
   login?(user: string, pass: string): Promise<boolean>;
   toNativePtz(viewerPtz: Ptz): unknown;

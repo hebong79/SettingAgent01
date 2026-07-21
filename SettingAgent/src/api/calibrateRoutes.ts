@@ -10,8 +10,9 @@ const PointBodySchema = z.object({
   cam: z.number().int().nonnegative(),
   preset: z.number().int().nonnegative(),
   point: z.object({ x: z.number(), y: z.number() }),
-  // mode: 'plate'=번호판 center / 'plate-zoom'=center+zoom. 미전달 시 legacy zoom 불리언 경로(하위호환).
-  mode: z.enum(['plate', 'plate-zoom']).optional(),
+  // mode: 'point'=클릭 지점 자체를 화면중앙으로(pan/tilt·검출없음) / 'plate'=번호판 center / 'plate-zoom'=center+zoom.
+  // 미전달 시 legacy zoom 불리언 경로(하위호환).
+  mode: z.enum(['point', 'plate', 'plate-zoom']).optional(),
   zoom: z.boolean().optional(),
 });
 
@@ -51,6 +52,11 @@ export function registerCalibrateRoutes(app: FastifyInstance, deps: CalibrateRou
       return { error: 'invalid body', detail: p.error.flatten() };
     }
     try {
+      if (p.data.mode === 'point') {
+        // 클릭 지점 조준: 검출·저장 없이 그 지점을 화면중앙으로(zoom 불변).
+        const a = await deps.calibrator.aimPointToCenter(p.data.cam, p.data.preset, p.data.point);
+        return { ok: a.ok, ptz: a.ptz, plateWidth: a.plateWidth, mode: a.mode, ...(a.reason ? { reason: a.reason } : {}) };
+      }
       // 번호판 기반 centerOnPlate. mode 우선(plate=center만/plate-zoom=center+zoom), 없으면 legacy zoom 불리언.
       const zoom = p.data.mode ? p.data.mode === 'plate-zoom' : p.data.zoom;
       const r = await deps.calibrator.centerOnPoint(p.data.cam, p.data.preset, p.data.point, { zoom });

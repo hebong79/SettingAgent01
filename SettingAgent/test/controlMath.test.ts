@@ -10,10 +10,11 @@ import {
   dampGain,
   zoomForWidth,
   buildSlotPtzJson,
+  aimPtzForPoint,
 } from '../src/calibrate/controlMath.js';
 import type { PlateBox } from '../src/clients/LpdClient.js';
 import { rectToQuad, quadBoundingRect } from '../src/domain/geometry.js';
-import type { SlotPtzItem } from '../src/calibrate/types.js';
+import type { Ptz, SlotPtzItem } from '../src/calibrate/types.js';
 
 /**
  * 검증자(qa-tester): 캘리브레이션 제어 수학(순수, 외부 의존 0).
@@ -138,5 +139,71 @@ describe('buildSlotPtzJson', () => {
     expect(a.createdAt).toBe('2026-06-30T00:00:00Z');
     expect(a.items).toHaveLength(1);
     expect(a.items[0].slotId).toBe('c1p1s1');
+  });
+});
+
+/**
+ * 검증자(qa-tester): aimPtzForPoint — 설계서 §1(a)·§2 테스트 계획 1번.
+ * "정규화 지점을 화면중앙으로" 의 절대 pan/tilt 순수함수. pre-aim(선조준)과 클릭점 조준의 단일 출처.
+ * 불변: zoom 은 base.zoom 그대로(개방루프 1샷·줌 미접촉), 게인 ∝ 1/zoom, 스텝 ±maxStepDeg 클램프.
+ */
+describe('aimPtzForPoint (클릭점 조준 기하, §1-a)', () => {
+  // 실측 폴백 게인(cfg.fallbackGain*). ★음수 — panTiltCorrection 이 -err*gain 이라 최종 부호는 +err 방향.
+  const GAIN = { gainPan: -62, gainTilt: -35.5, zoomRef: 1 };
+  const base: Ptz = { pan: 10, tilt: 5, zoom: 1 };
+
+  it('정중앙 클릭(0.5,0.5) → 델타 0(base 그대로), zoom 불변', () => {
+    const a = aimPtzForPoint({ x: 0.5, y: 0.5 }, base, GAIN, 90);
+    expect(a.pan).toBeCloseTo(base.pan, 10);
+    expect(a.tilt).toBeCloseTo(base.tilt, 10);
+    expect(a.zoom).toBe(base.zoom);
+  });
+
+  it('부호: 우하단 클릭 → pan↑·tilt↑ / 좌상단 클릭 → pan↓·tilt↓', () => {
+    const rb = aimPtzForPoint({ x: 0.8, y: 0.9 }, base, GAIN, 90);
+    expect(rb.pan).toBeGreaterThan(base.pan);
+    expect(rb.tilt).toBeGreaterThan(base.tilt);
+    const lt = aimPtzForPoint({ x: 0.2, y: 0.1 }, base, GAIN, 90);
+    expect(lt.pan).toBeLessThan(base.pan);
+    expect(lt.tilt).toBeLessThan(base.tilt);
+  });
+
+  it('수치: (0.8,0.9)@zoom1 → dPan=0.3*62=18.6, dTilt=0.4*35.5=14.2', () => {
+    const a = aimPtzForPoint({ x: 0.8, y: 0.9 }, base, GAIN, 90);
+    expect(a.pan).toBeCloseTo(10 + 18.6, 9);
+    expect(a.tilt).toBeCloseTo(5 + 14.2, 9);
+  });
+
+  it('zoom 불변: base.zoom 이 무엇이든 반환 zoom 은 동일(줌 미접촉 — Goal 핵심 제약)', () => {
+    for (const z of [1, 1.6934098, 2, 12, 36]) {
+      const a = aimPtzForPoint({ x: 0.13, y: 0.77 }, { ...base, zoom: z }, GAIN, 90);
+      expect(a.zoom).toBe(z);
+    }
+  });
+
+  it('게인 ∝ 1/zoom: zoom 2배 → 동일 클릭의 pan/tilt 델타가 정확히 절반', () => {
+    const p = { x: 0.8, y: 0.9 };
+    const z1 = aimPtzForPoint(p, { pan: 0, tilt: 0, zoom: 1 }, GAIN, 90);
+    const z2 = aimPtzForPoint(p, { pan: 0, tilt: 0, zoom: 2 }, GAIN, 90);
+    expect(z2.pan).toBeCloseTo(z1.pan / 2, 9);
+    expect(z2.tilt).toBeCloseTo(z1.tilt / 2, 9);
+    // zoom 4배 → 1/4.
+    const z4 = aimPtzForPoint(p, { pan: 0, tilt: 0, zoom: 4 }, GAIN, 90);
+    expect(z4.pan).toBeCloseTo(z1.pan / 4, 9);
+  });
+
+  it('maxStep 클램프: 큰 오차라도 |Δ| ≤ maxStepDeg (양·음 양방향)', () => {
+    const hi = aimPtzForPoint({ x: 1, y: 1 }, base, GAIN, 3);
+    expect(hi.pan).toBeCloseTo(base.pan + 3, 9);
+    expect(hi.tilt).toBeCloseTo(base.tilt + 3, 9);
+    const lo = aimPtzForPoint({ x: 0, y: 0 }, base, GAIN, 3);
+    expect(lo.pan).toBeCloseTo(base.pan - 3, 9);
+    expect(lo.tilt).toBeCloseTo(base.tilt - 3, 9);
+  });
+
+  it('maxStep 미도달 구간은 클램프 무영향(선형 유지)', () => {
+    const a = aimPtzForPoint({ x: 0.55, y: 0.55 }, base, GAIN, 90);
+    expect(a.pan).toBeCloseTo(10 + 0.05 * 62, 9);
+    expect(a.tilt).toBeCloseTo(5 + 0.05 * 35.5, 9);
   });
 });

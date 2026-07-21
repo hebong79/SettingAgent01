@@ -8,7 +8,7 @@ import { quadBoundingRect, center } from '../domain/geometry.js';
 import type { NormalizedPoint, NormalizedRect } from '../domain/types.js';
 import { resolvePresetPtz } from '../capture/detectPipeline.js';
 import { expandPlateTargetsFromSlotSetup, writeSlotPtz } from './slotPtzWriter.js';
-import { buildSlotPtzJson, scaleGainForZoom, panTiltCorrection, zoomForWidth } from './controlMath.js';
+import { buildSlotPtzJson, aimPtzForPoint, zoomForWidth } from './controlMath.js';
 import { setupSaveName, type SaveStore } from '../store/SaveStore.js';
 import { PlatePtz, type PlatePtzOpts, type PlatePtzResult } from './platePtz.js';
 import type { PlateTarget, Ptz, SlotPtzItem, CalibrateState, CalibrateStatus } from './types.js';
@@ -183,6 +183,51 @@ export class PtzCalibrator {
       return { ok: centered.ok, ptz: centered.ptz, plateWidth: centered.plateWidth, ...(centered.reason ? { reason: centered.reason } : {}) };
     } finally {
       this.pointBusy = false;
+    }
+  }
+
+  /**
+   * 클릭 지점 조준(신규·가산): 조작자가 가리킨 **정규화 지점 자체**를 화면 중앙으로 보낸다.
+   * 번호판 기준 `centerOnPoint` 와 목적이 다르다 — 검출(LPD) 0회·저장 0회·zoom 불변·개방루프 1샷.
+   *
+   * 1. 상호배타 가드는 centerOnPoint 와 동일한 락(state==='running' · pointBusy)을 재사용.
+   * 2. 기준 PTZ = **현재 PTZ**(클릭은 "지금 보이는 화면" 기준이라 프리셋 base 를 쓰면 어긋난다).
+   *    조회 실패 시 프리셋 PTZ 로 폴백하되 warn 을 남긴다(조용한 강등 금지).
+   * 3. 소스가 네이티브 센터링(휴컴스 ptz_centering setcenter)을 지원하면 그것에 위임(mode:'native'),
+   *    아니면 게인 기하로 절대 pan/tilt 를 계산해 move 1회(mode:'geometric').
+   */
+  async aimPointToCenter(
+    camIdx: number,
+    presetIdx: number,
+    point: NormalizedPoint,
+  ): Promise<{ ok: boolean; ptz: Ptz; plateWidth: null; mode: 'native' | 'geometric'; reason?: string }> {
+    if (this.state === 'running') throw new Error('calibrate already running');
+    if (this.pointBusy) throw new Error('point centering busy');
+    this.pointBusy = true;
+    try {
+      // 네이티브 분기가 먼저 — 장비가 스스로 계산하므로 기준 PTZ 조회(왕복 1회)가 불필요하다.
+      const native = this.camera.centerOnPoint;
+      if (native) {
+        const ptz = await native.call(this.camera, camIdx, point);
+        return { ok: true, ptz, plateWidth: null, mode: 'native' };
+      }
+      const cur = await this.currentPtzFor(camIdx, presetIdx);
+      const aim = aimPtzForPoint(point, cur, this.gainRef(), PREAIM_MAX_STEP);
+      const ok = await this.camera.move(camIdx, aim.pan, aim.tilt, aim.zoom);
+      // 이동 거절(false)은 조용히 200 ok:false 로 나가면 UI 가 '종료(200)' 로 보인다 — 사유를 붙인다.
+      return { ok, ptz: aim, plateWidth: null, mode: 'geometric', ...(ok ? {} : { reason: 'move_failed' }) };
+    } finally {
+      this.pointBusy = false;
+    }
+  }
+
+  /** 클릭 조준 기준 PTZ = 장비 현재 PTZ. 조회 실패 시 프리셋 PTZ 폴백(+warn — 조용한 강등 금지). */
+  private async currentPtzFor(camIdx: number, presetIdx: number): Promise<Ptz> {
+    try {
+      return await this.camera.getPtz(camIdx);
+    } catch (err) {
+      logger.warn({ cam: camIdx, preset: presetIdx, err: String(err) }, '현재 PTZ 조회 실패 → 프리셋 PTZ 로 조준(오차 가능)');
+      return this.startPtzFor({ camIdx, presetIdx } as PlateTarget);
     }
   }
 
@@ -452,18 +497,17 @@ export class PtzCalibrator {
   /**
    * 선조준(pre-aim): 슬롯 LPD 박스 중심 → 화면중앙으로 base PTZ 를 결정형 1스텝 보정.
    * 공유 base(프리셋)에서 슬롯마다 다른 시작점을 만들어 폐루프가 이웃 판으로 갈아타는 latch 를 차단(R1).
-   * controlMath(scaleGainForZoom·panTiltCorrection) + geometry.center 재사용 — 코어 무접촉.
+   * controlMath(aimPtzForPoint) + geometry.center 재사용 — 코어 무접촉.
    * zoom 은 불변(넓은 시야 유지, 센터링은 zoom 미접촉). PREAIM_MAX_STEP coarse 클램프.
    */
   private preAimPtz(t: PlateTarget, base: Ptz): Ptz {
-    const g = scaleGainForZoom(
-      { gainPan: this.cfg.fallbackGainPanDeg, gainTilt: this.cfg.fallbackGainTiltDeg, zoomRef: 1 },
-      base.zoom,
-    );
     const c = center(t.plateRoi); // plateRoi 는 이미 quadBoundingRect rect.
-    const err = { errX: c.cx - 0.5, errY: c.cy - 0.5 };
-    const pt = panTiltCorrection(err, g, base.pan, base.tilt, PREAIM_MAX_STEP);
-    return { pan: pt.pan, tilt: pt.tilt, zoom: base.zoom };
+    return aimPtzForPoint({ x: c.cx, y: c.cy }, base, this.gainRef(), PREAIM_MAX_STEP);
+  }
+
+  /** 폴백 게인(측정 기준 zoom=1). pre-aim·클릭점 조준 공용. */
+  private gainRef(): { gainPan: number; gainTilt: number; zoomRef: number } {
+    return { gainPan: this.cfg.fallbackGainPanDeg, gainTilt: this.cfg.fallbackGainTiltDeg, zoomRef: 1 };
   }
 
   /** cfg → PlatePtz opts(그대로 전달). matchRadiusNorm 은 PlatePtz 기본값. maxZoomStepRatio 는 cfg 지정 시 전달. */

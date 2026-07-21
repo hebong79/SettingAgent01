@@ -35,6 +35,11 @@ export interface ICameraClient {
   getPtz(camIdx: number): Promise<Ptz>;
   listCameras(): Promise<CameraList>;
   move(camIdx: number, pan: number, tilt: number, zoom: number): Promise<boolean>;
+  /**
+   * (선택) 장비 네이티브 지점 센터링 — 정규화 지점(0~1)을 화면 중앙으로. pan/tilt 만, zoom 불변.
+   * 지원 구현만 노출한다(미정의 = 미지원 → 호출측이 기하 폴백). 반환은 이동 후 PTZ.
+   */
+  centerOnPoint?(camIdx: number, point: { x: number; y: number }): Promise<Ptz>;
 }
 
 /**

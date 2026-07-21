@@ -14,6 +14,17 @@ const VIEWER_PAN_RANGE: [number, number] = [-180, 180];
 const VIEWER_TILT_RANGE: [number, number] = [-90, 90];
 const VIEWER_ZOOM_RANGE: [number, number] = [1, 36];
 
+/**
+ * ptz_centering setcenter 의 좌표 기준 해상도(HTTP API Hucoms V1.22: 0~1920 / 0~1080 고정).
+ * 스트림 해상도가 다르더라도 장비는 이 기준으로 해석하므로 정규화 좌표를 여기에 매핑한다.
+ */
+const CENTERING_BASE_WIDTH = 1920;
+const CENTERING_BASE_HEIGHT = 1080;
+
+function clamp01(v: number): number {
+  return Math.min(1, Math.max(0, v));
+}
+
 interface NativePtz {
   pan: number;
   tilt: number;
@@ -125,6 +136,20 @@ export class RealPtzSource implements CameraSource {
     });
     this.lastPtz = ptz;
     return true;
+  }
+
+  /**
+   * 네이티브 지점 센터링(ptz_centering setcenter, type=point) — 지정 지점을 화면 중앙으로. pan/tilt 만 움직인다.
+   * setcenter 응답에는 PTZ echo 가 없으므로 이동 후 장비 조회로 현재 PTZ 를 확정해 반환한다.
+   */
+  async centerOnPoint(_camera: number, point: { x: number; y: number }): Promise<Ptz> {
+    await this.client.centerPtz({
+      type: 'point',
+      pointX: Math.round(clamp01(point.x) * CENTERING_BASE_WIDTH),
+      pointY: Math.round(clamp01(point.y) * CENTERING_BASE_HEIGHT),
+      speed: 50,
+    });
+    return this.currentPtz();
   }
 
   async *streamMjpeg(

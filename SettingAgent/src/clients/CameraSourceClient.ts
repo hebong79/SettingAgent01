@@ -8,10 +8,18 @@ import type { ICameraClient } from './CameraClient.js';
  * 소스 구현(Unity RPC/REST, Hucoms V1.22)은 이 어댑터 바깥으로 누출되지 않는다.
  */
 export class CameraSourceClient implements ICameraClient {
+  /**
+   * (선택) 장비 네이티브 지점 센터링. **소스가 지원할 때만** 정의된다 —
+   * 무조건 메서드로 두면 미지원 소스(시뮬)까지 "지원"으로 보여 호출측 능력 판정이 무너진다.
+   */
+  centerOnPoint?: (camIdx: number, point: { x: number; y: number }) => Promise<Ptz>;
+
   constructor(
     private readonly source: CameraSource,
     private readonly cameraConfig: ToolsConfig['camera'],
-  ) {}
+  ) {
+    if (source.centerOnPoint) this.centerOnPoint = (camIdx, point) => source.centerOnPoint!(camIdx, point);
+  }
 
   clampZoom(zoom: number): number {
     return Math.min(this.cameraConfig.zoomMax, Math.max(this.cameraConfig.zoomMin, zoom));

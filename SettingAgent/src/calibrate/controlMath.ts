@@ -5,7 +5,7 @@
 import type { NormalizedRect } from '../domain/types.js';
 import { quadBoundingRect } from '../domain/geometry.js';
 import type { PlateBox } from '../clients/LpdClient.js';
-import type { SlotPtzItem, SlotPtzArtifact } from './types.js';
+import type { Ptz, SlotPtzItem, SlotPtzArtifact } from './types.js';
 
 /** 번호판 중심 오프셋(화면 중앙 0.5 기준). errX>0=오른쪽, errY>0=아래쪽. */
 export function plateCenterError(rect: NormalizedRect): { errX: number; errY: number } {
@@ -138,6 +138,23 @@ export function scaleGainForZoom(
 ): { gainPan: number; gainTilt: number } {
   const k = gain.zoomRef / zoom;
   return { gainPan: gain.gainPan * k, gainTilt: gain.gainTilt * k };
+}
+
+/**
+ * 정규화 지점(0~1)을 화면중앙으로 보내는 절대 pan/tilt. **zoom 불변**(개방루프 1샷).
+ * 기하는 pre-aim(선조준)과 동일 — 게인을 사용 시점 zoom 으로 스케일한 뒤 P 제어 1스텝(±maxStepDeg 클램프).
+ * 대상이 번호판이든 클릭점이든 "화면상 오차를 0 으로" 라는 수학은 같으므로 여기로 추출해 공유한다.
+ */
+export function aimPtzForPoint(
+  point: { x: number; y: number },
+  base: Ptz,
+  gain: { gainPan: number; gainTilt: number; zoomRef: number },
+  maxStepDeg: number,
+): Ptz {
+  const g = scaleGainForZoom(gain, base.zoom);
+  const err = { errX: point.x - 0.5, errY: point.y - 0.5 };
+  const pt = panTiltCorrection(err, g, base.pan, base.tilt, maxStepDeg);
+  return { pan: pt.pan, tilt: pt.tilt, zoom: base.zoom };
 }
 
 /**
