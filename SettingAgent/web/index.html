@@ -187,6 +187,8 @@
               <label class="field check cap-autochain" title="시작(수집) 완료 후 자동 연쇄: 최종화 → LPD 탐색(앞면중심 앵커 loop)·점유영역 생성 → 센터라이징. 각 단계가 slot_setup(DB)·파일에 저장된다."><input id="cap-autochain" type="checkbox" /><span><strong>완료 후 자동 최종화</strong><small>+ LPD탐색·점유영역 + 센터라이징</small></span></label>
             </div>
             <div class="cap-actions toolbar capture-actions" aria-label="정밀 수집 실행">
+              <button id="cap-load-roi" title="PtzCamRoi.json(바닥 ROI 정본)을 읽어 DB slot_setup 을 전량 재구성. 기존 검출(VPD/LPD)·점유영역·센터라이징은 모두 사라진다. 되돌릴 수 없음">ROI 파일 로딩</button>
+              <button id="cap-build-cuboid" title="지면모델로 각 주차면의 3D 육면체와 앞면 중심점을 산출해 DB(slot_setup.slot3d_front_center)에 저장하고 화면에 표시. 검출·점유·센터링은 건드리지 않음">3D육면체 ROI생성</button>
               <button id="cap-start" class="primary">시작</button>
               <button id="cap-stop">정지</button>
               <button id="cap-finalize">최종화</button>

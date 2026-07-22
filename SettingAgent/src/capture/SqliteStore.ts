@@ -190,6 +190,15 @@ export class SqliteStore {
     tx(rows);
   }
 
+  /** 등록된 프리셋 키 집합(`${camId}:${presetId}`). slot_setup INSERT 전 FK 부모 판정용. */
+  getPresetKeys(): Set<string> {
+    const rows = this.db.prepare(`SELECT cam_id AS camId, preset_id AS presetId FROM preset_pos`).all() as Array<{
+      camId: number;
+      presetId: number;
+    }>;
+    return new Set(rows.map((r) => `${r.camId}:${r.presetId}`));
+  }
+
   // ── slot_setup ──────────────────────────────────────────
   /**
    * 확정본 전량 교체(finalize). DELETE 후 INSERT 전량을 **단일 트랜잭션**으로 —
@@ -307,6 +316,22 @@ export class SqliteStore {
       }
     });
     tx(rows);
+  }
+
+  /**
+   * 3D 앞면 중심(slot3d_front_center)만 slot_id 키로 부분 UPDATE(updated_at 동반).
+   * ★ 전량 delete 금지(upsertSlotLpd 와 동일 규약) — 타깃 외 슬롯·타 컬럼(slot_roi/vpd/lpd/occupy/센터링) 불변.
+   * slot3dFrontCenter 는 이미 stringify5 직렬화된 정규화 좌표 JSON TEXT(호출측 규약).
+   * slot_id 미존재 행은 조용히 무시. 반환=실제 갱신 행수.
+   */
+  upsertSlotFrontCenter(rows: Array<{ slotId: number; slot3dFrontCenter: string | null; updatedAt: string }>): number {
+    const stmt = this.db.prepare(`UPDATE slot_setup SET slot3d_front_center = ?, updated_at = ? WHERE slot_id = ?`);
+    const tx = this.db.transaction((list: typeof rows) => {
+      let changed = 0;
+      for (const r of list) changed += stmt.run(r.slot3dFrontCenter ?? null, r.updatedAt, r.slotId).changes;
+      return changed;
+    });
+    return tx(rows);
   }
 
   /** slot_setup 검출·센터링 컬럼 전량 초기화(수동 '초기화' 버튼). slot_roi·행은 보존. 반환=초기화 행수. */

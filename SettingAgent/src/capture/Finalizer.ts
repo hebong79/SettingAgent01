@@ -16,13 +16,11 @@ import { logger } from '../util/logger.js';
 import { stringify5 } from '../util/round.js';
 import { buildGroundInputs } from '../ground/groundInputs.js';
 import { estimateGroundModels } from '../ground/groundModel.js';
-import { backprojectToGround, projectCuboidPixels, frontFaceCenterPx } from '../ground/project.js';
+import { H_CONST, slotFrontCenter } from '../ground/slotFrontCenter.js';
 import { parseCameraViews } from '../setup/mapTargets.js';
 import type { GroundModel } from '../ground/types.js';
-import type { Vec3 } from '../ground/contactTypes.js';
 import type {
   GlobalSlotIndex,
-  NormalizedPoint,
   NormalizedQuad,
   NormalizedRect,
   ParkingSlot,
@@ -35,29 +33,6 @@ import type { CaptureSnapshot } from './CaptureJob.js';
 /** 슬롯 ID(기존 slotIdOf 규칙 동일). */
 function slotIdOf(camIdx: number, presetIdx: number, positionIdx: number): string {
   return `c${camIdx}p${presetIdx}s${positionIdx}`;
-}
-
-/** slot_setup 앞면 중심 DB 저장용 캐노니컬 높이(m). 뷰어 슬라이더 기본값과 동일. */
-const H_CONST = 1.5;
-
-/**
- * 정규화 슬롯 quad(4점) + GroundModel + 높이 → 앞면 중심(정규화 0..1) | null.
- * points→픽셀→backprojectToGround→projectCuboidPixels(h)→frontFaceCenterPx→ /imgW,/imgH.
- * 지면모델 퇴화(지평선 위 등)/코너 수 이상 → null(강등, 저장은 null).
- */
-function slotFrontCenter(points: NormalizedPoint[], g: GroundModel, h: number): { x: number; y: number } | null {
-  if (!Array.isArray(points) || points.length !== 4) return null;
-  const floorGround: Vec3[] = [];
-  for (const p of points) {
-    const X = backprojectToGround({ x: p.x * g.imgW, y: p.y * g.imgH }, g);
-    if (!X) return null;
-    floorGround.push(X);
-  }
-  const corners = projectCuboidPixels(floorGround, h, g);
-  if (!corners) return null;
-  const c = frontFaceCenterPx(corners);
-  if (!c) return null;
-  return { x: c.x / g.imgW, y: c.y / g.imgH };
 }
 
 export interface FinalizerDeps {

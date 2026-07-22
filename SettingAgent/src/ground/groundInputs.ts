@@ -35,13 +35,20 @@ export function buildGroundInputs(placeRoiJson: unknown, views: CameraView[]): G
         if (sp.points.length !== 4) continue; // 4점 아닌 면은 추정 표본 제외(강등).
         quads.push(sp.points.map((p) => ({ x: p.x * imgW, y: p.y * imgH })) as PixelQuad);
       }
+      // PTZ 소스 우선순위: **ROI 파일 자체의 프리셋 PTZ** > camerapos 뷰.
+      // 시뮬레이터가 내보내는 ROI 정본이 프리셋별 pan/tilt/zoom 을 담으므로 그것이 진실이고,
+      // camerapos.json 은 뒤처진 사본일 수 있다(실측: cam1 preset3 zoom 이 ROI 1 vs camerapos 1.46583).
+      const own = presetRaw as { ptz?: { pan?: unknown; tilt?: unknown; zoom?: unknown }; pan?: unknown; tilt?: unknown; zoom?: unknown };
+      const ownSrc = own?.ptz ?? own;
       const ptz = ptzOf.get(key);
+      const pick = (a: unknown, b: unknown): number | null =>
+        typeof a === 'number' && Number.isFinite(a) ? a : typeof b === 'number' && Number.isFinite(b) ? b : null;
       presets.push({
         camIdx,
         presetIdx,
-        zoom: typeof ptz?.zoom === 'number' ? ptz.zoom : null,
-        tilt: typeof ptz?.tilt === 'number' ? ptz.tilt : null,
-        pan: typeof ptz?.pan === 'number' ? ptz.pan : null,
+        zoom: pick(ownSrc?.zoom, ptz?.zoom),
+        tilt: pick(ownSrc?.tilt, ptz?.tilt),
+        pan: pick(ownSrc?.pan, ptz?.pan),
         quads,
       });
     }

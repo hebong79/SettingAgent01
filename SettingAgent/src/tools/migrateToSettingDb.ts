@@ -15,119 +15,12 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadToolsConfig } from '../config/toolsConfig.js';
-import { normalizePtzCamRoi, normalizeGlobalIdx } from '../capture/placeRoi.js';
 import { SqliteStore } from '../capture/SqliteStore.js';
-import type {
-  CameraInfoRow,
-  PlaceInfoRow,
-  PresetPosRow,
-  SlotCenteringRow,
-  SlotSetupRow,
-} from '../capture/types.js';
-import { stringify5 } from '../util/round.js';
-
-const PLACE_ID = 1;
-const PLACE_NAME = 'Place01';
+import { buildCameras, buildPresets, buildSlots, PLACE_ID, PLACE_NAME } from '../capture/roiDbLoad.js';
+import type { PlaceInfoRow, SlotCenteringRow } from '../capture/types.js';
 
 function readJson(file: string): unknown {
   return JSON.parse(readFileSync(file, 'utf-8'));
-}
-
-/** PtzCamRoi cameras[].camera → camera_info(자동탐색 미보유 필드는 NULL). */
-function buildCameras(ptzRaw: unknown, now: string): CameraInfoRow[] {
-  const cameras = Array.isArray((ptzRaw as { cameras?: unknown })?.cameras)
-    ? (ptzRaw as { cameras: unknown[] }).cameras
-    : [];
-  const out: CameraInfoRow[] = [];
-  for (const entry of cameras) {
-    const cam = (entry as { camera?: { cam_id?: unknown; imageWidth?: unknown; imageHeight?: unknown } })?.camera;
-    const camId = Number(cam?.cam_id);
-    if (!Number.isInteger(camId)) continue;
-    out.push({
-      camId,
-      camName: null,
-      camUuid: null,
-      url: null,
-      userId: null,
-      password: null,
-      rtspUrl: null,
-      camType: 'ptz',
-      camCompany: null,
-      placeId: PLACE_ID,
-      imgW: Number.isFinite(Number(cam?.imageWidth)) ? Number(cam?.imageWidth) : null,
-      imgH: Number.isFinite(Number(cam?.imageHeight)) ? Number(cam?.imageHeight) : null,
-      updatedAt: now,
-    });
-  }
-  return out;
-}
-
-/** camerapos datas[].datas[] → preset_pos. */
-function buildPresets(cameraposRaw: unknown, now: string): PresetPosRow[] {
-  const groups = Array.isArray((cameraposRaw as { datas?: unknown })?.datas)
-    ? (cameraposRaw as { datas: unknown[] }).datas
-    : [];
-  const out: PresetPosRow[] = [];
-  for (const g of groups) {
-    const inner = Array.isArray((g as { datas?: unknown })?.datas) ? (g as { datas: unknown[] }).datas : [];
-    for (const d of inner) {
-      const p = d as { cam_id?: unknown; preset_id?: unknown; sname?: unknown; pan?: unknown; tilt?: unknown; zoom?: unknown };
-      const camId = Number(p?.cam_id);
-      const presetId = Number(p?.preset_id);
-      if (!Number.isInteger(camId) || !Number.isInteger(presetId)) continue;
-      out.push({
-        camId,
-        presetId,
-        sname: typeof p?.sname === 'string' ? p.sname : null,
-        pan: Number(p?.pan),
-        tilt: Number(p?.tilt),
-        zoom: Number(p?.zoom),
-        updatedAt: now,
-      });
-    }
-  }
-  return out;
-}
-
-/**
- * PtzCamRoi parking_spaces → slot_setup(기하만; 센터라이징 PTZ 는 별도 UPDATE).
- * slot_id = normalizeGlobalIdx 결과(전역 1..N). preset_slotidx = 프리셋 내 배열순 1-based.
- * slot_roi = 정규화 4점 폴리곤(NormalizedPoint[]) JSON.
- */
-function buildSlots(ptzRaw: unknown, now: string): SlotSetupRow[] {
-  const { byPreset } = normalizePtzCamRoi(ptzRaw);
-  const normalized = normalizeGlobalIdx(byPreset); // 전역 slot_id 확정(정본 정규화 유틸 재사용)
-  const out: SlotSetupRow[] = [];
-  // key 정렬(cam asc → preset asc) — normalizeGlobalIdx 와 동일 순서로 preset_slotidx 부여.
-  const keys = [...normalized.keys()].sort((a, b) => {
-    const [ca, pa] = a.split(':').map(Number);
-    const [cb, pb] = b.split(':').map(Number);
-    return ca - cb || pa - pb;
-  });
-  for (const key of keys) {
-    const [camId, presetId] = key.split(':').map(Number);
-    const spaces = normalized.get(key) ?? [];
-    spaces.forEach((sp, i) => {
-      out.push({
-        slotId: sp.idx,
-        camId,
-        presetId,
-        presetSlotIdx: i + 1, // 배열순 1-based
-        slotRoi: stringify5(sp.points), // 정규화 NormalizedPoint[]
-        vpdBbox: null,
-        lpdObb: null,
-        occupyRange: null,
-        pan: null,
-        tilt: null,
-        zoom: null,
-        centered: 0,
-        img1: null,
-        slot3dFrontCenter: null, // 마이그레이션엔 지면모델 없음 → null(다음 finalize 에서 채워짐).
-        updatedAt: now,
-      });
-    });
-  }
-  return out;
 }
 
 /**
