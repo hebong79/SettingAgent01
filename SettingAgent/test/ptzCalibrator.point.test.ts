@@ -227,16 +227,29 @@ describe('centerOnPoint — zoom 분기 (§5-A-3)', () => {
   });
 });
 
-describe('centerOnPoint — 줌 실패 시맨틱 (§5-A-4, 구현이 정본)', () => {
-  it('center ok + zoom plate_lost → center 결과 기반 반환(ok:true, zoom reason 미전파)', async () => {
+describe('centerOnPoint — 줌 실패 시맨틱 (§5-A-4, 거짓 성공 금지선)', () => {
+  // ★ 이 테스트는 **의미가 뒤집혔다**(이터3/P1). 구 버전은 "z.ok=false 면 낙하해 center 결과를 ok:true 로 반환"
+  //   이라는 **위장 성공을 고정**하고 있었다. 리더 라이브 실측에서 그 경로가 실제로 관측됐다:
+  //   slot1 이 zoom 1.69 / plateWidth 0.032(=base 폭, 줌이 전혀 안 됨)인데 응답은 ok:true → UI "완료".
+  //   줌을 요청받아 시도했다면 그 결과가 정본이므로 실패는 실패로 보고해야 한다.
+  it('center ok + zoom plate_lost → 줌 결과가 정본(ok:false + reason 전파, ptz/폭은 줌 단계 실측)', async () => {
     const { cal, spy } = build({ center: centerOkResult, zoom: zoomLostResult });
     const r = await cal.centerOnPoint(1, 1, PT, { zoom: true });
-    // 구현: z.ok=false 이면 낙하해 center 결과 반환. z.reason('plate_lost')는 전파 안 됨.
     expect(spy.counts().zoomCalls).toBe(1);
-    expect(r.ok).toBe(true);
-    expect(r.ptz).toEqual(centerOkResult.ptz);
-    expect(r.plateWidth).toBe(centerOkResult.plateWidth);
-    expect(r.reason).toBeUndefined();
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('plate_lost');
+    // 카메라는 줌 단계가 마지막으로 명령한 위치에 있다 — 센터링 시점 PTZ 를 싣는 것은 거짓말이다.
+    expect(r.ptz).toEqual(zoomLostResult.ptz);
+    expect(r.plateWidth).toBe(zoomLostResult.plateWidth);
+  });
+
+  it('zoom!==false 로 요청했는데 줌이 실패하면 ok:true 가 되는 경로가 없다', async () => {
+    const { cal } = build({ center: centerOkResult, zoom: zoomLostResult });
+    for (const opts of [undefined, { zoom: true }]) {
+      const r = await cal.centerOnPoint(1, 1, PT, opts);
+      expect(r.ok).toBe(false);
+      expect(r.reason).toBeDefined();
+    }
   });
 });
 

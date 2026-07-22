@@ -156,6 +156,29 @@ const CalibrateSchema = z.object({
    */
   pointMatchRadiusNorm: z.number().min(0).max(1).optional(),
   /**
+   * (개별 클릭 전용) 추적 캡처 미검 시 **재포착 1배수 화면 변위(정규화)**. 미지정 시 코드 기본 0.0014(1080p ≈1.5px).
+   * LPD 는 같은 프레임에 대해 결정적이라 같은 PTZ 재캡처로는 회복되지 않는다 — tilt 를 흔들어 프레이밍을
+   * 바꾼 뒤 다시 본다. ★ 단위가 각도가 아니라 변위인 이유: 검출기 불안정은 **픽셀 공간** 현상이라
+   * 고정 각도는 zoom 에 따라 픽셀 이동이 36배까지 달라진다. 실제 tilt 각은 zoom 별로 환산된다.
+   * 라이브에서 더 큰 재프레이밍이 필요하면 이 값을 올린다(실측: 6px 에서 회복).
+   */
+  pointRecaptureDitherNorm: z.number().min(0).max(0.5).optional(),
+  /**
+   * (개별 클릭 전용) 재포착 디더 재캡처 최대 횟수. 미지정 시 코드 기본 6 = 에스컬레이팅 사다리
+   * `[+1,−1,+2,−2,+4,−4]×변위` 전체(1.5px→3px→6px 양방향) → `plate_lost` 는 연속 7회 미검에서만 확정.
+   * 0 으로 두면 1회 미검 즉시 실패(구 동작).
+   * ★ 게이트(matchRadiusNorm)는 재시도에서도 **완화되지 않는다** — 반경 밖 이웃 판을 대신 채택하는 일은 없다.
+   * ★ 배치(calibrateSlot) 경로에는 적용되지 않는다.
+   */
+  pointRecaptureRetries: z.number().int().min(0).max(8).optional(),
+  /**
+   * (개별 클릭 전용) **줌 스텝 직후 캡처**의 재포착 승법 디더 1배수 비율. 미지정 시 코드 기본 0.01(±1%).
+   * 그 지점은 배율이 바뀐 새 프레임이라 회복 축이 tilt 가 아니라 **zoom** 이다(실측: tilt 디더 7시도 전패,
+   * zoom +1% 로 재검출 — LPD 의 zoom 축 데드존이 좁고 산발적이다). 사다리 배수와 곱해 ±1/2/4% 를 훑는다.
+   * ★ pan/tilt 이동 직후 캡처는 `pointRecaptureDitherNorm`(tilt 축)이 담당한다 — 두 노브는 지점이 다르다.
+   */
+  pointRecaptureZoomStep: z.number().min(0).max(0.5).optional(),
+  /**
    * (개별 클릭 전용) center+zoom 줌 사다리 사용 여부. 미지정 시 'auto'.
    * - 'auto'   = 소스가 네이티브 센터링(centerOnPoint)을 지원할 때만 사다리(실카). 시뮬은 기존 경로 100%(회귀 0).
    * - 'always' = 네이티브 없는 소스(시뮬)에서도 사다리(재중심은 기하 게인 1샷 폴백). 통합 실험용.
