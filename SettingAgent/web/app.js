@@ -2326,6 +2326,60 @@ async function resetSlotSetupDb() {
   $('cap-msg').textContent = `초기화 완료: ${data.cleared ?? 0}개 슬롯`;
 }
 
+// ROI 파일 로딩: PtzCamRoi.json(바닥 ROI 정본) → DB slot_setup 전량 재구성(검출·점유·센터링은 초기값).
+async function loadRoiToDb() {
+  if (!confirm('PtzCamRoi.json 으로 DB slot_setup 을 전량 재구성합니다. 기존 검출(VPD/LPD)·점유영역·센터라이징(PTZ)은 모두 사라집니다. 되돌릴 수 없습니다. 진행할까요?')) return;
+  const res = await fetch('/capture/slots/load-roi', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.ok) { $('cap-msg').textContent = `ROI 로딩 실패: ${data.error ?? res.status}`; return; }
+  resetOverlayDisplay();           // 클라 라이브 오버레이(detect/occ/vcuboid) 정리.
+  // 카메라·프리셋 드롭다운 재수신 — 서버가 camerapos.json 을 ROI 정본으로 갱신했으므로 목록·PTZ 가 바뀐다.
+  // 이걸 빼면 화면은 옛 PTZ 로 이동하는데 오버레이는 새 ROI 기준이라 육면체가 어긋난 위치에 그려진다.
+  await loadCameras();
+  state.roiHidden = false;         // 로딩 결과를 즉시 표시(이전 수집·초기화로 숨김 상태였을 수 있음).
+  state.placeRoiLoaded = false;    // 1회 로드 가드 해제 — 파일 ROI 정본이 바뀌었으므로 반드시 재로딩.
+  state.placeRoiDirty = false;     // 이전 세션의 미저장 편집 버퍼는 폐기(파일이 새 정본).
+  await loadPlaceRoi();            // 파일 소스 재조회 → state.placeRoi(주차면 목록·오버레이·검출 필터 기준) 갱신.
+  state.groundLoaded = false;      // 1회 로드 가드 해제 — ROI 정본이 바뀌었으므로 지면모델도 재산출해야 한다.
+  await loadGroundModel();
+  await loadParkingSlots();        // DB 재조회 → 새 slot_setup 반영(parkingSlotsByKey 갱신).
+  drawRoiOverlay();
+  renderSlotList();
+  const skipped = (data.skipped ?? []).map((s) => `cam${s.camId}:preset${s.presetId} ${s.count}건(${s.reason})`);
+  const parts = [`ROI 로딩 완료: 슬롯 ${data.slots}건 / 카메라 ${data.cameras} / 프리셋 ${data.presets}`];
+  if (skipped.length) parts.push(`스킵 ${skipped.join(', ')}`);
+  if ((data.issues ?? []).length) parts.push(`이슈 ${data.issues.join(' | ')}`);
+  $('cap-msg').textContent = parts.join(' — ');
+}
+
+// 3D육면체 ROI생성: 지면모델로 슬롯별 육면체 앞면 중심(slot3d_front_center)을 산출해 DB 저장 + 즉시 표시.
+// 파괴적이지 않다(검출·점유·센터링 무접촉) → confirm 없음. 산출 실패 슬롯은 기존 값 보존(skipped 로 드러남).
+async function buildSlotCuboids() {
+  const res = await fetch('/capture/slots/cuboid', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ heightM: cuboidHeight() }), // 화면 슬라이더 높이 = 저장 높이(표시=저장 정합).
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.ok) { $('cap-msg').textContent = `3D육면체 생성 실패: ${data.error ?? res.status}`; return; }
+  state.groundLoaded = false;      // 1회 로드 가드 해제 — 지면모델 재산출(렌더 근거 갱신).
+  await loadGroundModel();
+  $('roi-cuboid').checked = true;  // 육면체 오버레이 자동 ON(결과가 보이게).
+  state.roiHidden = false;
+  await loadParkingSlots();        // DB 갱신분(slot3dFrontCenter) 반영.
+  drawRoiOverlay();
+  renderSlotList();
+  const parts = [`3D육면체 생성: 산출 ${data.updated}건 / 스킵 ${(data.skipped ?? []).length}건 (h=${data.heightM}m)`];
+  const skipped = (data.skipped ?? []).map((s) => `#${s.slotId}(${s.reason})`);
+  if (skipped.length) parts.push(`스킵 ${skipped.join(', ')}`);
+  const models = (data.models ?? []).map((m) => `${m.key} conf=${Number(m.conf).toFixed(3)}`);
+  if (models.length) parts.push(`모델 ${models.join(' / ')}`);
+  const modelIssues = (data.models ?? []).flatMap((m) => (m.issues ?? []).map((i) => `${m.key}: ${i}`));
+  const allIssues = [...(data.issues ?? []), ...modelIssues];
+  if (allIssues.length) parts.push(`이슈 ${allIssues.join(' | ')}`);
+  $('cap-msg').textContent = parts.join(' — ');
+}
+
 // 현재 프리셋의 라이브 LPD 검출(state.detectByKey)을 슬롯 공간배정 → slot_setup.lpd 에 저장("DB에 추가").
 async function saveLpdToDb() {
   const cam = state.capFrameKey2?.cam ?? state.cam;
@@ -3695,6 +3749,8 @@ function wire() {
   $('occupy-build').addEventListener('click', buildOccupyRange); // DB lpd → occupy_range 결정형 재생성.
   $('roi-clear').addEventListener('click', resetOverlayDisplay); // #5: 표시 초기화 — 모든 오버레이 토글 off(데이터 보존).
   $('cap-reset-db').addEventListener('click', resetSlotSetupDb); // 검출·센터링 DB 초기화(slot_setup vpd/lpd/occupy/ptz 비움).
+  $('cap-load-roi').addEventListener('click', loadRoiToDb); // PtzCamRoi.json → slot_setup 전량 재구성.
+  $('cap-build-cuboid').addEventListener('click', buildSlotCuboids); // 지면모델 → slot3d_front_center 산출·저장·표시.
   // 산출물(setup_artifact) 편집·결과 파일 도구(분석 탭으로 이관 — 핸들러·id 는 동일).
   $('slot-add').addEventListener('click', addSlot); // 요구 B: 전역 인덱스 중간삽입
   $('roi-delete').addEventListener('click', deleteSelectedSlot); // #2

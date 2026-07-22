@@ -1,139 +1,120 @@
-# 03_qa_report — 개별 center+zoom 재포착(이터1~3) 검증
+# 03 검증(qa) — "ROI 파일 로딩"(PtzCamRoi.json → DB slot_setup 재구성)
 
-작성: 2026-07-22 · 검증자(qa-tester) · B 모드 마감 검증
-대상: `src/calibrate/platePtz.ts`(captureTrack / captureTrackZoom / ditherMultipliers) · `src/calibrate/PtzCalibrator.ts`(centerOnPoint P1 · recaptureOpts) · `src/config/toolsConfig.ts`
-입력: `_workspace/00_goal.md` · `01_architect_plan.md` §3~§9 · `02_developer_changes.md` §1~§13
+검증자(qa-tester). 설계서 `01_architect_plan.md` "검증(qa)" 1~5번 전부 수행.
+실행: `cd SettingAgent && npx vitest run` (전체 스위트).
 
-> **카메라 API 호출 0건.** 라이브 스윕은 리더가 이미 끝냈으므로 `/calibrate/point`·`/viewer/api/move` 를 포함해 어떤 카메라 경로도 호출하지 않았다. 이 보고서는 **유닛(모킹) 결과만** 담고, 검증하지 못한 항목은 §6 한계에 그대로 남겼다.
+## 1. 신규/수정 테스트 파일
 
----
+| 파일 | 구분 | 케이스 수 |
+|------|------|----------|
+| `test/roiDbLoad.test.ts` | 신규 | 12 |
+| `test/captureLoadRoiRoutes.test.ts` | 신규 | 5 |
+| `test/viewerPtzSyncCoverage.test.ts` | 수정(1줄, 라우트 분류 등록) | 기존 유지 |
 
-## 1. 실행 결과(있는 그대로)
+임시 DB 는 전부 `new SqliteStore(':memory:')`, 임시 입력 파일은 `os.tmpdir()` 아래 `mkdtempSync`.
+**실제 `data/setting.sqlite` 는 열지 않았다**(수정시각 Jul 18 그대로). 읽기 전용 참조는 `data/Place01/PtzCamRoi.json`·`config/camerapos.json` 뿐이다.
 
-| 항목 | 결과 |
-|---|---|
-| `npx tsc --noEmit` | **exit 0, 에러 0** |
-| `npx vitest run` (전건) | **198 파일 / 2327 테스트 전건 통과, 실패 0** |
-| 신규 테스트 파일 | `test/platePtzRecapture.test.ts`(21) · `test/ptzCalibratorRecaptureWiring.test.ts`(10) = **31건 신규** |
-| 기존 테스트 | **1건도 수정·삭제하지 않았다**(구현자 보고 196/2296 + 신규 2파일/31건 = 198/2327 로 정확히 일치) |
+### 1-1. `test/roiDbLoad.test.ts` (설계 qa 1~3)
 
-스텁 관례는 기존 파일(`platePtzLadder.test.ts` 의 상태 있는 스텁 카메라, `platePtz.test.ts` 의 명령-PTZ 추적 + 실측 물리 게인 −62/−35.5)을 그대로 따랐다. LPD 모델은 `(명령 PTZ, 캡처 순번)` 의 함수로, "프레임 내에서는 결정적이고 프레이밍이 바뀌면 결과가 바뀐다"는 리더 실측을 그대로 모사한다.
+정상 로딩(실제 `data/Place01/PtzCamRoi.json`, 전 프리셋 커버 camerapos 픽스처 사용):
+1. 파일의 전 주차면이 slot_setup 으로 재구성 — `slot_id` 1..N **고유·연속**, `res.slots` = `buildSlots()` 산출 행수와 일치.
+2. `preset_slotidx` 프리셋별 1-based 연속, `slot_roi` 4점 정규화(아래 §3-1 주의).
+3. 합성 픽스처(전 점 프레임 내) → `slot_roi` 4점이 정확히 `0.1/0.3` 등 0~1 값(정규화 스케일 정합).
+4. 검출/센터링 컬럼 초기값 — `vpd/lpd/occupyRange/pan/tilt/zoom/img1 = null`, `centered = false(0)`.
+5. 기존 검출·센터링이 있는 DB 에 로딩 시 전량 교체(centered 전부 해제, 행수 = `res.slots`).
+6. [현황 기록] 실제 `config/camerapos.json` 사용 시 FK 부모 없는 (cam,preset) 은 `skipped[]` 로 빠지고 나머지는 정상 INSERT.
 
----
+★ wipe 금지 회귀 가드(최우선) — 기존 3행 시드 후:
+7. ROI 파일 없음 → `ok:false`, `slots:0`, **3행 그대로**.
+8. `{"cameras":[]}` → `ok:false`, **3행 그대로**.
+9. JSON 파싱 실패 → `ok:false`, `error` 에 '파싱 실패', **3행 그대로**.
+10. 실패 경로에서 기존 슬롯의 `centered/pan/vpd` 값도 무손상.
 
-## 2. 지시 항목별 고정 결과
+FK 스킵:
+11. 부모 있는 cam1:preset1(2면) + 부모 없는 cam9:preset9(1면) → `ok:true`, `slots:2`,
+    `skipped = [{camId:9, presetId:9, count:1, reason:'preset_pos 부모 없음(FK)'}]`, camerapos 미지정 경고가 `issues` 에 노출.
+12. 부모 없는 슬롯만 있는 ROI → `ok:false`(error 에 '무변경'), `skipped` 1건, **기존 3행 보존**.
 
-### 2-1. tilt 디더 회복 (지시 ①) — **통과**
+### 1-2. `test/captureLoadRoiRoutes.test.ts` (설계 qa 5)
 
-| 고정한 사실 | 단언 |
-|---|---|
-| 첫 캡처 미검 + 디더 프레임 검출 → `ok:true` | R2 (`recaptureDithers:3`, +2배수에서 회복) |
-| 배수 사다리 순서 | 추적 캡처 7회의 tilt 델타가 정확히 `[0,+1,−1,+2,−2,+4,−4]×d` (오차 1e-9) |
-| 각도 환산 = `u × |fallbackGainTiltDeg| / zoom` | zoom 1.6934098 → ±4배수 = **0.1174°**(리더가 회복을 확인한 0.12°와 일치) |
-| 픽셀 등가(zoom 불변) | zoom 36 → ±4배수 = **0.00552°**. 두 zoom 모두 변위 환산값이 **정확히 0.0056**(=4×0.0014, 오차 1e-12) |
-| 디더된 PTZ 채택(원복 금지) | 성공 시 `res.ptz.tilt` = 회복 프레임의 명령 tilt / 실패 시 = 마지막 명령 tilt |
-| `recaptureDithers` 누계 정의 | 2반복에서 각 1회 디더 → **2**(호출 단위 누계임을 명시 고정) |
+`captureResetRoutes.test.ts` 의 `buildServer` + `app.inject` 패턴 재사용.
+1. **404** — `placeRoiFile` 미설정 → `{ok:false, error:'placeRoiFile 미설정'}`.
+2. **200** — `{ok:true, slots:2, cameras:1, presets:1, skipped:[], issues:[]}`, `error` 부재.
+   왕복으로 `GET /capture/slots` → 2행, `slotId [1,2]`, `centered:false`, `vpd/pan:null`, `roi` 4점.
+3. **409** — 파일 없음 → `ok:false`, `error` 문자열, `slots:0`, `skipped/issues` 배열, 기존 3행 무손실(`centered:true` 유지).
+4. **409** — 빈 `cameras` → 기존 2행 무손실.
+5. 회귀 — `POST /capture/slots/reset` 은 영향 없음(`{ok:true, cleared:2}`, 행 보존).
 
-### 2-2. zoom 승법 디더(C 지점, 지시 ②) — **통과**
+### 1-3. `test/viewerPtzSyncCoverage.test.ts` 1줄 수정 (사소 — 명시)
 
-| 시나리오 | 결과 |
-|---|---|
-| 리더 실측 표 그대로의 데드존(7.8/8.0/8.1738 ✗, 8.25 ✓) | **×1.01 한 칸으로 회복**(`dithers:1`) |
-| 라이브에서 관측된 더 넓은 데드존 | **×1.02 에서 회복**(`dithers:3`), 승법 사다리가 `×1.01 → ×0.99 → ×1.02` 순서임을 비율 1e-9 정밀도로 고정 |
-| `clampZoom` 포화 | ×1.01 이 clamp 로 같은 배율이면 **캡처 자체가 발생하지 않고**(총 캡처 3회) `dithers` 에도 세지 않는다 |
-| zoom 축 금지선 | 반경 밖 이웃만 있는 경우 6디더 전부 소진 후 `plate_lost`, 반환 plate 는 직전 대상 |
+기존 가드 테스트가 "app.js 가 호출하는 모든 라우트는 MOVES_CAMERA/NO_MOVE 로 분류되어야 한다"를 강제한다.
+신규 `/capture/slots/load-roi` 가 미분류라 **실패**했다. 이 라우트는 카메라를 움직이지 않으므로
+`NO_MOVE` 에 `'/capture/slots/load-roi': 'DB'` 로 등록했다(구현 코드 변경 없음, 테스트 분류 등록만).
 
-> **정직 보고(리더 실측과의 차이)**: 리더가 남긴 zoom 표(8.25 ✓)를 **문자 그대로** 스텁에 넣으면 `×1.01` 한 칸에서 회복된다. 라이브 이터3에서 `×1.02` 가 필요했다는 것은 **실제 데드존이 표본(8.1738 ↔ 8.25) 사이보다 넓었다**는 뜻이다. 두 경우를 각각 별도 테스트로 고정했다.
+## 2. 실행 결과(있는 그대로)
 
-### 2-3. ★ 금지선(거짓 성공 0, 지시 ③) — **통과**
+신규 2파일 단독: **17 passed / 0 failed**.
 
-| 케이스 | 결과 |
-|---|---|
-| 추적 중 대상 소실 + 이웃(간격 0.15)만 존재 | `ok:false` / `plate_lost` / `recaptureDithers:6` / 반환 plate = **직전 대상**(이웃 confidence 아님) |
-| 클릭 반경 밖 판만 존재(최초 선정) | `ok:false` / **`no_plate_near_click`** / **`plate===null`** / **캡처 정확히 1회**(첫 캡처는 디더하지 않는다 — 설계 §3.5) |
-| 전 시도 미검 | `plate_lost` 확정 |
-| **완화된 반경이 쓰이지 않는다** | 게이트 **바로 밖** 0.0805 · 0.083 · 0.085 에 유령 판을 놓고 6디더 전부 소진 → **전부 미채택**. 실측 기각거리(0.126)나 "이론적 최악 확장선"(0.08+0.0056=0.0856)까지 어느 지점도 통과하지 않는다 |
+전체 스위트(`npx vitest run`):
 
-### 2-4. ★ P1 위장 성공 제거 (지시 ④) — **통과**
+```
+Test Files  1 failed | 199 passed (200)
+     Tests  1 failed | 2343 passed (2344)
+```
 
-`PtzCalibrator.centerOnPoint` 가 `zoom!==false` 로 줌을 시도한 뒤 줌이 실패하면:
-- `ok:false` + **줌 단계 reason** 전파(`plate_lost` / `zoom_saturated` / `max_iterations` 3종 파라미터화 고정)
-- `ptz`·`plateWidth` 는 **줌 단계가 마지막으로 도달한 값**
-- 라이브 위장 성공 재현(`zoom 1.6934 / plateWidth 0.032`)에서 `opts` 미지정·`{zoom:true}` **양쪽 모두 `ok:true` 가 되지 않는다**
-- 줌 **성공** 경로와 `zoom:false` 경로는 종전 그대로(반전이 성공 경로를 오염시키지 않았음을 `toEqual` 전체 shape 으로 고정)
+유일한 실패: `test/slot3dFrontCenter.test.ts > [후속] 실데이터 스모크 — PtzCamRoi.json 프리셋2 근접면 검증`.
 
-### 2-5. 무회귀 (지시 ⑤) — **통과**
+**이 실패는 본 기능과 무관한 선행 실패(데이터 기인)임을 실험으로 확인했다:**
+- `SettingAgent/src`·`web` 변경을 통째로 stash 해도 동일하게 실패.
+- `data/Place01/PtzCamRoi.json`(작업트리에서 시뮬레이터가 재생성돼 수정됨) 만 stash 하면 **22/22 통과**.
+→ 원인은 코드가 아니라 **재생성된 ROI 정본 데이터**(cam2 추가·프리셋2 winding 변화). 본 변경의 결함이 아니다.
+설계서 qa 4번(기존 회귀 무손상): `test/migrateToSettingDb.test.ts` **7/7 무수정 통과**, `test/captureResetRoutes.test.ts` 3/3 통과.
 
-| 고정한 사실 | 단언 |
-|---|---|
-| 기본(재시도 0) 미검 1회 | 즉시 `plate_lost`, 추적 캡처 **정확히 1회**, `ptz` = 원 명령값, `recaptureDithers` **필드 부재**(`in` 연산자로 확인) |
-| "옵션 미주입" ≡ "retries:0 + 디더 상수 명시" | **캡처 궤적 배열과 결과 객체가 완전히 동일**(`toEqual`) = 추가 왕복 0 |
-| `zoomToPlateWidth` 기본 | 줌 직후 미검 1회 → 즉시 `plate_lost`, 캡처 정확히 2회 |
-| 배치(`calibrateSlot`) | `start()` 종단 실행 중 생성된 **모든** PlatePtz opts 에 `plateRecapture*` 키가 **하나도 없다**(구조적 무회귀) |
-| 사다리(`centerAndZoomByLadder`) | ① 주입 opts 에 재포착 키 없음 ② latch 후 미검이 있는 픽스처에서 `retries 0` 과 `6` 의 **캡처 궤적·결과가 완전 동일** = D 지점 미적용 고정 |
-| 주입 경로 | 클릭 경로의 center·zoom 두 PlatePtz 모두 `6 / 0.0014 / 0.01`, cfg(`pointRecapture*`)로 튜닝 시 그대로 반영 |
+## 3. 발견 사항
 
----
+### 3-1. 설계서 성공기준 vs 실데이터 불일치(구현 결함 아님 — 설계서 기준이 낡음)
 
-## 3. 반증 시도(요청 항목) — 결론과 근거
+- 설계서/지시서는 "slot_setup **17행**, slot_id 1..17, cam1 preset 1·2·3" 을 전제한다.
+  **현재 작업트리의 `data/Place01/PtzCamRoi.json` 은 cam1(7+4+2=13면) + cam2(6+4=10면) = 총 23면**이다(Phase 0 조사 이후 파일이 재생성됨).
+  그래서 테스트는 17을 하드코딩하지 않고 **파일에서 산출한 기대값**과 대조한다.
+- "slot_roi 4점 **모두 0~1**" 도 실데이터에서 성립하지 않는다. 실제 파일에 프레임 밖 좌표가 4곳 있다
+  (cam1:preset2 idx1, cam1:preset3 idx1(2점), cam2:preset2 idx1/idx4 → 정규화 시 `-0.0348`, `>1` 등).
+  `src/capture/placeRoi.ts` 는 이를 **의도적으로 클램프·드롭하지 않고 보존**하며 `issues` 로만 보고한다(주석에 명시된 정본 규약).
+  → 테스트는 "4점·유한·(-0.2,1.2) 이내 + 프레임 밖이면 `issues` 에 보고" 로 검증하고, 엄격한 0~1 은 합성 픽스처로 별도 검증했다.
 
-### 3-1. 디더가 "다른 판"을 잡아 성공으로 위장할 수 있는 입력이 있는가 → **없다(경계까지 확인)**
+### 3-2. 운영 주의(결함 아님, 설계된 동작): 실제 config/camerapos.json 으로는 cam2 슬롯 10건이 통째로 스킵된다
 
-- 최대 디더 변위 = `4 × 0.0014 = 0.0056`(변위 단위라 **zoom 무관 고정**).
-- prior 는 매 시도 디더분을 포함해 재계산되고, 대상·이웃은 강체 평행이동이라 **prior↔이웃 상대거리는 디더에 불변**이다. 즉 예측 모델이 정확한 한 게이트 확장은 **0**이다.
-- 모델 오차를 최악으로 잡아도(=보정이 전혀 안 먹는 가정) 확장 상한은 0.0056 → 유효 반경 최악 0.0856. **이웃 판 최소 간격 0.15 의 3.7%** 이고 게이트(0.08)의 7%다. 이웃이 게이트 안으로 들어오려면 간격이 0.0856 이하여야 하는데 실측 간격은 0.15 다 → **수치적으로 도달 불가능**.
-- 그래도 경계를 직접 두드렸다: 0.0805 / 0.083 / 0.085(=확장 상한 창 안쪽)에 유령 판을 놓고 6디더 전부 → **채택 0건**.
-- 구조적 근거: `captureTrack`/`captureTrackZoom` 시그니처에 radius 가 **1개**뿐이라 "재시도용 완화 반경" 개념 자체가 존재할 수 없다(코드 리뷰로 확인).
+`config/camerapos.json` 에는 `cam1:preset1/2/3` 만 있다. 현재 ROI 파일에는 cam2 가 있으므로
+버튼을 실제로 누르면 **cam2 의 10면은 `skipped[]` 로 빠지고 13면만 INSERT** 된다(FK 전량실패 방지 규약대로).
+UI 는 이를 숨기지 않고 `#cap-msg` 에 노출하므로 은폐는 없다. 다만 cam2 를 DB 에 넣으려면
+`camerapos.json` 에 cam2 프리셋이 선행 등록되어야 한다는 **운영 선행조건**이다.
 
-### 3-2. zoom 디더 ±4% 가 폭 판정을 유리하게 왜곡할 수 있는가 → **왜곡 없음. 다만 목표폭이 ±4% 만큼 다른 배율에서 성립할 수 있다**
+### 3-3. 경계면 교차 비교 — 불일치 없음
 
-- 수렴 판정은 **항상 디더된 그 프레임에서 실측한 폭**으로만 내린다(디더 전 폭을 재사용하는 경로가 코드에 없다). "회복 프레임에서 수렴이 일어나는" 픽스처로 직접 고정: 반환 `ptz.zoom` = 디더된 zoom, `plateWidth` = 그 배율의 실측 폭(오차 1e-12). **(zoom, plateWidth) 쌍이 서로 정합**하므로 하류(저장·표시)로 나가는 값이 거짓이 되지 않는다.
-- 산술 여유: 폭 ∝ zoom 이므로 ±4% → 목표 0.2 기준 ±0.008. 라이브 정본 `widthTol 0.015` 의 53%, 코드 기본 0.02 의 40%. 즉 "디더 덕분에 tol 안으로 들어오는" 프레임이 존재할 수 있으나 그때 보고되는 폭은 **그 프레임의 참값**이라 위장이 아니다. 대가는 "최종 zoom 이 무디더 대비 최대 4% 다르다"뿐이다.
+`web/app.js:2330 loadRoiToDb` ↔ 라우트 반환 `RoiDbLoadResult` 필드 대조:
 
-### 3-3. `dithers` 정의·`recaptureDithers` 필드가 계약을 깨는가 → **깨지 않는다(단 1건 비대칭 있음 — §5-2)**
+| app.js 소비 | 라우트/타입 | 판정 |
+|---|---|---|
+| `data.ok` | `ok: boolean` | 일치 |
+| `data.error ?? res.status` | `error?: string`(404/409 시 채움) | 일치(성공 시 undefined 는 미사용 경로) |
+| `data.slots`, `data.cameras`, `data.presets` | `number` 3개 | 일치 |
+| `data.skipped[].camId/presetId/count/reason` | `Array<{camId,presetId,count,reason}>` | **필드명·타입 전부 일치** |
+| `data.issues[]` (`.join(' | ')`) | `string[]` | 일치 |
 
-- 옵셔널이고 **0 이면 필드 자체를 싣지 않는다** → 기존 `toEqual` 계열 단언 무영향(전건 통과로 실증).
-- 정의는 **호출 단위 누계**(반복마다 발생하면 합산). 테스트로 명시 고정했다(구현자 §8-2 의 정의 그대로).
-- `PtzCalibrator.centerOnPoint` 반환 shape 은 `{ok, ptz, plateWidth, reason?}` 그대로 — REST 계약 불변(shape 전체 `toEqual` 로 고정). 즉 **재포착 횟수는 응답이 아니라 로그로만 관측된다**.
+- 방어적 `?? []` 가 있어 배열 누락에도 안전. `res.ok || data.ok` 이중 체크로 409/404 모두 실패 처리됨.
+- 버튼 배선: `web/index.html:190` `#cap-load-roi` 존재, `web/app.js:3715` `$('cap-load-roi').addEventListener('click', loadRoiToDb)` 등록 확인.
+  성공 후 갱신 경로 `resetOverlayDisplay → loadParkingSlots → drawRoiOverlay → renderSlotList` 4함수 모두 app.js 에 정의돼 있음.
+- 인덱스 규약: `preset_slotidx` 1-based, `slot_id` 전역 1-based 를 테스트로 직접 확인(off-by-one 없음).
 
----
+### 3-4. 구현 결함
 
-## 4. P1(줌 실패 시맨틱 반전)에 대한 독립 판단
+**없음.** 설계서 A~D 요건(공용 모듈 단일 출처, wipe 금지 4가드, FK 스킵, 404/409/200 계약, UI 배선)이
+모두 테스트로 재현·확인됐다. 구현 코드는 한 줄도 수정하지 않았다.
 
-**결론: 반전은 타당하다. 되돌리면 안 된다.**
+## 4. 미검증 한계(위장 없음 — 명시)
 
-1. **뒤집힌 테스트는 요구사항이 아니었다.** 이름 자체가 `구현이 정본`이고, 설계 문서 어디에도 "줌 실패를 삼켜 센터링 결과를 성공으로 보고한다"는 근거가 없다. 구현을 받아적은 스냅샷 테스트를 요구사항으로 착각하면 **결함이 스펙으로 승격**된다.
-2. **`zoom!==false` 로 호출한 계약의 사후조건은 "폭이 목표에 맞았다"** 이다. 줌 단계가 실패하면 그 사후조건이 성립하지 않는데 `ok:true` 를 반환하는 것은 **성립하지 않은 사후조건을 단언**하는 것 = goal 1순위 금지선(거짓 성공) 위반. 리더 실측에서 `ok:true / zoom 1.69 / plateWidth 0.032`(= base 폭, 줌 미발생)가 실제로 발생했다.
-3. **구 동작은 위치까지 거짓말했다.** 줌 단계에서 카메라가 이미 이동했는데 반환 `ptz` 는 센터링 시점 값이었다. 새 동작은 줌 단계가 마지막으로 명령한 PTZ 를 싣는다 — **더 정직할 뿐 아니라 복구 재료로서도 옳다**(이 파일의 "상태 = 내가 명령한 값" 불변식과 일치).
-4. **파급 범위는 UI 문구뿐이다.** `centerOnPoint` 는 저장을 하지 않고(저장 스파이 0회 테스트 존재), 라우트는 `{ok, ptz, plateWidth, reason?}` 를 그대로 통과시키며, `web/app.js` 는 `ok:false` 를 이미 `종료(${reason})` 로 표시한다. `plate_lost` 문자열도 기존에 나가던 값이라 **새 분기가 필요 없다**. 전건 2327 통과가 이를 뒷받침한다.
-5. **남는 비대칭(반전의 한계로 명시)**: 사다리 경로는 여전히 `ok:true + reason`(장비 한계로 폭 미달)을 낼 수 있고 UI 는 그것을 "완료 — 목표 폭 미달(reason)"로 표시한다. 성격이 다르다는 구현자·리더의 구분에 동의하지만, **조작자 입장에서 "완료"라는 단어가 두 경우에 다 붙는다**는 점은 남아 있다. 이번 범위 밖이라 수정하지 않았고 사실로만 기록한다.
-
----
-
-## 5. 검증 중 발견한 결함·비대칭(전부 경미 — 실패 아님)
-
-1. **`zoom_saturated` 반환에 `recaptureDithers` 가 실리지 않는다**(`platePtz.ts` 의 포화 반환). 그 호출에서 앞선 반복이 디더를 이미 썼더라도 **횟수가 조용히 버려진다**. 다른 모든 출구(성공/`plate_lost`/`max_iterations`)는 싣는다 → **정직성 관용구의 유일한 구멍**. 구현자도 §13-3 에서 인지하고 있었다. 동작 결함은 아니지만 라이브 진단에서 "몇 번 흔들었나"가 사라진다. 수정은 1줄(스프레드 추가)이며, 이번 범위에서는 임의로 손대지 않았다.
-2. **두 헬퍼의 `dithers` 산정 방식이 다르다.** `captureTrack` 은 성공 시 시도 인덱스 `i`, 실패 시 `mults.length−1` 을 그대로 반환한다(스킵 개념 없음). `captureTrackZoom` 은 **실제 캡처만** 증가시킨다(clamp 스킵 제외). 두 정의 모두 "실제 추가 왕복 수"로 해석하면 일관되지만, 코드만 봐서는 다르게 보인다. 테스트로 각각의 현 정의를 고정했다.
-3. **A·B 지점의 zoom 데드존은 여전히 미대응**(구현자 §13-5). C 만 zoom 축으로 바뀌었고, pan/tilt 이동 직후 프레임이 zoom 데드존에 걸리면 tilt 디더 7시도가 전패할 수 있다(리더가 C 에서 실제로 관측한 현상과 같은 원리). 이번 라이브 21/21 성공으로 **당장 문제되지 않는다는 증거는 있으나 원리적 위험은 남는다**.
-4. **C 지점 `effGain` 은 줌 *전* zoom 기준**(구현자 §5-1). 이터3에서 C 가 zoom 축으로 바뀌면서 이 게인은 **prior 보정에 쓰이지 않게 되어 영향이 줄었지만**, B 지점(가드 재중심)에는 그대로 남아 있다. 절대량이 게이트 대비 작아 이번 범위에서는 무해하다고 판단했다.
-
----
-
-## 6. 검증하지 못한 것(한계 — 은닉 금지)
-
-1. **라이브 실측은 이 단계에서 수행하지 않았다.** 슬롯 1~7 스윕·금지선 클릭 3지점은 **리더가 이미 실행한 결과**(`00_goal.md` 이터3)를 인용할 뿐, 검증자가 재확인하지 않았다. 지시상 카메라 API 호출 금지였다.
-2. **실카(real-camera) 경로 전부 미검증.** 네이티브 setcenter·`RealPtzSource`·사다리 latch 후 미검(D 지점)은 시뮬 스텁으로만 다뤘다. 특히 **디더 각 환산이 `fallbackGainTiltDeg`(−35.5, cam1 시뮬 실측)에 100% 무측정 의존**한다는 점(구현자 §8-1)은 유닛으로 반증할 수 없다 — 게인이 다른 카메라에서는 같은 `ditherNorm` 이 다른 픽셀 폭이 된다.
-3. **LPD 의 실제 프레이밍 민감도는 모킹이다.** "1.5px 로는 안 되고 6px 에서 검출된다"는 것은 리더 실측이며, 내 스텁은 그 현상을 **가정으로 넣고** 코드가 그 가정 위에서 올바르게 행동하는지만 고정한다. 디더가 실제 LPD 를 되살린다는 사실 자체의 증거는 리더 로그(`recovered:true`)뿐이다.
-4. **8배수 이상(재시도 7·8) 미검증.** `ditherMultipliers` 는 `±8`(12px 등가)까지 자연 확장되지만 실측 근거는 6px 까지다. 그 구간의 이웃 여유는 재계산이 필요하다(0.0112 = 게이트의 14%).
-5. **왕복 비용·체감 지연 미측정.** 최악 조합(구현자 §6.5: 클릭 1회 +108s)은 유닛에서 sleep 을 0 으로 주입하므로 관측되지 않는다.
-6. **UI 육안 확인 없음.** P1 로 `ok:false + reason` 이 새로 나가는 경로가 늘었으나 뷰어 화면은 확인하지 않았다(코드 경로 `종료(${reason})` 확인까지만).
-7. **`plateWidth` 목표 기준의 이중성**(goal 문구 0.2±0.02 vs 라이브 config 정본 0.215±0.015)은 유닛에서 판정하지 않았다. 리더가 `00_goal.md` 에 정직하게 남긴 그대로다.
-
----
-
-## 7. 판정
-
-- 지시 ①~⑤ **전부 유닛으로 고정 완료**, 전건 통과, tsc 클린.
-- 거짓 성공 금지선은 **경계 수치(0.0805/0.083/0.085)까지 두드려도 뚫리지 않는다**.
-- P1 반전은 **독립적으로 타당하다고 판단**하며 회귀 가드를 5건 심었다.
-- 남은 것은 §5 의 경미한 비대칭 1~2건(특히 `zoom_saturated` 의 `recaptureDithers` 누락)과 §6 의 한계다. **실패로 분류할 항목은 없다.**
+- **라이브 스모크 미수행**: 서버(13020) 기동 후 `curl -XPOST /capture/slots/load-roi` → `GET /capture/slots` 실왕복,
+  및 브라우저에서 버튼 클릭 → `confirm()` → 오버레이·슬롯목록 갱신은 **수행하지 않았다**(유닛/inject 레벨까지만).
+  단, 라우트 왕복은 `app.inject` 로, 실데이터 매핑은 실제 `PtzCamRoi.json` 으로 대체 검증했다.
+- `web/app.js` 는 브라우저 전용(모듈 미분리)이라 `loadRoiToDb` 자체의 유닛테스트는 없다 — 정적 대조(§3-3)로 갈음.
+- `slot3dFrontCenter` 실패는 데이터 기인으로 특정만 했고 **수정하지 않았다**(본 작업 범위 밖. ROI 정본 재생성 이슈로 별도 처리 필요).

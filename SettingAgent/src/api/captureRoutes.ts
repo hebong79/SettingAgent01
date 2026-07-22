@@ -13,11 +13,13 @@ import type { ICameraClient } from '../clients/CameraClient.js';
 import type { VpdClient } from '../clients/VpdClient.js';
 import type { LpdClient } from '../clients/LpdClient.js';
 import { runDetect, loadDetectCfg } from '../capture/detectPipeline.js';
+import { loadRoiIntoDb, loadSetupTargetsFromRoi, roiToCameraViews } from '../capture/roiDbLoad.js';
 import type { SetupTarget } from '../setup/SetupOrchestrator.js';
 import { loadSetupTargets, viewsToTargets, parseCameraViews, type MapFiles } from '../setup/mapTargets.js';
 import { buildGroundInputs } from '../ground/groundInputs.js';
 import { estimateGroundModels } from '../ground/groundModel.js';
 import { buildFrameCuboids } from '../ground/frameCuboids.js';
+import { H_CONST, slotFrontCenter } from '../ground/slotFrontCenter.js';
 import { makeCuboidContextResolver } from '../ground/cuboidContext.js';
 import { filterVehiclesOnPlace } from '../capture/onPlaceFilter.js';
 import { assignPlatesToSlotViews } from '../setup/plateMatch.js';
@@ -52,6 +54,13 @@ const SlotOccupyBuildSchema = z
   .object({
     cam: z.number().int().positive().optional(),
     preset: z.number().int().positive().optional(),
+  })
+  .default({});
+
+/** POST /capture/slots/cuboid — 지면모델로 3D 육면체 앞면 중심 산출·저장. heightM 미지정 시 H_CONST. */
+const SlotCuboidBuildSchema = z
+  .object({
+    heightM: z.number().min(0.5).max(3.0).optional(),
   })
   .default({});
 
@@ -184,6 +193,11 @@ export function registerCaptureRoutes(app: FastifyInstance, deps: CaptureRouteDe
         reply.code(400);
         return { error: 'live preset refresh failed', detail: err instanceof Error ? err.message : String(err) };
       }
+    } else if (deps.placeRoiFile && loadSetupTargetsFromRoi(deps.placeRoiFile).length > 0) {
+      // ROI 정본이 프리셋 PTZ 를 담고 있으면 그것이 순회 대상 — camerapos.json 보다 우선한다.
+      // "ROI 로딩 → 시작" 이 같은 파일 하나를 공유하게 되어 프리셋 집합이 어긋나지 않는다.
+      // (PTZ 미보유 구형 ROI 파일이면 길이 0 → 아래 camerapos 폴백 유지, 하위호환.)
+      targets = loadSetupTargetsFromRoi(deps.placeRoiFile);
     } else if (deps.mapFiles) {
       try {
         targets = loadSetupTargets(deps.mapFiles);
@@ -330,6 +344,53 @@ export function registerCaptureRoutes(app: FastifyInstance, deps: CaptureRouteDe
     return { ok: true, cleared };
   });
 
+  // ROI 파일 로딩(수동 버튼): PtzCamRoi.json → slot_setup 전량 재구성(검출·점유·센터링은 초기값).
+  // 실패 시(파일 없음/파싱 실패/유효 슬롯 0건) DB 무변경 — 안전 규약은 loadRoiIntoDb 소유.
+  app.post('/capture/slots/load-roi', async (_req, reply) => {
+    if (!deps.placeRoiFile) {
+      reply.code(404);
+      return { ok: false, error: 'placeRoiFile 미설정' };
+    }
+    // 프리셋 라이브 선갱신(/capture/start 와 동일 패턴). slot_setup 은 preset_pos 를 FK 부모로 요구하므로,
+    // camerapos.json 이 옛 프리셋만 담고 있으면 신규 카메라 주차면이 통째로 skipped 된다. 공급자가 있으면
+    // 먼저 최신 프리셋을 받아 camerapos.json 을 갱신해 FK 부모를 확보한다. 실패는 강등(기존 파일로 진행).
+    let presetRefresh: string | undefined;
+    if (deps.presetProvider && deps.mapFiles?.cameraposFile) {
+      try {
+        writeCamerapos(await deps.presetProvider.listViews(), deps.mapFiles.cameraposFile);
+      } catch (err) {
+        presetRefresh = `프리셋 라이브 갱신 실패(기존 camerapos.json 사용): ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    const result = loadRoiIntoDb(deps.store, {
+      placeRoiFile: deps.placeRoiFile,
+      cameraposFile: deps.mapFiles?.cameraposFile,
+      now: new Date().toISOString(),
+    });
+    if (presetRefresh) result.issues.push(presetRefresh);
+
+    // ★ camerapos.json 을 ROI 정본에서 파생 재생성한다.
+    // 뷰어의 카메라·프리셋 드롭다운과 프리셋 이동 PTZ 는 CameraposSource → camerapos.json 이 정본이다
+    // (`src/viewer/CameraposSource.ts` — cam.list 는 연결·이름 확인용일 뿐, 목록은 파일 기준).
+    // 이 파일이 뒤처지면 **화면은 옛 PTZ 로 이동하는데 오버레이·지면모델은 새 ROI 기준**이라
+    // 육면체·주차면이 실제 장면과 어긋난 위치에 그려진다(실측: cam1 preset3 pan 43.5 vs 90.1).
+    // ROI 가 프리셋 PTZ 를 담고 있을 때만 덮어쓴다(구형 ROI 파일이면 기존 파일 보존).
+    if (result.ok && deps.mapFiles?.cameraposFile) {
+      try {
+        const views = roiToCameraViews(JSON.parse(await readFile(deps.placeRoiFile, 'utf8')));
+        if (views.length > 0) {
+          writeCamerapos(views, deps.mapFiles.cameraposFile);
+          result.issues.push(`camerapos.json 을 ROI 정본으로 갱신(${views.length} 프리셋) — 카메라·프리셋 목록 정합`);
+        }
+      } catch (err) {
+        result.issues.push(`camerapos.json 갱신 실패(기존 파일 유지): ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    if (!result.ok) reply.code(409);
+    return result;
+  });
+
   // 라이브 LPD 검출 → 슬롯 공간배정 → slot_setup.lpd 부분 UPDATE(수동 "DB에 추가" 버튼). VPD 미접촉.
   app.post('/capture/slots/lpd', async (req, reply) => {
     const parsed = SlotLpdSaveSchema.safeParse(req.body);
@@ -399,6 +460,76 @@ export function registerCaptureRoutes(app: FastifyInstance, deps: CaptureRouteDe
     }
     if (rows.length > 0) deps.store.upsertSlotLpd(rows);
     return { ok: true, updated: rows.length, skipped: views.length - withLpd, failed: withLpd - rows.length };
+  });
+
+  // 지면모델 → 슬롯별 3D 육면체 앞면 중심(slot3d_front_center) 산출·저장(수동 "3D육면체 ROI생성" 버튼).
+  // 산출식은 finalize 와 **같은 단일 구현**(ground/slotFrontCenter), 지면모델 조합도 /capture/ground-model 과 동일.
+  // 모델 없음/퇴화 슬롯은 skipped[] 로 드러내고 **저장하지 않는다**(기존 값 미파괴 — null 로 지우지 않음).
+  app.post('/capture/slots/cuboid', async (req, reply) => {
+    const parsed = SlotCuboidBuildSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { ok: false, error: 'invalid body (heightM 0.5~3.0)' };
+    }
+    if (!deps.placeRoiFile || !deps.ground?.enabled) {
+      reply.code(404);
+      return { ok: false, error: 'ground/place-roi 미설정' };
+    }
+    const ground = deps.ground;
+    const heightM = parsed.data.heightM ?? H_CONST;
+    const views = deps.store.getSlotSetup();
+    if (views.length === 0) {
+      reply.code(409);
+      return { ok: false, error: 'slot_setup 비어있음 — ROI 파일 로딩 먼저' };
+    }
+    // 프리셋별 지면모델(ground-model 라우트·Finalizer.buildGroundModels 와 동일 조합 — 새 조합 금지).
+    const modelByKey = new Map<string, GroundModel>();
+    const issues: string[] = [];
+    try {
+      const raw = JSON.parse(await readFile(deps.placeRoiFile, 'utf8'));
+      let views2: ReturnType<typeof parseCameraViews> = [];
+      if (deps.mapFiles?.cameraposFile) {
+        try {
+          views2 = parseCameraViews(JSON.parse(await readFile(deps.mapFiles.cameraposFile, 'utf8')));
+        } catch {
+          /* camerapos 없음/파싱실패 → zoom 미상 강등(ground-model 라우트와 동일 처리). */
+        }
+      }
+      for (const cam of buildGroundInputs(raw, views2)) {
+        const r = estimateGroundModels(cam, ground);
+        for (const m of r.models) modelByKey.set(`${m.camIdx}:${m.presetIdx}`, m);
+        issues.push(...r.issues);
+      }
+    } catch (err) {
+      const e = err as NodeJS.ErrnoException;
+      reply.code(e.code === 'ENOENT' ? 404 : 500);
+      return { ok: false, error: e.code === 'ENOENT' ? 'PtzCamRoi.json 없음' : 'ground-model 산출 실패', detail: e.message };
+    }
+    const now = new Date().toISOString();
+    const rows: Array<{ slotId: number; slot3dFrontCenter: string; updatedAt: string }> = [];
+    const skipped: Array<{ slotId: number; reason: string }> = [];
+    for (const v of views) {
+      const model = modelByKey.get(`${v.camId}:${v.presetId}`);
+      if (!model) {
+        skipped.push({ slotId: v.slotId, reason: `지면모델 없음(${v.camId}:${v.presetId})` });
+        continue;
+      }
+      const front = slotFrontCenter(v.roi, model, heightM);
+      if (!front) {
+        skipped.push({ slotId: v.slotId, reason: '육면체 퇴화(지평선 위/quad 이상)' });
+        continue;
+      }
+      rows.push({ slotId: v.slotId, slot3dFrontCenter: stringify5(front), updatedAt: now });
+    }
+    const updated = rows.length > 0 ? deps.store.upsertSlotFrontCenter(rows) : 0;
+    return {
+      ok: true,
+      updated,
+      skipped,
+      models: [...modelByKey.entries()].map(([key, m]) => ({ key, conf: m.conf, issues: m.issues })),
+      issues,
+      heightM,
+    };
   });
 
   // 정밀수집 결과 저장/열기(save/*). saveStore 주입 시에만 등록(가산). 라우트는 위임만.
