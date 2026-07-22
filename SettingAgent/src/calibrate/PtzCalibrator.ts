@@ -152,12 +152,16 @@ export class PtzCalibrator {
   private lastFrame?: { jpeg: Buffer; camIdx: number; presetIdx: number };
   /** 개별(클릭) 센터라이징 진행 락. 배치 state==='running' 와 함께 카메라 경합을 막는다(centerOnPoint 상호배타 가드). */
   private pointBusy = false;
+  /** 배치 run 의 카메라 오버라이드(W4 — start(_, {camera})). 미지정 시 파이프라인 카메라(기존 동작). */
+  private batchCamera?: ICameraClient;
+  private readonly sleep: (ms: number) => Promise<void>;
 
   constructor(deps: PtzCalibratorDeps) {
     this.camera = deps.camera;
     this.cfg = deps.cfg;
     this.store = deps.store;
     const sleep = deps.sleep ?? defaultSleep;
+    this.sleep = sleep;
     const onFrame = (jpeg: Buffer, camIdx: number, presetIdx: number): void => {
       this.lastFrame = { jpeg, camIdx, presetIdx };
     };
@@ -359,8 +363,13 @@ export class PtzCalibrator {
   /**
    * 잡 시작(중복 거부 throw → 라우트 409). 대상=plateRoiByPreset 펼침(필터 slotIds).
    * 슬롯 순차 처리 → buildSlotPtzJson → writer 저장. 백그라운드(await 하지 않고 발화).
+   *
+   * ★ opts(W4): 정밀수집 경로 전용. **기본 미지정 = 기존 거동 그대로** — 수동 `/calibrate/ptz` 는
+   *   인자를 넘기지 않으므로 sleep·카메라 오버라이드 코드에 도달조차 하지 않는다(회귀 구조적 0).
+   *   - betweenSlotMs: 슬롯 1건 센터라이징 후 대기(요구6).
+   *   - camera: 명령 대상 소스 오버라이드. 개별(클릭) 경로가 이미 쓰는 makePlatePtz 2번째 인자 통로를 배치에 노출한 것.
    */
-  start(slotIds?: string[]): { total: number } {
+  start(slotIds?: string[], opts: { betweenSlotMs?: number; camera?: ICameraClient } = {}): { total: number } {
     if (this.state === 'running') throw new Error('calibrate already running');
     let targets = expandPlateTargetsFromSlotSetup(this.store.getSlotSetup());
     if (slotIds && slotIds.length > 0) {
@@ -374,11 +383,12 @@ export class PtzCalibrator {
     this.startedAt = this.now();
     this.endedAt = undefined;
     this.clearLastFrame(); // 직전 실행 프레임 무효화(배치도 동일 병).
-    void this.run(targets);
+    this.batchCamera = opts.camera;
+    void this.run(targets, opts.betweenSlotMs);
     return { total: targets.length };
   }
 
-  private async run(targets: PlateTarget[]): Promise<void> {
+  private async run(targets: PlateTarget[], betweenSlotMs?: number): Promise<void> {
     const items: SlotPtzItem[] = [];
     // 프리셋별 그룹핑(PlateDiscoveryJob 패턴) — 슬롯마다 같은 (cam,preset) 타 슬롯을 peer 로 소유권 게이트에 공급.
     const byPreset = new Map<string, PlateTarget[]>();
@@ -400,6 +410,7 @@ export class PtzCalibrator {
           items.push(this.skipItem(t, { pan: 0, tilt: 0, zoom: 1 }, 0, 'error'));
         }
         this.done += 1;
+        if (betweenSlotMs) await this.sleep(betweenSlotMs); // 요구6(정밀수집 전용 — 미지정 시 미도달).
       }
       this.writer(buildSlotPtzJson(items, this.now()), this.cfg.outFile);
       this.saveCenteringSlots(items); // DB UPDATE 먼저 — 아래 스냅샷이 PTZ 반영된 최신 slot_setup 을 읽도록.
@@ -446,7 +457,7 @@ export class PtzCalibrator {
    *   각 단계 호출 zoom 으로 사전스케일해 주입(PlatePtz 무변경). center 결과 gain 을 width 로 체이닝.
    */
   private async calibrateSlot(t: PlateTarget, peerOffsets: NormalizedPoint[]): Promise<SlotPtzItem> {
-    const baseStart = await this.startPtzFor(t); // 프리셋 base(캐시) — 슬롯간 공유.
+    const baseStart = await this.startPtzFor(t, this.batchCamera); // 프리셋 base — 슬롯간 공유(오버라이드 시 캐시 미사용).
     const presetZoom = baseStart.zoom;
     const plan = this.computeAcquirePlan(t, presetZoom);
     // pre-aim 은 프리셋 zoom 기준(plateRoi 가 측정된 프레임과 게인스케일 일치). zoom 은 acquire 단계가 부여.
@@ -481,7 +492,7 @@ export class PtzCalibrator {
   private computeAcquirePlan(t: PlateTarget, presetZoom: number): { targetZoom: number; acquireZoom: number } {
     const lpdWidth = t.plateRoi.w;
     if (lpdWidth <= LPD_WIDTH_EPS) return { targetZoom: presetZoom, acquireZoom: presetZoom };
-    const clamp = (z: number): number => this.camera.clampZoom(z);
+    const clamp = (z: number): number => (this.batchCamera ?? this.camera).clampZoom(z);
     const targetZoom = zoomForWidth(presetZoom, lpdWidth, this.cfg.targetPlateWidth, clamp);
     const aw = this.cfg.acquirePlateWidth ?? ACQUIRE_PLATE_WIDTH_DEFAULT;
     const acquireZoom = Math.min(targetZoom, zoomForWidth(presetZoom, lpdWidth, aw, clamp));
@@ -520,7 +531,7 @@ export class PtzCalibrator {
       const rungZoom = Math.max(zoom, presetZoom); // floor 클램프.
       const scaled = this.scalePeerOffsets(peerOffsets, rungZoom, presetZoom);
       const opts: PlatePtzOpts = { ...base, ...(scaled.length ? { peerOffsets: scaled } : {}) };
-      const c = await this.makePlatePtz(opts).centerOnPlate(t.camIdx, t.presetIdx, {
+      const c = await this.makePlatePtz(opts, this.batchCamera).centerOnPlate(t.camIdx, t.presetIdx, {
         pan: aim.pan,
         tilt: aim.tilt,
         zoom: rungZoom,
@@ -565,7 +576,7 @@ export class PtzCalibrator {
         gain: start.gain,
         maxZoomStepRatio: ratio,
         ...(scaled.length ? { peerOffsets: scaled } : {}),
-      }).zoomToPlateWidth(t.camIdx, t.presetIdx, start.ptz);
+      }, this.batchCamera).zoomToPlateWidth(t.camIdx, t.presetIdx, start.ptz);
       if (z.ok) return z;
       best = this.widerResult(best, z);
       if (z.reason !== 'plate_lost') return best; // 포화/미검 — 복구 무의미(정직).
@@ -576,7 +587,7 @@ export class PtzCalibrator {
       const re = await this.makePlatePtz({
         ...base,
         ...(scaledBack.length ? { peerOffsets: scaledBack } : {}),
-      }).centerOnPlate(t.camIdx, t.presetIdx, { pan: z.ptz.pan, tilt: z.ptz.tilt, zoom: backZoom });
+      }, this.batchCamera).centerOnPlate(t.camIdx, t.presetIdx, { pan: z.ptz.pan, tilt: z.ptz.tilt, zoom: backZoom });
       logger.info(
         { cat: 'centering', phase: 'width', cam: t.camIdx, preset: t.presetIdx, slot: t.slotId, retry: i, backZoom: Number(backZoom.toFixed(3)), reAcquired: re.ok },
         'width plate_lost → 줌아웃 재포착+고운스텝 복구',

@@ -26,6 +26,7 @@ const MOVES_CAMERA: Record<string, string> = {
   '/discover/ptz': 'plateDiscovery → requestImage(presetPtz)',
   '/capture/start': 'CaptureJob → camera.move + requestImage(t.ptz)',
   '/capture/detect': 'detectPipeline:332 미귀속 차량마다 requestImage(확대 ptz) — ★복귀 없음',
+  '/capture/start-precise': '정밀수집 파이프라인(discovering=앵커 loop LPD / calibrating=센터라이징) 발화',
   '/capture/pipeline': '자동체인(discovering=앵커 loop LPD / calibrating=센터라이징)',
   '/move': '수동 PTZ 이동',
 };
