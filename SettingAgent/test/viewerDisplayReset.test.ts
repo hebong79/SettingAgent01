@@ -56,8 +56,8 @@ describe('표시 초기화(#roi-clear) — 바닥 제외 오버레이 데이터 
     expect(body).toContain('renderSlotList()');        // 검출 count·점유 삭제 반영.
   });
 
-  it('수집 시작(capStart)은 여전히 clearRoiDisplay 를 쓴다(라이브 검출/점유 표시 보존)', () => {
-    const body = functionBody(app, 'capStart');
+  it('수집 시작(capCaptureStart)은 여전히 clearRoiDisplay 를 쓴다(라이브 검출/점유 표시 보존)', () => {
+    const body = functionBody(app, 'capCaptureStart');
     expect(body).toContain('clearRoiDisplay()');
     expect(body).not.toContain('resetOverlayDisplay()');
   });

@@ -3,8 +3,22 @@ import type { Finalizer } from '../capture/Finalizer.js';
 import type { PtzCalibrator } from '../calibrate/PtzCalibrator.js';
 import type { PlateDiscoveryJob } from '../calibrate/PlateDiscoveryJob.js';
 import type { SqliteStore } from '../capture/SqliteStore.js';
+import type { ICameraClient } from '../clients/CameraClient.js';
 import { expandPlateTargetsFromSlotSetup } from '../calibrate/slotPtzWriter.js';
+import { expandDiscoveryTargets } from '../calibrate/plateDiscoveryWriter.js';
 import { logger } from '../util/logger.js';
+
+/**
+ * 정밀수집(startPrecise) 전용 대기시간 코드 상수(요구1·2·3·6).
+ * ★ 잡 인스턴스(dep)가 아니라 **start() 인자**로만 전달한다 — 수동 `/discover/ptz`·`/calibrate/ptz` 는
+ *   인자 미전달로 기본 0 이 되어 회귀가 **구조적으로** 0 이다(같은 싱글턴을 공유하기 때문).
+ */
+const PRECISE_DISCOVER_BETWEEN_SLOT_MS = 500; // 요구1: 슬롯당 LPD 1건 후.
+const PRECISE_OCCUPY_SETTLE_MS = 300; // 요구2: 점유영역 생성 후(프리셋 그룹 단위 — 생성이 프레임 집합연산).
+const PRECISE_DISCOVER_TO_CALIBRATE_MS = 1000; // 요구3: 탐색 완료 → 센터라이징 시작.
+const PRECISE_CALIBRATE_BETWEEN_SLOT_MS = 1000; // 요구6: 센터라이징 슬롯 1건 후.
+
+const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /**
  * 이 3단계 체인 전용 의존성(전부 기존 객체 재사용 — Finalizer/PtzCalibrator 로직 무수정, 설계서 §3.1).
@@ -17,6 +31,8 @@ export interface SetupPipelineDeps {
   calibrator: Pick<PtzCalibrator, 'start' | 'getStatus'>;
   store: Pick<SqliteStore, 'getSlotSetup'>; // 커버리지 요약(전체 슬롯 수)용
   now?: () => string;
+  /** 단계 전이 대기(요구3). 미주입 시 setTimeout — 테스트 시임 경계. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 export type PipelineStage = 'idle' | 'capturing' | 'finalizing' | 'discovering' | 'calibrating' | 'done' | 'failed';
@@ -24,6 +40,8 @@ export type PipelineStage = 'idle' | 'capturing' | 'finalizing' | 'discovering' 
 /** GET /capture/pipeline 응답 shape(설계서 §3.4). 인메모리 status 전용 — 영속화·좌표수치 없음(round5 비대상). */
 export interface PipelineStatus {
   armed: boolean; // 이번 run 에 자동 체인이 켜졌는가
+  /** 이번 run 이 정밀수집(startPrecise) 경로인가 — 프론트 완료 메시지 분기용(수집 경로에선 미부착). */
+  precise?: boolean;
   stage: PipelineStage;
   startedAt?: string;
   endedAt?: string;
@@ -56,14 +74,65 @@ export class SetupPipeline {
   private coverage?: { targets: number; totalSlots: number; uncovered: number };
   private note?: string;
   private readonly now: () => string;
+  private readonly sleep: (ms: number) => Promise<void>;
+  /** 이번 run 이 정밀수집(startPrecise) 경로인가 — 대기시간·카메라 오버라이드 적용 게이트. */
+  private precise = false;
+  /** 정밀수집 run 의 카메라 오버라이드(요청 source). 미지정 시 잡의 부팅 카메라. */
+  private preciseCamera?: ICameraClient;
+  /** 센터라이징 분리(UI '센터라이징 분리' 체크) — true 면 탐색·점유영역까지만 돌고 센터라이징 전에 done. */
+  private preciseSkipCentering = false;
 
   constructor(private deps: SetupPipelineDeps) {
     this.now = deps.now ?? (() => new Date().toISOString());
+    this.sleep = deps.sleep ?? defaultSleep;
+  }
+
+  /**
+   * ★ 정밀수집 진입점(W1 — 신규 가산). 수집(CaptureJob)·최종화(Finalizer) 없이
+   * **discovering → (1s) → calibrating → done** 만 돈다. 내부는 전부 기존 메서드 호출이다:
+   * preflight 는 `expandDiscoveryTargets`(탐색 대상 조건과 **같은 함수**), 이후 체인은 기존
+   * `onDiscoverFinished`/`onCalibrateFinished` 콜백 그대로.
+   *
+   * preflight 실패(앞면중심 0)는 **조용히 넘어가지 않는다** — 잡을 발화하지 않고 failed{discover} 로 끝낸다
+   * (탐색 대상 0 으로 잡이 즉시 done 나면 사용자는 "돌았는데 아무것도 안 나왔다"로 오독한다).
+   */
+  startPrecise(opts: { camera?: ICameraClient; skipCentering?: boolean } = {}): PipelineStatus {
+    if (this.isBusy()) throw new Error('pipeline busy');
+    this.armed = true;
+    this.precise = true;
+    this.preciseCamera = opts.camera;
+    this.preciseSkipCentering = opts.skipCentering === true;
+    this.runVpdEnabled = false; // 정밀수집 경로는 VPD 를 한 번도 호출하지 않는다(LPD 전용).
+    this.failure = undefined;
+    this.finalizeSummary = undefined;
+    this.coverage = undefined;
+    this.note = undefined;
+    this.endedAt = undefined;
+    this.startedAt = this.now();
+    const targets = expandDiscoveryTargets(this.deps.store.getSlotSetup());
+    if (targets.length === 0) {
+      this.stage = 'discovering'; // fail() 이 stage 를 failed 로 덮는다 — 사유 기록용 진입.
+      this.fail('discover', '앞면중심 0 — ROI 파일 로딩 먼저(지면모델 확인)');
+      return this.getStatus();
+    }
+    this.stage = 'discovering';
+    try {
+      this.deps.discovery.start(
+        {},
+        { betweenSlotMs: PRECISE_DISCOVER_BETWEEN_SLOT_MS, occupySettleMs: PRECISE_OCCUPY_SETTLE_MS },
+      );
+    } catch (err) {
+      this.fail('discover', err instanceof Error ? err.message : String(err));
+    }
+    return this.getStatus();
   }
 
   /** /capture/start 성공 직후 라우트가 호출. armed=true 면 capturing 무장, false 면 disarm+idle 리셋. */
   onCaptureStart(armed: boolean, vpdEnabled = true): void {
     this.armed = armed;
+    this.precise = false; // 수집 경로 — 정밀수집 전용 대기·카메라 오버라이드 해제.
+    this.preciseCamera = undefined;
+    this.preciseSkipCentering = false;
     this.runVpdEnabled = vpdEnabled; // 기본 true(기존 테스트 호출부 무수정). 라우트가 false(제품 정책)를 전달.
     this.failure = undefined;
     this.finalizeSummary = undefined;
@@ -113,6 +182,24 @@ export class SetupPipeline {
       this.fail('discover', 'discover error');
       return;
     }
+    // 요구3: 정밀수집 경로만 탐색 완료 → 센터라이징 시작 사이 1s 대기. 수집(autoChain) 경로는 즉시 전이(회귀 0).
+    // 단 '센터라이징 분리' 면 센터라이징에 들어가지 않으므로 진입 대기도 불필요하다(즉시 마감).
+    if (this.precise && !this.preciseSkipCentering) {
+      void this.beginCalibrateAfterDelay();
+      return;
+    }
+    this.beginCalibrate();
+  }
+
+  /** 요구3 대기 후 센터라이징 진입. 대기 중 단계가 바뀌었으면(정지·실패) 발화하지 않는다. */
+  private async beginCalibrateAfterDelay(): Promise<void> {
+    await this.sleep(PRECISE_DISCOVER_TO_CALIBRATE_MS);
+    if (this.stage !== 'discovering') return;
+    this.beginCalibrate();
+  }
+
+  /** 커버리지 산출 → 센터라이징 발화(구 onDiscoverFinished 후반부 — 로직 무변경, 대기 삽입 위해 분리). */
+  private beginCalibrate(): void {
     // done — 커버리지 산출(§3.6): discovery 가 방금 slot_setup.lpd 를 부분 UPDATE 한 뒤의 상태를 읽는다.
     const views = this.deps.store.getSlotSetup();
     const targets = expandPlateTargetsFromSlotSetup(views);
@@ -125,9 +212,26 @@ export class SetupPipeline {
       return;
     }
 
+    // '센터라이징 분리'(사용자 옵트인): 탐색·점유영역까지가 이번 run 의 끝이다. calibrator 를 발화하지 않으므로
+    // slot_ptz.json·setup_result.json 도 생성되지 않는다(기존 센터링 값은 무접촉 — 파괴 없음).
+    if (this.preciseSkipCentering) {
+      this.note = `센터라이징 분리 — 탐색·점유영역까지 완료(센터라이징 대상 ${targets.length}슬롯 대기)`;
+      this.finish('done');
+      return;
+    }
+
     this.stage = 'calibrating';
     try {
-      this.deps.calibrator.start(); // 백그라운드 발화 — 완료는 onCalibrateFinished 로 회귀.
+      // 백그라운드 발화 — 완료는 onCalibrateFinished 로 회귀. 정밀수집만 대기·카메라 오버라이드를 실어 보낸다
+      // (수집 경로는 인자 없이 호출 → 기존 시그니처·거동 그대로).
+      if (this.precise) {
+        this.deps.calibrator.start(undefined, {
+          betweenSlotMs: PRECISE_CALIBRATE_BETWEEN_SLOT_MS,
+          ...(this.preciseCamera ? { camera: this.preciseCamera } : {}),
+        });
+      } else {
+        this.deps.calibrator.start();
+      }
     } catch (err) {
       // 수동 센터라이징 경합('already running') 등 → 정직 실패(§5.3).
       this.fail('calibrate', err instanceof Error ? err.message : String(err));
@@ -149,6 +253,7 @@ export class SetupPipeline {
   getStatus(): PipelineStatus {
     return {
       armed: this.armed,
+      ...(this.precise ? { precise: true } : {}), // 수집 경로 응답 shape 불변(회귀 0).
       stage: this.stage,
       ...(this.startedAt ? { startedAt: this.startedAt } : {}),
       ...(this.endedAt ? { endedAt: this.endedAt } : {}),

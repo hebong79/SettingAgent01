@@ -73,6 +73,13 @@ const occupancyJudge = new OccupancyJudge(); // 임계값 기본(groundBandRatio
 const $ = (id) => document.getElementById(id);
 const api = (path) => `/viewer/api${path}`;
 
+/**
+ * 바닥 ROI 소스 모드 — **파일 고정**(요건12). 구 `#cap-floor-llm` 체크박스가 제거되면서 상수로 접었다.
+ * 값은 그 체크박스의 기본값(unchecked=false)과 동일하므로 화면 거동 변화는 0이다.
+ * (백엔드 `floorRoiUseLlm` 스키마·게이트는 보존 — UI 요구이지 API 파괴 요구가 아니다.)
+ */
+const FLOOR_ROI_USE_LLM = false;
+
 const state = {
   source: '',
   sourceDetails: {}, // source id → { kind, streamTransport }. 실카메라 RTSP 재생과 시뮬레이터 PTZ 렌더 분기 근거.
@@ -122,7 +129,7 @@ const HANDLE_PX = 8; // 핸들 사각형 반경(px).
 // { kind:'floorVertex', index, ... } | { kind:'vpdResize', handle, ... } | { kind:'vpdMove', ... } | null
 let dragState = null;
 
-/** 슬롯 ROI·선택 표시만 숨김(데이터 보존). 수집 시작(capStart) 전용 — 검출/점유/육면체 등 라이브 레이어는 유지한다. */
+/** 슬롯 ROI·선택 표시만 숨김(데이터 보존). 수집 시작(capCaptureStart) 전용 — 검출/점유/육면체 등 라이브 레이어는 유지한다. */
 function clearRoiDisplay() {
   state.roiHidden = true;
   state.selectedSlotId = null;
@@ -442,7 +449,7 @@ function drawRoiOverlay() {
       ctx.stroke();
     }
     const fquad = slot.floorRoiByPreset?.[key];
-    if (fquad && showFloor && $('cap-floor-llm').checked) { // LLM 모드에서만 슬롯별 floor(파일 모드는 drawFileFloorRoi 가 렌더).
+    if (fquad && showFloor && FLOOR_ROI_USE_LLM) { // LLM 모드에서만 슬롯별 floor(파일 모드는 drawFileFloorRoi 가 렌더).
       const pts = toPixelQuad(fquad, overlay.width, overlay.height);
       ctx.beginPath();
       pts.forEach((p, i) => (i ? ctx.lineTo(p.px, p.py) : ctx.moveTo(p.px, p.py)));
@@ -570,7 +577,7 @@ const floorRoiFileWarned = new Set(); // 파일 모드 프리셋별 issue adviso
  */
 function drawFileFloorRoi(ctx) {
   if (!$('roi-floor').checked) return; // 바닥 표시 토글이 파일/LLM 공통 관장.
-  if ($('cap-floor-llm').checked) return; // LLM 모드 → 파일 바닥 숨김(슬롯 floor 는 mapping 루프가 렌더).
+  if (FLOOR_ROI_USE_LLM) return; // LLM 모드 → 파일 바닥 숨김(슬롯 floor 는 mapping 루프가 렌더).
   const key = currentFrameKey();
   const { polygons } = selectFloorRoi({ useLlm: false, placeRoi: state.placeRoi, key });
   const issues = state.placeRoiReport?.[key];
@@ -991,6 +998,7 @@ function drawDetectOverlay(ctx) {
   if (showPlate) {
     if (dbOn) {
       for (const row of rows) { if (row.lpd) drawPlateQuad(ctx, row.lpd, false); } // DB 번호판 OBB quad(노랑). 선택·핸들 없음.
+      drawDbCentering(ctx, rows); // 센터라이징 완료 지점(작은 파란 원) — 요건9.
     } else if (d) {
       (d.vehicles ?? []).forEach((v) => { if (v.plate) drawPlateQuad(ctx, v.plate.quad, v.plate.recovered); }); // 차량 부속 번호판.
       (d.plates ?? []).forEach((p, i) => {
@@ -1015,6 +1023,29 @@ function drawDbVpd(ctx, rows) {
     ctx.strokeStyle = '#00e5ff'; // VPD 차량 bbox=청록(라이브와 동색).
     ctx.lineWidth = 2;
     ctx.strokeRect(px, py, pw, ph);
+  }
+}
+
+/**
+ * DB(slot_setup) 소스 센터라이징 위치 오버레이(W7) — #roi-db 체크 시 LPD quad 직후에 그린다.
+ * 표시점 = `slot_setup.lpd` OBB 중심. 센터링 산출물은 PTZ(pan/tilt/zoom)라 프리셋 프레임 좌표가 아니고,
+ * 프리셋 프레임에서 "그 슬롯이 센터라이징된 지점"의 유일한 기존 좌표가 센터링 표적이었던 lpd 이기 때문이다
+ * (PTZ 역투영은 게인 역함수를 새로 써야 해서 기존 함수만 쓰기 규약 위반).
+ * centered 가 거짓이거나 lpd 가 없으면 스킵(위장 표시 금지). 읽기표시 전용.
+ */
+function drawDbCentering(ctx, rows) {
+  for (const row of rows) {
+    if (!row.centered || !row.lpd) continue;
+    const pts = toPixelQuad(row.lpd, overlay.width, overlay.height);
+    const xs = pts.map((p) => p.px);
+    const ys = pts.map((p) => p.py);
+    const cx = (Math.min(...xs) + Math.max(...xs)) / 2; // quad bounding rect 중심.
+    const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 5, 0, Math.PI * 2);
+    ctx.strokeStyle = '#0a84ff';
+    ctx.lineWidth = 2;
+    ctx.stroke();
   }
 }
 
@@ -1089,7 +1120,7 @@ function renderSlotList() {
   // 전역 인덱스 오름차순 '하나의 평면 목록'으로 렌더(R2, 프리셋 그룹 헤더 없음). 소스=state.placeRoi.
   // 둘 다 아니면(LLM·미최종화) 아래 mapping.slots 분기 유지(회귀 0).
   const finalized = !!(state.parkingSlotsByKey && Object.keys(state.parkingSlotsByKey).length);
-  const fileMode = !$('cap-floor-llm').checked && (state.roiHidden || !state.mapping);
+  const fileMode = !FLOOR_ROI_USE_LLM && (state.roiHidden || !state.mapping);
   if (finalized || fileMode) {
     updateLogicOccupancy(); // 현재 프리셋 점유 뱃지 최신화(오버레이 원 소스 occComputeByKey 유지).
     const rows = buildFlatSlotRows({
@@ -1182,7 +1213,7 @@ function eventToNorm(e) {
 /** 선택 슬롯의 floor quad 정점 히트. floor 레이어 표시 중 + 현재 preset quad 有 일 때만. → 0|1|2|3|null */
 function hitTestFloorVertex(nx, ny) {
   // 파일 모드에선 LLM 슬롯 floor 가 안 보이므로 편집 정점 히트 제외(파일 ROI 는 읽기전용).
-  if (!state.selectedSlotId || !state.mapping || !$('roi-floor').checked || !$('cap-floor-llm').checked) return null;
+  if (!state.selectedSlotId || !state.mapping || !$('roi-floor').checked || !FLOOR_ROI_USE_LLM) return null;
   const key = presetKey(state.cam, state.preset);
   const slot = (state.mapping.slots ?? []).find((s) => s.slotId === state.selectedSlotId);
   const quad = slot?.floorRoiByPreset?.[key];
@@ -1959,9 +1990,12 @@ function renderElapsed() {
 
 function renderCaptureStatus(status) {
   lastCapStatus = status;
-  const { percent, label } = captureProgress(status ?? {});
-  $('cap-bar').value = percent;
-  $('cap-label').textContent = label;
+  // 정밀수집 run 중에는 진행바를 renderPreciseProgress 가 소유한다(수집 status 는 idle 0/0 이라 덮으면 0 으로 튄다).
+  if (!preciseActive) {
+    const { percent, label } = captureProgress(status ?? {});
+    $('cap-bar').value = percent;
+    $('cap-label').textContent = label;
+  }
   renderElapsed();
   const adv = mapAdvisory(status ?? {});
   $('cap-advisory').innerHTML = '';
@@ -1994,6 +2028,7 @@ function renderCaptureStatus(status) {
   // 서버 state 에 버튼·정지안내를 일관 정합(어느 경로로 진입하든 재클릭 400/409 원천 차단).
   const ui = captureUiState(status?.state ?? 'idle');
   $('cap-start').disabled = ui.startDisabled;
+  $('cap-capture-start').disabled = ui.startDisabled;
   $('cap-stop').disabled = ui.stopDisabled;
   $('cap-finalize').disabled = ui.finalizeDisabled;
   if (ui.stoppingNote) $('cap-msg').textContent = '정지 중… (현재 라운드 마무리 후 종료)';
@@ -2074,6 +2109,24 @@ function stopCapFramePolling() {
 let prevCapState = 'idle';
 // 원버튼 셋업 파이프라인 전이 추적(finalizing→calibrating/done 전환 감지 · calibrate 폴 재기동 게이트).
 let prevPipelineStage = 'idle';
+/**
+ * 이번 run 이 정밀수집('시작')인가 — 진행바(cap-bar) 소유권 플래그.
+ * 정밀수집은 CaptureJob 을 발화하지 않아 `/capture/status` 가 idle 0/0 이다. 그대로 두면 진행바가 0 에 머무르므로
+ * 탐색/센터라이징 잡의 실적(기존 `/discover/status`·`/calibrate/status` 폴)을 진행바에 **미러링**한다.
+ * 켜져 있는 동안 renderCaptureStatus 는 진행바를 건드리지 않는다(두 소스가 서로 덮어쓰는 깜빡임 방지).
+ * 종료(done/failed)에도 내리지 않는다 — 내리면 다음 capPoll 이 수집 status(idle 0/0)로 최종 실적을 즉시 지운다.
+ * 소유권은 수집('수집 시작')이 시작될 때만 되가져간다.
+ */
+let preciseActive = false;
+
+/** 정밀수집 진행바 미러(단계별 0~100%). 신규 집계 없음 — 잡 상태의 done/total 을 그대로 쓴다. */
+function renderPreciseProgress(phase, status) {
+  const done = Number(status?.done ?? 0);
+  const total = Number(status?.total ?? 0);
+  const percent = total > 0 ? Math.round((done / total) * 100) : 0;
+  $('cap-bar').value = percent;
+  $('cap-label').textContent = `${phase} ${done}/${total} (${percent}%)`;
+}
 // floor ROI LLM 경고 메시지박스 런당 1회 가드(매 폴링 반복 팝업 방지).
 let floorLlmWarnShown = false;
 // 점유율 LLM 경고 메시지박스 런당 1회 가드(floor 대칭).
@@ -2215,18 +2268,91 @@ async function pollPipeline() {
     $('cap-msg').textContent = '자동 센터라이징 중…';
   } else if (stage === 'failed') {
     const f = pl.failure || {};
-    $('cap-msg').textContent = `자동 체인 중단(${f.stage ?? '?'}): ${f.reason ?? ''}`;
+    $('cap-msg').textContent = `${pl.precise ? '정밀수집' : '자동 체인'} 중단(${f.stage ?? '?'}): ${f.reason ?? ''}`;
   } else if (stage === 'done') {
-    const c = pl.coverage;
-    let msg = c ? `자동 셋업 완료 — 센터링 대상 ${c.targets} / 전체 ${c.totalSlots} · 미대상 ${c.uncovered}` : '자동 셋업 완료';
-    if (pl.note) msg += ` · ${pl.note}`;
-    $('cap-msg').textContent = msg;
+    if (pl.precise) {
+      $('cap-msg').textContent = await preciseDoneMessage(pl);
+    } else {
+      const c = pl.coverage;
+      let msg = c ? `자동 셋업 완료 — 센터링 대상 ${c.targets} / 전체 ${c.totalSlots} · 미대상 ${c.uncovered}` : '자동 셋업 완료';
+      if (pl.note) msg += ` · ${pl.note}`;
+      $('cap-msg').textContent = msg;
+    }
   }
   prevPipelineStage = stage;
   return pl;
 }
 
-async function capStart() {
+/**
+ * ★ 정밀수집 '시작'(W5) — 반복 관측 수집을 발화하지 않는다. 백엔드 `POST /capture/start-precise` 1회 호출로
+ * **LPD 탐색(앞면중심 앵커 loop) → 점유영역 → 센터라이징 → setup_result.json** 이 규정 대기시간과 함께 진행된다.
+ * 대기·단계전이는 전부 백엔드 소유(브라우저 탭 백그라운드화·폴링 지터로 카메라 동작 간격이 흔들리면 안 된다) —
+ * 프론트는 기존 폴러(capPoll→pollPipeline / discPoll / calPoll)만 기동한다.
+ * 명령 대상 소스는 뷰어가 보고 있는 소스(state.source) — /calibrate/point 와 같은 규약.
+ */
+async function startPrecise() {
+  $('cap-msg').textContent = '';
+  prevPipelineStage = 'idle'; // 새 런 시작 → 파이프라인 전이 추적 재설정.
+  const res = await fetch('/capture/start-precise', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      source: state.source || undefined,
+      // 센터라이징 분리(체크 시) — 탐색·점유영역까지만 돌고 센터라이징 전에 멈춘다.
+      skipCentering: $('cap-skip-centering').checked || undefined,
+    }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    $('cap-msg').textContent = `정밀수집 시작 실패: ${data.error ?? res.status}`;
+    return;
+  }
+  if (data.stage === 'failed') {
+    // preflight 정직 실패(앞면중심 0 등) — 조용히 넘어가지 않는다.
+    $('cap-msg').textContent = `정밀수집 시작 불가(${data.failure?.stage ?? '?'}): ${data.failure?.reason ?? ''}`;
+    return;
+  }
+  preciseActive = true; // 이제 진행바는 탐색/센터라이징 잡 실적을 미러링한다(수집 status 무시).
+  $('cap-bar').value = 0;
+  $('cap-label').textContent = '번호판 탐색 준비…';
+  $('cap-msg').textContent = '번호판 탐색 중…';
+  capPoll();
+  discPoll();
+}
+
+/**
+ * 정밀수집 완료 메시지(요건8). 잡 두 개의 기존 상태 라우트에서 실적을 그대로 읽어 붙인다(신규 집계 없음).
+ * 조회 실패는 카운트 생략으로 강등한다(완료 사실 자체는 파이프라인 stage 가 정본).
+ */
+async function preciseDoneMessage(pl) {
+  const get = async (url) => {
+    try {
+      const r = await fetch(url, { cache: 'no-store' });
+      return r.ok ? await r.json() : null;
+    } catch {
+      return null;
+    }
+  };
+  const [disc, cal] = await Promise.all([get('/discover/status'), get('/calibrate/status')]);
+  const d = disc ? `탐색 ${disc.found ?? 0}/${disc.total ?? 0}` : '탐색 -';
+  // '센터라이징 분리' run 은 calibrator 를 발화하지 않았으므로 센터링 실적·setup_result 를 주장하지 않는다
+  // (직전 run 의 /calibrate/status 잔여를 이번 실적으로 오독하면 위장 성공이 된다).
+  const separated = typeof pl.note === 'string' && pl.note.startsWith('센터라이징 분리');
+  if (separated) {
+    const t = pl.coverage?.targets ?? 0;
+    return (
+      `탐색·점유영역 완료 — ${d} · 여기서 종료되었습니다(센터라이징 미실행). ` +
+      `'센터라이징 분리' 체크를 해제하고 '시작'을 다시 눌러 센터라이징을 진행하세요 — 대상 ${t}슬롯`
+    );
+  }
+  const c = cal ? `센터링 ${cal.done ?? 0}/${cal.total ?? 0}` : '센터링 -';
+  let msg = `정밀수집 완료 — ${d} · ${c} · setup_result.json 저장`;
+  if (pl.note) msg += ` · ${pl.note}`;
+  return msg;
+}
+
+async function capCaptureStart() {
+  preciseActive = false; // 진행바 소유권을 수집(CaptureJob) 실적으로 되돌린다.
   $('cap-msg').textContent = '';
   floorLlmWarnShown = false; // 새 런 시작 → floor ROI 경고 가드 재설정.
   occLlmWarnShown = false; // 새 런 시작 → 점유율 경고 가드 재설정.
@@ -2243,10 +2369,10 @@ async function capStart() {
     ...(mode === 'time'
       ? { checkpointIntervalMs: (Number($('cap-ckint').value) || 60) * 1000 }
       : { checkpointEvery: Number($('cap-checkpoint').value) || 10 }),
-    floorRoiUseLlm: $('cap-floor-llm').checked, // 바닥 ROI 소스 모드(ON=LLM 생성, OFF=파일). 백엔드 floorReviewer 게이트.
+    floorRoiUseLlm: FLOOR_ROI_USE_LLM, // 바닥 ROI 소스 모드(파일 고정, 요건12). 백엔드 floorReviewer 게이트.
     vpdOnParkingOnly: $('cap-vpd-onplace').checked, // VPD 검출 모드(ON=주차면 위 차량만, OFF=모든 차량).
     vpdEnabled: false, // 제품 정책: 정밀수집 자동 경로 VPD(차량) 정지 — 체크박스 없이 고정 OFF. VPD 는 테스트 버튼만.
-    autoChain: $('cap-autochain').checked, // 원버튼 셋업: 수집 done 후 자동 최종화+센터라이징 백엔드 연쇄(옵트인).
+    // autoChain 미전송(요건12: '완료 후 자동 최종화' UI 제거) → 백엔드 기본 false. 스키마·연쇄 코드는 보존.
   };
   prevPipelineStage = 'idle'; // 새 런 시작 → 파이프라인 전이 추적 재설정.
   const res = await fetch('/capture/start', {
@@ -2269,14 +2395,6 @@ async function capStop() {
   capPoll(); // 이후 renderCaptureStatus 가 실제 state 로 버튼·안내 재정합.
 }
 
-/** 최종화 바디 전달용 로직 점유 스냅샷(R4) — state.occComputeByKey → [{key, spaces:[{idx,occupied}]}]. */
-function buildFinalizeOccupancy() {
-  return Object.entries(state.occComputeByKey).map(([key, occ]) => ({
-    key,
-    spaces: (occ.spaces ?? []).map((s) => ({ idx: s.id, occupied: !!s.occupied })),
-  }));
-}
-
 /** 최종화 후 slot_setup 조회 → state.parkingSlotsByKey(cam:preset → 행배열) 구성(§06 H7). 실패 시 조용히 미표시. */
 async function loadParkingSlots() {
   try {
@@ -2294,23 +2412,25 @@ async function loadParkingSlots() {
   }
 }
 
+/**
+ * ★ 최종화 = **표시 전용**(요건9). `POST /capture/finalize` 를 부르지 않는다 —
+ *   Finalizer 의 `replaceSlotSetup` 은 모든 슬롯의 pan/tilt/zoom 을 null, centered 를 0 으로 되돌리므로
+ *   요구 순서(센터라이징 완료 → 최종화 → 표시)대로 누르면 **방금 만든 센터라이징이 즉시 파괴된다**.
+ *   따라서 DB(`GET /capture/slots`)를 소스로 LPD·점유영역·센터라이징 위치를 화면에 그리기만 한다.
+ *   (`/capture/finalize` 라우트·`Finalizer` 는 수집 경로·테스트용으로 그대로 보존 — 이 버튼에서만 도달 불가.)
+ */
 async function capFinalize() {
-  const res = await fetch('/capture/finalize', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ occupancy: buildFinalizeOccupancy() }),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (res.ok) {
-    $('cap-msg').textContent = `최종화 완료: 슬롯 ${data.slots}, 전역 ${data.globalCount}`;
-    state.roiHidden = false; // 최종화 결과를 다시 표시.
-    await loadParkingSlots(); // 파일 바닥ROI 기준 주차면(DB parking_slots) 리스트 소스 로드(§06 H7).
-    await loadMapping(); // 정밀 결과를 검수 탭에 반영.
-    drawRoiOverlay();
-    renderSlotList();
-  } else {
-    $('cap-msg').textContent = `최종화 실패: ${data.error ?? res.status}`;
-  }
+  $('roi-db').checked = true; // DB 소스 오버레이 ON — LPD/점유/센터링 전부 이 게이트를 통과한다.
+  state.roiHidden = false; // 결과를 다시 표시.
+  await loadParkingSlots(); // slot_setup 정본 조회 → state.parkingSlotsByKey.
+  await loadMapping(); // 정밀 결과를 검수 탭에 반영.
+  drawRoiOverlay();
+  renderSlotList();
+  const rows = Object.values(state.parkingSlotsByKey ?? {}).flat();
+  const lpd = rows.filter((r) => r.lpd).length;
+  const occ = rows.filter((r) => r.occupyRange).length;
+  const cen = rows.filter((r) => r.centered && r.lpd).length;
+  $('cap-msg').textContent = `표시: 번호판 ${lpd} · 점유영역 ${occ} · 센터라이징 ${cen} (전체 ${rows.length})`;
 }
 
 // 검출·센터링 초기화(수동): slot_setup 의 vpd/lpd/occupy/ptz/centered/img1 만 비움(바닥 ROI/슬롯 보존).
@@ -2557,6 +2677,7 @@ async function calPoll() {
   const done = status?.done ?? 0;
   const total = status?.total ?? 0;
   const percent = total > 0 ? Math.round((done / total) * 100) : 0;
+  if (preciseActive) renderPreciseProgress('센터라이징', status); // 정밀수집 진행바 미러(2단계).
   $('cal-bar').value = percent;
   $('cal-label').textContent = `${st} ${done}/${total}` + (status?.current ? ` — ${status.current.slotId}` : '');
 
@@ -2671,6 +2792,7 @@ async function discPoll() {
     status = null;
   }
   const view = discoverView(status ?? {}); // 순수 헬퍼(core.js) — vitest 대상.
+  if (preciseActive) renderPreciseProgress('번호판 탐색', status); // 정밀수집 진행바 미러(요건: 시작 후 진행상황 표시).
   $('disc-bar').value = view.percent;
   $('disc-label').textContent = view.label;
   $('lpd-run').disabled = view.runDisabled;
@@ -3593,7 +3715,8 @@ function wire() {
     t.addEventListener('click', () => setTab(t.dataset.tab)),
   );
 
-  $('cap-start').addEventListener('click', capStart);
+  $('cap-start').addEventListener('click', startPrecise); // 정밀수집(LPD탐색→점유→센터라이징→setup_result).
+  $('cap-capture-start').addEventListener('click', capCaptureStart); // 반복 관측 수집(CaptureJob) — 별도 경로.
   $('cap-stop').addEventListener('click', capStop);
   // 트리거 모드 라디오 → 해당 입력 필드만 표시(rounds: 체크포인트 라운드, time: 간격 초).
   for (const r of document.querySelectorAll('input[name="cap-trigmode"]')) {
@@ -3716,7 +3839,6 @@ function wire() {
     if (e.target.checked && !state.parkingSlotsByKey) await loadParkingSlots();
     drawRoiOverlay();
   });
-  $('cap-floor-llm').addEventListener('change', drawRoiOverlay); // 바닥 ROI 소스(LLM/파일) 모드 전환 → 즉시 재렌더.
   $('roi-cuboid').addEventListener('change', drawRoiOverlay); // 3D 육면체 레이어 토글(기본 off → 회귀 0).
   $('roi-mask').addEventListener('change', drawRoiOverlay); // VPD seg 마스크 오버레이 토글(순수 렌더 — masks 는 detect 응답에 동승, 별도 로드 불필요).
   // 차량 육면체 토글(**기본 off** — 마스터 요청 2026-07-15: 시작 시 체크 해제).

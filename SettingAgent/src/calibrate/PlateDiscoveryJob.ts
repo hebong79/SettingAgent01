@@ -71,6 +71,7 @@ export class PlateDiscoveryJob {
   private readonly writer: (artifact: PlateDiscoveryArtifact, outFile: string) => void;
   private readonly opts: PlateDiscoveryOpts;
   private readonly now: () => string;
+  private readonly sleep: (ms: number) => Promise<void>;
   private readonly onFinished?: (state: 'done' | 'error') => void;
   /** 프리셋 PTZ 조회 캐시(`${cam}:${preset}` → PTZ) — PtzCalibrator ptzByKey 패턴. */
   private readonly ptzByKey = new Map<string, Ptz | null>();
@@ -83,6 +84,7 @@ export class PlateDiscoveryJob {
     this.camera = deps.camera;
     this.opts = deps.opts ?? {};
     const sleep = deps.sleep ?? defaultSleep;
+    this.sleep = sleep;
     const onFrame = (jpeg: Buffer, camIdx: number, presetIdx: number): void => {
       this.lastFrame = { jpeg, camIdx, presetIdx };
     };
@@ -113,8 +115,16 @@ export class PlateDiscoveryJob {
   /**
    * 잡 시작(중복 거부 throw → 라우트 409). 대상=slot_setup 앞면중심 펼침(필터 slotIds).
    * 슬롯 순차 처리 → JSON 정본 저장 + slot_setup.lpd 부분 UPDATE. 백그라운드(발화 후 미대기).
+   *
+   * ★ opts(W3): 정밀수집 경로의 대기시간(요구1·2). **기본 0 = 대기 없음** — 수동 `/discover/ptz` 는
+   *   인자를 넘기지 않으므로 sleep 코드에 도달조차 하지 않는다(회귀 구조적 0).
+   *   - betweenSlotMs: 슬롯 1건 탐색 후 대기.
+   *   - occupySettleMs: 점유영역 생성 후 대기(프리셋 그룹 단위 — 생성이 프레임 단위 집합연산이라 그 단위가 유일한 경계).
    */
-  start(filter: { slotIds?: string[]; cam?: number; preset?: number } = {}): { total: number } {
+  start(
+    filter: { slotIds?: string[]; cam?: number; preset?: number } = {},
+    opts: { betweenSlotMs?: number; occupySettleMs?: number } = {},
+  ): { total: number } {
     if (this.state === 'running') throw new Error('discover already running');
     let targets = expandDiscoveryTargets(this.store.getSlotSetup());
     if (filter.cam != null && filter.preset != null) {
@@ -135,11 +145,14 @@ export class PlateDiscoveryJob {
     // 직전 실행 프레임 무효화 — 새 실행이 첫 캡처를 넣기 전까지 /discover/frame 이 과거 화면을 서빙하면
     // 카메라 위치와 화면이 어긋나 보인다(PtzCalibrator 와 동일 병).
     this.lastFrame = undefined;
-    void this.run(targets);
+    void this.run(targets, opts);
     return { total: targets.length };
   }
 
-  private async run(targets: DiscoveryTarget[]): Promise<void> {
+  private async run(
+    targets: DiscoveryTarget[],
+    opts: { betweenSlotMs?: number; occupySettleMs?: number } = {},
+  ): Promise<void> {
     const items: PlateDiscoveryItem[] = [];
     const discovery = this.makeDiscovery(this.opts);
     // 프리셋별 대상 그룹핑(§9-2) — 배타성 게이트 peer 앵커 소스(1회 산출).
@@ -178,9 +191,10 @@ export class PlateDiscoveryJob {
           });
         }
         this.done += 1;
+        if (opts.betweenSlotMs) await this.sleep(opts.betweenSlotMs); // 요구1(정밀수집 전용 — 미지정 시 미도달).
       }
       this.writer({ createdAt: this.now(), items }, this.outFile);
-      this.saveSlotLpd(items);
+      await this.saveSlotLpd(items, opts.occupySettleMs);
       this.current = undefined;
       this.endedAt = this.now();
       this.state = 'done';
@@ -219,7 +233,7 @@ export class PlateDiscoveryJob {
    * 찾은 슬롯의 원본 좌표 LPD OBB 를 slot_setup.lpd 로 부분 UPDATE(best-effort).
    * ★ globalIdx(=정수 slot_id) 부재·미검출 항목은 스킵(위장 저장 금지). 실패해도 JSON 정본·잡 완료 무방.
    */
-  private saveSlotLpd(items: PlateDiscoveryItem[]): void {
+  private async saveSlotLpd(items: PlateDiscoveryItem[], occupySettleMs?: number): Promise<void> {
     const updatedAt = this.now();
     const found = items.filter((it) => {
       if (!it.found || it.lpdOrig == null) return false;
@@ -246,6 +260,7 @@ export class PlateDiscoveryJob {
       } catch (e) {
         logger.warn({ err: e, cam: group[0]?.camIdx, preset: group[0]?.presetIdx }, '점유영역 생성 실패(occupy_range 생략, lpd 는 저장)');
       }
+      if (occupySettleMs) await this.sleep(occupySettleMs); // 요구2(정밀수집 전용 — 미지정 시 미도달).
     }
     const rows: SlotLpdRow[] = found.map((it) => {
       const poly = regionBySlot.get(it.globalIdx!);

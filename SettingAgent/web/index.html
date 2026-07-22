@@ -182,16 +182,16 @@
               </fieldset>
               <label class="field" id="cap-checkpoint-field">체크포인트(라운드) <input id="cap-checkpoint" type="number" min="1" value="1" /></label>
               <label class="field" id="cap-ckint-field" hidden>체크포인트 간격(초) <input id="cap-ckint" type="number" min="1" value="60" /></label>
-              <label class="field check"><input id="cap-floor-llm" type="checkbox" /><span><strong>바닥 LLM 사용</strong></span></label>
               <label class="field check"><input id="cap-vpd-onplace" type="checkbox" checked /><span><strong>주차면 위 차량만 검출</strong><small>(번호판 포함)</small></span></label>
-              <label class="field check cap-autochain" title="시작(수집) 완료 후 자동 연쇄: 최종화 → LPD 탐색(앞면중심 앵커 loop)·점유영역 생성 → 센터라이징. 각 단계가 slot_setup(DB)·파일에 저장된다."><input id="cap-autochain" type="checkbox" /><span><strong>완료 후 자동 최종화</strong><small>+ LPD탐색·점유영역 + 센터라이징</small></span></label>
+              <label class="field check" title="체크 시 정밀수집이 번호판(LPD) 탐색·점유영역 생성까지만 진행하고 센터라이징 전에 멈춘다. setup_result.json 은 생성되지 않는다"><input id="cap-skip-centering" type="checkbox" /><span><strong>센터라이징 분리</strong><small>탐색·점유영역까지만</small></span></label>
             </div>
             <div class="cap-actions toolbar capture-actions" aria-label="정밀 수집 실행">
               <button id="cap-load-roi" title="PtzCamRoi.json(바닥 ROI 정본)을 읽어 DB slot_setup 을 전량 재구성. 기존 검출(VPD/LPD)·점유영역·센터라이징은 모두 사라진다. 되돌릴 수 없음">ROI 파일 로딩</button>
               <button id="cap-build-cuboid" title="지면모델로 각 주차면의 3D 육면체와 앞면 중심점을 산출해 DB(slot_setup.slot3d_front_center)에 저장하고 화면에 표시. 검출·점유·센터링은 건드리지 않음">3D육면체 ROI생성</button>
-              <button id="cap-start" class="primary">시작</button>
+              <button id="cap-start" class="primary" title="정밀수집: 전 주차면 번호판(LPD) 탐색 → 점유영역 생성 → 번호판 센터라이징 → setup_result.json 저장까지 자동 진행. 선행으로 'ROI 파일 로딩' 1회 필요">시작</button>
+              <button id="cap-capture-start" title="반복 관측 수집(CaptureJob) 시작 — 위 반복 횟수/주기/체크포인트 설정을 사용한다. 정밀수집('시작')과 별개 경로">수집 시작</button>
               <button id="cap-stop">정지</button>
-              <button id="cap-finalize">최종화</button>
+              <button id="cap-finalize" title="DB(slot_setup) 기준으로 번호판(LPD)·점유영역·센터라이징 위치를 화면에 표시한다(표시 전용 — DB 를 바꾸지 않는다)">최종화</button>
               <button id="cap-reset-db" title="DB(slot_setup)의 검출(VPD/LPD)·점유영역·센터라이징(PTZ)을 모두 초기화. 바닥 ROI/슬롯은 유지. 되돌릴 수 없음(재캡처·재센터링 필요)">검출·센터링 초기화</button>
             </div>
             <div class="cap-progress capture-progress">

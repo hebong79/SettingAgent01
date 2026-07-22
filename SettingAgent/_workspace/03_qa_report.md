@@ -1,120 +1,98 @@
-# 03 검증(qa) — "ROI 파일 로딩"(PtzCamRoi.json → DB slot_setup 재구성)
+# 03 — 검증 보고 (정밀수집 "시작" 파이프라인)
 
-검증자(qa-tester). 설계서 `01_architect_plan.md` "검증(qa)" 1~5번 전부 수행.
-실행: `cd SettingAgent && npx vitest run` (전체 스위트).
+설계서: `docs/20260722_181647_정밀수집시작_파이프라인_설계.md` §11.1 (U1~U14)
+구현 보고: `_workspace/02_developer_changes.md`
+검증: 2026-07-22 · `SettingAgent/` · vitest 2.1.9 · `npx tsc --noEmit` 통과
 
-## 1. 신규/수정 테스트 파일
+---
 
-| 파일 | 구분 | 케이스 수 |
-|------|------|----------|
-| `test/roiDbLoad.test.ts` | 신규 | 12 |
-| `test/captureLoadRoiRoutes.test.ts` | 신규 | 5 |
-| `test/viewerPtzSyncCoverage.test.ts` | 수정(1줄, 라우트 분류 등록) | 기존 유지 |
+## 1. 요약
 
-임시 DB 는 전부 `new SqliteStore(':memory:')`, 임시 입력 파일은 `os.tmpdir()` 아래 `mkdtempSync`.
-**실제 `data/setting.sqlite` 는 열지 않았다**(수정시각 Jul 18 그대로). 읽기 전용 참조는 `data/Place01/PtzCamRoi.json`·`config/camerapos.json` 뿐이다.
+| 항목 | 결과 |
+|------|------|
+| 전량 회귀 `npx vitest run` | **209 파일 / 2465 테스트 전량 통과 · 실패 0** |
+| 신규 테스트 파일 | 7개 / **71 테스트** (전부 통과) |
+| 기존 테스트 수정 | **0** (기존 202파일·2394테스트 그대로 + 71 = 2465, 산술 일치) |
+| 발견한 구현 결함 | **0** — `dev-precise` 재수정 요청 없음 |
+| 실데이터 파괴 | **없음**(DB 전부 `:memory:`, ROI/camerapos 는 동결 픽스처를 `os.tmpdir()` 로 복사) |
 
-### 1-1. `test/roiDbLoad.test.ts` (설계 qa 1~3)
+브리핑에 언급된 선행 실패(`test/slot3dFrontCenter.test.ts > 프리셋2 근접면 검증`)는 **현재 존재하지 않는다**.
+커밋 `2d48088`("slot3dFrontCenter 실데이터 스모크 재정박")로 이미 해소되어 22 테스트 전량 green 이다.
 
-정상 로딩(실제 `data/Place01/PtzCamRoi.json`, 전 프리셋 커버 camerapos 픽스처 사용):
-1. 파일의 전 주차면이 slot_setup 으로 재구성 — `slot_id` 1..N **고유·연속**, `res.slots` = `buildSlots()` 산출 행수와 일치.
-2. `preset_slotidx` 프리셋별 1-based 연속, `slot_roi` 4점 정규화(아래 §3-1 주의).
-3. 합성 픽스처(전 점 프레임 내) → `slot_roi` 4점이 정확히 `0.1/0.3` 등 0~1 값(정규화 스케일 정합).
-4. 검출/센터링 컬럼 초기값 — `vpd/lpd/occupyRange/pan/tilt/zoom/img1 = null`, `centered = false(0)`.
-5. 기존 검출·센터링이 있는 DB 에 로딩 시 전량 교체(centered 전부 해제, 행수 = `res.slots`).
-6. [현황 기록] 실제 `config/camerapos.json` 사용 시 FK 부모 없는 (cam,preset) 은 `skipped[]` 로 빠지고 나머지는 정상 INSERT.
+---
 
-★ wipe 금지 회귀 가드(최우선) — 기존 3행 시드 후:
-7. ROI 파일 없음 → `ok:false`, `slots:0`, **3행 그대로**.
-8. `{"cameras":[]}` → `ok:false`, **3행 그대로**.
-9. JSON 파싱 실패 → `ok:false`, `error` 에 '파싱 실패', **3행 그대로**.
-10. 실패 경로에서 기존 슬롯의 `centered/pan/vpd` 값도 무손상.
+## 2. U1~U14 항목별 결과
 
-FK 스킵:
-11. 부모 있는 cam1:preset1(2면) + 부모 없는 cam9:preset9(1면) → `ok:true`, `slots:2`,
-    `skipped = [{camId:9, presetId:9, count:1, reason:'preset_pos 부모 없음(FK)'}]`, camerapos 미지정 경고가 `issues` 에 노출.
-12. 부모 없는 슬롯만 있는 ROI → `ok:false`(error 에 '무변경'), `skipped` 1건, **기존 3행 보존**.
+| ID | 파일 | 결과 | 비고 |
+|----|------|------|------|
+| **U1** | `test/setupPipelinePrecise.test.ts` | ✅ 8 | discovering→(1s)→calibrating→done · `discovery.start({}, {betweenSlotMs:500, occupySettleMs:300})` · `calibrator.start(undefined, {betweenSlotMs:1000[, camera]})` · finalize/getSnapshot **미접촉** |
+| **U2** | 〃 | ✅ 3 | 앵커 0 → `discovery.start` 미호출 + `failed{discover}` + 사유에 "ROI 파일 로딩" · preflight 실패 후 잠기지 않음 |
+| **U3** | 〃 | 6 ✅ | 비무장 no-op · 수집 경로는 `discovery.start` 인자 1개·`calibrator.start()` 인자 0개·**sleep 0회** · `precise` 키 미부착(응답 shape 불변) · 정밀→수집 전환 시 오버라이드 누수 없음 |
+| **U4** | `test/plateDiscoveryJobDelay.test.ts` | ✅ 8 | **fake sleep 실측**: 500 = 슬롯수(6/3), 300 = **프리셋 그룹수**(2/3, Q3 확인) · 순서 `[500×N, 300×P]` · 미검출 프리셋은 300 없음 · **미지정/빈opts/0 → sleep 0회** |
+| **U5** | `test/ptzCalibratorDelay.test.ts` | ✅ 7 | 1000 = 슬롯수(4/1/필터2) · `camera` 오버라이드가 배치의 **모든** PlatePtz 로 전달 · **미지정 → sleep 0회 + camera undefined** |
+| **U6** | `test/ptzCalibratorZoomSaturated.test.ts` | ✅ 5 | **요건5 봉인**: `centered:true / converged:false / reason:'zoom_saturated'` · item.ptz·plateWidth 는 **줌 단계(포화)** 결과 · `upsertSlotCentering` 행 = `{slotId, pan, tilt, zoom, centered:1, img1:null, updatedAt}` **전 필드 단언** · `max_iterations` 동일 규약 · 수렴 시 대조군 |
+| **U7** | `test/captureStartPreciseRoutes.test.ts` | ✅ 9 | 200+`{ok,stage:'discovering',precise:true}` · busy 409 · source 미존재 400 · sources 미주입 400 · invalid body 400 · preflight 실패 시 **200 이지만 ok:false + failure** · pipeline 미주입 시 404 · `listCameras` 실패 502 · source 어댑터가 `calibrator.start` 로 전달됨 |
+| **U8** | 〃 | ✅ 5 | 프리셋 1/4 보유 → **400** + 사유에 '프리셋'·'1개' + `missing:['1:2','2:1','2:2']` + 잡 미발화·파이프라인 미무장 · 전량 보유/여분 보유는 200 · **source 미지정 시 preflight 미수행**(구현자 §7-5 구멍을 봉인이 아니라 관측으로 기록) |
+| **U9** | `test/dbCenteringOverlay.test.ts` | ✅ 9 | `web/app.js` 의 `drawDbCentering` **원본 소스를 그대로 떼어** `new Function` 으로 실행(복사본 아님). lpd bounding rect 중심 · r=5 · `#ffd60a` · `centered=0`/`lpd=null` **스킵** · 비축정렬 quad 도 bbox 중심(꼭짓점 평균 아님) · 체크박스 2개 삭제·버튼 분리 배선 |
+| **U10** | `test/setupResult.test.ts` | ✅ 7 | 무변경 회귀 통과 |
+| **U11** | `test/loadRoiFrontCenterAuto.test.ts` | ✅ 2 | load-roi 200/ok:true + `issues` 에 `앞면 중심 산출 N건 … (h=1.5m)` · **보고 N = DB non-null 실적 일치** · 산출값 소수점 ≤5자리(round5 규약) |
+| **U12** | 〃 | ✅ 3 | `ground` **미주입** / `ground.enabled=false` 둘 다 **200 + ok:true + slots>0**, `issues` 에 '앞면 중심 미산출 — …ground.enabled=false', front_center 전부 null(위장 저장 없음) · `/capture/slots` 응답 shape 불변 |
+| **U13** | 〃 | ✅ 3 | **전 컬럼 비교**: 모든 컬럼을 실데이터처럼 시드(lpd/occupy/pan/tilt/zoom/centered/img1)한 뒤 라우트와 **동일 인자**로 `buildSlotFrontCenters` 실행 → `slot3dFrontCenter`·`updatedAt` 외 전 필드 동일(`toEqual` 전체 + 8개 필드 개별 단언). `updated>0` 로 무동작 통과 차단 · skipped 슬롯의 기존 front_center 미파괴 · **라우트 경로 쓰기 추적**: `replaceSlotSetup` 이후 DB 쓰기는 `['upsertSlotFrontCenter']` 하나뿐 |
+| **U14** | 〃 | ✅ 3 | 같은 서버에서 `POST /capture/slots/cuboid`(heightM 미지정) 후 값 **완전 동일** + `updated` = 자동 산출 건수 · **독립 서버 대조**(A=자동만 / B=자동+버튼) 슬롯 신원 기준 완전 일치 · `heightM:2.5` 명시 시 값이 **달라짐**(일치가 자명한 결과가 아님을 반증) |
 
-### 1-2. `test/captureLoadRoiRoutes.test.ts` (설계 qa 5)
+---
 
-`captureResetRoutes.test.ts` 의 `buildServer` + `app.inject` 패턴 재사용.
-1. **404** — `placeRoiFile` 미설정 → `{ok:false, error:'placeRoiFile 미설정'}`.
-2. **200** — `{ok:true, slots:2, cameras:1, presets:1, skipped:[], issues:[]}`, `error` 부재.
-   왕복으로 `GET /capture/slots` → 2행, `slotId [1,2]`, `centered:false`, `vpd/pan:null`, `roi` 4점.
-3. **409** — 파일 없음 → `ok:false`, `error` 문자열, `slots:0`, `skipped/issues` 배열, 기존 3행 무손실(`centered:true` 유지).
-4. **409** — 빈 `cameras` → 기존 2행 무손실.
-5. 회귀 — `POST /capture/slots/reset` 은 영향 없음(`{ok:true, cleared:2}`, 행 보존).
+## 3. 구현자가 "확인 못 했다"고 보고한 항목의 처리
 
-### 1-3. `test/viewerPtzSyncCoverage.test.ts` 1줄 수정 (사소 — 명시)
+| 구현자 보고 | 본 검증의 결론 |
+|-------------|----------------|
+| SC2 슬롯 간격 0.5s 실측 불가 | **U4 로 확정** — fake sleep 호출 인자·횟수 직접 계수(슬롯 6개 → `sleep(500)` 정확히 6회). 미지정 시 0회도 함께 봉인 |
+| SC5 센터링 1.0s 실측 불가 | **U5 로 확정** — 슬롯 4개 → `sleep(1000)` 정확히 4회 |
+| U12 `ground.enabled=false` 강등 미재현 | **U12 로 재현·확정**(라우트 경유 200/ok:true/issues/전 null) |
+| U13 전 컬럼 비교 미수행 | **U13 로 수행**(전 컬럼 `toEqual` + 쓰기 호출 추적 2중) |
+| SC7/SC8/SC9 프론트 렌더 | **부분 확정** — `drawDbCentering` 의 좌표·스킵 로직은 실소스 실행으로 확정. 실제 canvas 픽셀·브라우저 렌더는 **미검증**(§5) |
 
-기존 가드 테스트가 "app.js 가 호출하는 모든 라우트는 MOVES_CAMERA/NO_MOVE 로 분류되어야 한다"를 강제한다.
-신규 `/capture/slots/load-roi` 가 미분류라 **실패**했다. 이 라우트는 카메라를 움직이지 않으므로
-`NO_MOVE` 에 `'/capture/slots/load-roi': 'DB'` 로 등록했다(구현 코드 변경 없음, 테스트 분류 등록만).
+---
 
-## 2. 실행 결과(있는 그대로)
-
-신규 2파일 단독: **17 passed / 0 failed**.
-
-전체 스위트(`npx vitest run`):
+## 4. 신규 테스트 파일
 
 ```
-Test Files  1 failed | 199 passed (200)
-     Tests  1 failed | 2343 passed (2344)
+test/setupPipelinePrecise.test.ts        17  U1·U2·U3
+test/plateDiscoveryJobDelay.test.ts       8  U4
+test/ptzCalibratorDelay.test.ts           7  U5
+test/ptzCalibratorZoomSaturated.test.ts   5  U6
+test/captureStartPreciseRoutes.test.ts   14  U7·U8
+test/dbCenteringOverlay.test.ts           9  U9
+test/loadRoiFrontCenterAuto.test.ts      11  U11·U12·U13·U14
+                                         ──
+                                         71
 ```
 
-유일한 실패: `test/slot3dFrontCenter.test.ts > [후속] 실데이터 스모크 — PtzCamRoi.json 프리셋2 근접면 검증`.
+격리 관용구: DB `SqliteStore(':memory:')` · ROI/camerapos 는 `test/fixtures/PtzCamRoi.unity.json`·
+`camerapos.sample.json` 을 `mkdtempSync(tmpdir())` 로 복사 · 잡 `writer` 는 전부 스텁(파일 IO 0) ·
+외부 REST(카메라/LPD/VPD/소스)는 전부 스텁 — 실 서비스 왕복 **0**.
 
-**이 실패는 본 기능과 무관한 선행 실패(데이터 기인)임을 실험으로 확인했다:**
-- `SettingAgent/src`·`web` 변경을 통째로 stash 해도 동일하게 실패.
-- `data/Place01/PtzCamRoi.json`(작업트리에서 시뮬레이터가 재생성돼 수정됨) 만 stash 하면 **22/22 통과**.
-→ 원인은 코드가 아니라 **재생성된 ROI 정본 데이터**(cam2 추가·프리셋2 winding 변화). 본 변경의 결함이 아니다.
-설계서 qa 4번(기존 회귀 무손상): `test/migrateToSettingDb.test.ts` **7/7 무수정 통과**, `test/captureResetRoutes.test.ts` 3/3 통과.
+---
 
-## 3. 발견 사항
+## 5. 검증하지 못한 것 (정직한 명시)
 
-### 3-1. 설계서 성공기준 vs 실데이터 불일치(구현 결함 아님 — 설계서 기준이 낡음)
+1. **브라우저 실렌더** — `startPrecise()` 진행 메시지, 완료 메시지 문자열(`preciseDoneMessage`), 노란 원의
+   실제 canvas 픽셀은 확인하지 못했다. U9 는 `drawDbCentering` 의 **좌표·스킵 로직**만 실소스로 확정했고,
+   `#roi-db` 체크 → `drawDbCentering` 호출까지의 DOM 이벤트 경로는 **정적 문자열 검사**에 그친다.
+2. **실시간 대기의 벽시계 검증** — U4/U5 는 fake sleep 이라 `sleep(500)` 이 실제로 500ms 를 소비하는지는
+   보지 않는다(기본 `setTimeout` 구현 신뢰). 구현자의 라이브 실측(SC4 탐색→센터링 1.003s)이 이를 보완한다.
+3. **`data/setting.sqlite` 실 DB 상 동작** — 전부 `:memory:` 로 수행했다. 실 파일 DB 의 잠금·트랜잭션 거동은
+   기존 `sqliteStore.test.ts` 범위이며 본 변경이 건드리지 않았다.
+4. **시뮬레이터 라이브 스모크** — 본 검증은 전부 모킹이다(브리핑 요구). 라이브 실적은 구현자 보고 §6 이 정본.
+5. **`source` 미지정 시 프리셋 preflight 미수행**(구현자 §7-5) — 이는 결함이 아니라 **설계 범위 밖의 구멍**으로
+   판단해 U8 마지막 케이스로 **현 거동을 관측·기록**했다(봉인하지 않음). API 직접 호출 시 잘못된 소스로
+   순회가 시작될 수 있다 — 마스터 판단 필요.
 
-- 설계서/지시서는 "slot_setup **17행**, slot_id 1..17, cam1 preset 1·2·3" 을 전제한다.
-  **현재 작업트리의 `data/Place01/PtzCamRoi.json` 은 cam1(7+4+2=13면) + cam2(6+4=10면) = 총 23면**이다(Phase 0 조사 이후 파일이 재생성됨).
-  그래서 테스트는 17을 하드코딩하지 않고 **파일에서 산출한 기대값**과 대조한다.
-- "slot_roi 4점 **모두 0~1**" 도 실데이터에서 성립하지 않는다. 실제 파일에 프레임 밖 좌표가 4곳 있다
-  (cam1:preset2 idx1, cam1:preset3 idx1(2점), cam2:preset2 idx1/idx4 → 정규화 시 `-0.0348`, `>1` 등).
-  `src/capture/placeRoi.ts` 는 이를 **의도적으로 클램프·드롭하지 않고 보존**하며 `issues` 로만 보고한다(주석에 명시된 정본 규약).
-  → 테스트는 "4점·유한·(-0.2,1.2) 이내 + 프레임 밖이면 `issues` 에 보고" 로 검증하고, 엄격한 0~1 은 합성 픽스처로 별도 검증했다.
+---
 
-### 3-2. 운영 주의(결함 아님, 설계된 동작): 실제 config/camerapos.json 으로는 cam2 슬롯 10건이 통째로 스킵된다
+## 6. 부수 관찰(수정하지 않음)
 
-`config/camerapos.json` 에는 `cam1:preset1/2/3` 만 있다. 현재 ROI 파일에는 cam2 가 있으므로
-버튼을 실제로 누르면 **cam2 의 10면은 `skipped[]` 로 빠지고 13면만 INSERT** 된다(FK 전량실패 방지 규약대로).
-UI 는 이를 숨기지 않고 `#cap-msg` 에 노출하므로 은폐는 없다. 다만 cam2 를 DB 에 넣으려면
-`camerapos.json` 에 cam2 프리셋이 선행 등록되어야 한다는 **운영 선행조건**이다.
-
-### 3-3. 경계면 교차 비교 — 불일치 없음
-
-`web/app.js:2330 loadRoiToDb` ↔ 라우트 반환 `RoiDbLoadResult` 필드 대조:
-
-| app.js 소비 | 라우트/타입 | 판정 |
-|---|---|---|
-| `data.ok` | `ok: boolean` | 일치 |
-| `data.error ?? res.status` | `error?: string`(404/409 시 채움) | 일치(성공 시 undefined 는 미사용 경로) |
-| `data.slots`, `data.cameras`, `data.presets` | `number` 3개 | 일치 |
-| `data.skipped[].camId/presetId/count/reason` | `Array<{camId,presetId,count,reason}>` | **필드명·타입 전부 일치** |
-| `data.issues[]` (`.join(' | ')`) | `string[]` | 일치 |
-
-- 방어적 `?? []` 가 있어 배열 누락에도 안전. `res.ok || data.ok` 이중 체크로 409/404 모두 실패 처리됨.
-- 버튼 배선: `web/index.html:190` `#cap-load-roi` 존재, `web/app.js:3715` `$('cap-load-roi').addEventListener('click', loadRoiToDb)` 등록 확인.
-  성공 후 갱신 경로 `resetOverlayDisplay → loadParkingSlots → drawRoiOverlay → renderSlotList` 4함수 모두 app.js 에 정의돼 있음.
-- 인덱스 규약: `preset_slotidx` 1-based, `slot_id` 전역 1-based 를 테스트로 직접 확인(off-by-one 없음).
-
-### 3-4. 구현 결함
-
-**없음.** 설계서 A~D 요건(공용 모듈 단일 출처, wipe 금지 4가드, FK 스킵, 404/409/200 계약, UI 배선)이
-모두 테스트로 재현·확인됐다. 구현 코드는 한 줄도 수정하지 않았다.
-
-## 4. 미검증 한계(위장 없음 — 명시)
-
-- **라이브 스모크 미수행**: 서버(13020) 기동 후 `curl -XPOST /capture/slots/load-roi` → `GET /capture/slots` 실왕복,
-  및 브라우저에서 버튼 클릭 → `confirm()` → 오버레이·슬롯목록 갱신은 **수행하지 않았다**(유닛/inject 레벨까지만).
-  단, 라우트 왕복은 `app.inject` 로, 실데이터 매핑은 실제 `PtzCamRoi.json` 으로 대체 검증했다.
-- `web/app.js` 는 브라우저 전용(모듈 미분리)이라 `loadRoiToDb` 자체의 유닛테스트는 없다 — 정적 대조(§3-3)로 갈음.
-- `slot3dFrontCenter` 실패는 데이터 기인으로 특정만 했고 **수정하지 않았다**(본 작업 범위 밖. ROI 정본 재생성 이슈로 별도 처리 필요).
+- `SettingAgent/config/camerapos.json` 이 구현자의 라이브 실행(19:00)으로 갱신되어 있다. 본 검증은 이 파일을
+  읽지도 쓰지도 않았다(mtime 무변동 확인).
+- `test/viewerPtzSyncCoverage.test.ts` 가 신규 라우트를 `MOVES_CAMERA` 로 분류하도록 강제하는 하네스 제약은
+  구현자가 이미 반영했고, 전량 회귀에서 통과한다.

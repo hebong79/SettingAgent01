@@ -10,6 +10,8 @@ import type { Finalizer } from '../capture/Finalizer.js';
 import type { SetupPipeline } from '../pipeline/SetupPipeline.js';
 import type { SqliteStore } from '../capture/SqliteStore.js';
 import type { ICameraClient } from '../clients/CameraClient.js';
+import { CameraSourceClient } from '../clients/CameraSourceClient.js';
+import type { CameraSource } from '../viewer/CameraSource.js';
 import type { VpdClient } from '../clients/VpdClient.js';
 import type { LpdClient } from '../clients/LpdClient.js';
 import { runDetect, loadDetectCfg } from '../capture/detectPipeline.js';
@@ -19,7 +21,7 @@ import { loadSetupTargets, viewsToTargets, parseCameraViews, type MapFiles } fro
 import { buildGroundInputs } from '../ground/groundInputs.js';
 import { estimateGroundModels } from '../ground/groundModel.js';
 import { buildFrameCuboids } from '../ground/frameCuboids.js';
-import { H_CONST, slotFrontCenter } from '../ground/slotFrontCenter.js';
+import { buildSlotFrontCenters } from '../ground/frontCenterBuild.js';
 import { makeCuboidContextResolver } from '../ground/cuboidContext.js';
 import { filterVehiclesOnPlace } from '../capture/onPlaceFilter.js';
 import { assignPlatesToSlotViews } from '../setup/plateMatch.js';
@@ -87,6 +89,15 @@ const StartBodySchema = z.object({
   /** 원버튼 셋업: 수집 done 후 자동 최종화+센터라이징 연쇄(옵셔널·기본 false, 명시적 옵트인). */
   autoChain: z.boolean().optional(),
 });
+
+/** POST /capture/start-precise — 정밀수집 파이프라인 시작. source 미지정 시 파이프라인 카메라(기존 동작). */
+const StartPreciseBodySchema = z
+  .object({
+    source: z.string().min(1).optional(),
+    /** 센터라이징 분리(옵셔널·기본 false) — true 면 탐색·점유영역까지만 돌고 센터라이징 전에 done. */
+    skipCentering: z.boolean().optional(),
+  })
+  .default({});
 
 const FinalizeBodySchema = z
   .object({
@@ -166,6 +177,10 @@ export interface CaptureRouteDeps {
   lpd?: LpdClient;
   /** 원버튼 셋업 파이프라인(옵셔널·가산). 주입 시 autoChain 배선 + GET /capture/pipeline 등록. */
   pipeline?: SetupPipeline;
+  /** 카메라 소스 레지스트리(옵셔널·가산). 주입 시에만 POST /capture/start-precise 의 source 지정을 처리한다. */
+  sources?: Map<string, CameraSource>;
+  /** CameraSourceClient 조립용 카메라 설정(zoom 클램프). sources 와 함께 주입된다. */
+  cameraCfg?: ToolsConfig['camera'];
 }
 
 /**
@@ -246,6 +261,62 @@ export function registerCaptureRoutes(app: FastifyInstance, deps: CaptureRouteDe
   if (deps.pipeline) {
     const pipeline = deps.pipeline;
     app.get('/capture/pipeline', async () => pipeline.getStatus());
+
+    // ★ 정밀수집 '시작'(W2) — 반복 관측 수집 없이 **LPD 탐색 → 점유영역 → 센터라이징 → setup_result** 만 돈다.
+    //   얇은 진입점: 대기시간·단계전이·가드는 전부 SetupPipeline.startPrecise 소유. source 해석은
+    //   POST /calibrate/point(calibrateRoutes.ts)의 관용구를 그대로 복제한다(요청마다 얇은 어댑터, 상태 없음).
+    app.post('/capture/start-precise', async (req, reply) => {
+      const parsed = StartPreciseBodySchema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        reply.code(400);
+        return { error: 'invalid body', detail: parsed.error.flatten() };
+      }
+      if (pipeline.isBusy()) {
+        reply.code(409);
+        return { error: 'pipeline busy', stage: pipeline.getStatus().stage };
+      }
+      let camera: ICameraClient | undefined;
+      let src: CameraSource | undefined;
+      if (parsed.data.source) {
+        src = deps.cameraCfg ? deps.sources?.get(parsed.data.source) : undefined;
+        if (!src) {
+          reply.code(400);
+          return { error: 'source not found' };
+        }
+        camera = new CameraSourceClient(src, deps.cameraCfg!);
+      }
+      // 요건13 분기 B — **조용한 강등 금지**. 리얼 소스는 프리셋 테이블이 없어(현재 위치 1개뿐) 프리셋 해석이
+      // echo/0-0-1 폴백으로 떨어지고, 카메라를 엉뚱한 곳으로 보내며 잡이 끝까지 돈다. 시작 전에 끊는다.
+      if (src) {
+        let have: Set<string>;
+        try {
+          const list = await src.listCameras();
+          have = new Set(list.cameras.flatMap((c) => c.presets.map((p) => `${c.camIdx}:${p.presetIdx}`)));
+        } catch (err) {
+          reply.code(502);
+          return { error: 'source listCameras failed', detail: err instanceof Error ? err.message : String(err) };
+        }
+        const want = new Set(deps.store.getSlotSetup().map((v) => `${v.camId}:${v.presetId}`));
+        const missing = [...want].filter((k) => !have.has(k));
+        if (missing.length > 0) {
+          reply.code(400);
+          return {
+            error: `리얼 소스는 프리셋 순회 미지원(소스 프리셋 ${have.size}개) — 시뮬레이터 소스로 실행하거나 슬롯을 현재 위치로 한정하세요`,
+            missing,
+          };
+        }
+      }
+      try {
+        const status = pipeline.startPrecise({
+          ...(camera ? { camera } : {}),
+          ...(parsed.data.skipCentering ? { skipCentering: true } : {}),
+        });
+        return { ok: status.stage !== 'failed', ...status };
+      } catch (err) {
+        reply.code(409);
+        return { error: err instanceof Error ? err.message : String(err) };
+      }
+    });
   }
 
   // LLM 강제 구동(warm-up). 사용자가 필요할 때 즉시 모델 로드. best-effort — { ok } 반환(미주입/비활성 시 false).
@@ -387,6 +458,28 @@ export function registerCaptureRoutes(app: FastifyInstance, deps: CaptureRouteDe
       }
     }
 
+    // ★ 앞면 중심(slot3d_front_center) 자동 산출·저장 — W6 공유(수동 '3D육면체 ROI생성' 버튼과 같은 함수).
+    // 근거: 화면의 육면체·앞면중심은 클라이언트 라이브 오버레이라 DB 컬럼이 비어 있어도 "이미 있다"고 보인다.
+    // 그런데 LPD 탐색 대상 조건은 그 컬럼이다(plateDiscoveryWriter.expandDiscoveryTargets) → 대상 0.
+    // 로딩이 성공(result.ok)했을 때만 수행하고, 실패는 **로딩을 죽이지 않고** issues[] 로 강등한다
+    // (위 presetRefresh·camerapos 갱신과 동일 규약). 슬롯 단위 실패는 skipped[] 로 드러난다(위장 저장 금지).
+    if (result.ok) {
+      if (!deps.ground?.enabled) {
+        result.issues.push('앞면 중심 미산출 — 지면모델 비활성(ground.enabled=false)');
+      } else {
+        try {
+          const fc = await buildSlotFrontCenters(deps.store, {
+            placeRoiFile: deps.placeRoiFile,
+            cameraposFile: deps.mapFiles?.cameraposFile,
+            ground: deps.ground,
+          });
+          result.issues.push(`앞면 중심 산출 ${fc.updated}건 / 스킵 ${fc.skipped.length}건(h=${fc.heightM}m)`);
+        } catch (err) {
+          result.issues.push(`앞면 중심 미산출 — 지면모델 산출 실패: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+    }
+
     if (!result.ok) reply.code(409);
     return result;
   });
@@ -475,61 +568,24 @@ export function registerCaptureRoutes(app: FastifyInstance, deps: CaptureRouteDe
       reply.code(404);
       return { ok: false, error: 'ground/place-roi 미설정' };
     }
-    const ground = deps.ground;
-    const heightM = parsed.data.heightM ?? H_CONST;
-    const views = deps.store.getSlotSetup();
-    if (views.length === 0) {
+    if (deps.store.getSlotSetup().length === 0) {
       reply.code(409);
       return { ok: false, error: 'slot_setup 비어있음 — ROI 파일 로딩 먼저' };
     }
-    // 프리셋별 지면모델(ground-model 라우트·Finalizer.buildGroundModels 와 동일 조합 — 새 조합 금지).
-    const modelByKey = new Map<string, GroundModel>();
-    const issues: string[] = [];
+    // 산출·저장은 buildSlotFrontCenters(W6) 단일 구현 — ROI 로딩 자동 경로와 **같은 함수**를 쓴다.
     try {
-      const raw = JSON.parse(await readFile(deps.placeRoiFile, 'utf8'));
-      let views2: ReturnType<typeof parseCameraViews> = [];
-      if (deps.mapFiles?.cameraposFile) {
-        try {
-          views2 = parseCameraViews(JSON.parse(await readFile(deps.mapFiles.cameraposFile, 'utf8')));
-        } catch {
-          /* camerapos 없음/파싱실패 → zoom 미상 강등(ground-model 라우트와 동일 처리). */
-        }
-      }
-      for (const cam of buildGroundInputs(raw, views2)) {
-        const r = estimateGroundModels(cam, ground);
-        for (const m of r.models) modelByKey.set(`${m.camIdx}:${m.presetIdx}`, m);
-        issues.push(...r.issues);
-      }
+      const r = await buildSlotFrontCenters(deps.store, {
+        placeRoiFile: deps.placeRoiFile,
+        cameraposFile: deps.mapFiles?.cameraposFile,
+        ground: deps.ground,
+        ...(parsed.data.heightM !== undefined ? { heightM: parsed.data.heightM } : {}),
+      });
+      return { ok: true, ...r };
     } catch (err) {
       const e = err as NodeJS.ErrnoException;
       reply.code(e.code === 'ENOENT' ? 404 : 500);
       return { ok: false, error: e.code === 'ENOENT' ? 'PtzCamRoi.json 없음' : 'ground-model 산출 실패', detail: e.message };
     }
-    const now = new Date().toISOString();
-    const rows: Array<{ slotId: number; slot3dFrontCenter: string; updatedAt: string }> = [];
-    const skipped: Array<{ slotId: number; reason: string }> = [];
-    for (const v of views) {
-      const model = modelByKey.get(`${v.camId}:${v.presetId}`);
-      if (!model) {
-        skipped.push({ slotId: v.slotId, reason: `지면모델 없음(${v.camId}:${v.presetId})` });
-        continue;
-      }
-      const front = slotFrontCenter(v.roi, model, heightM);
-      if (!front) {
-        skipped.push({ slotId: v.slotId, reason: '육면체 퇴화(지평선 위/quad 이상)' });
-        continue;
-      }
-      rows.push({ slotId: v.slotId, slot3dFrontCenter: stringify5(front), updatedAt: now });
-    }
-    const updated = rows.length > 0 ? deps.store.upsertSlotFrontCenter(rows) : 0;
-    return {
-      ok: true,
-      updated,
-      skipped,
-      models: [...modelByKey.entries()].map(([key, m]) => ({ key, conf: m.conf, issues: m.issues })),
-      issues,
-      heightM,
-    };
   });
 
   // 정밀수집 결과 저장/열기(save/*). saveStore 주입 시에만 등록(가산). 라우트는 위임만.

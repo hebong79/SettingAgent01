@@ -261,6 +261,9 @@ export function buildServer(deps: ApiDeps): FastifyInstance {
       vpd: deps.vpd,
       lpd: deps.lpd,
       pipeline: deps.pipeline,
+      // sources/cameraCfg 는 옵셔널 전달 — 주입돼야 POST /capture/start-precise 의 source 지정이 살아난다(헤드리스 보존).
+      sources: deps.sources,
+      cameraCfg: deps.cameraCfg,
     });
   }
 
