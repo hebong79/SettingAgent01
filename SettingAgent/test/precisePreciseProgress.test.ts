@@ -131,3 +131,85 @@ describe("'센터라이징 분리' 완료 메시지", () => {
     expect(msg).toBe('정밀수집 완료 — 탐색 23/23 · 센터링 22/23 · setup_result.json 저장');
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+// 중복 진행바 제거 + 완료 팝업 (마스터 지적 2026-07-22: 진행바 동시 이동 / 완료 팝업 미표시)
+// ══════════════════════════════════════════════════════════════════
+describe('진행바 중복 제거', () => {
+  it('found 가 있으면 상단 라벨이 발견수까지 싣는다(하위 패널을 비우는 대신 정보를 올린다)', () => {
+    expect(runProgress('번호판 탐색', { done: 18, total: 23, found: 18 }).label).toBe(
+      '번호판 탐색 18/23 (78%) · 발견 18',
+    );
+  });
+
+  it('found 가 없으면(센터라이징) 라벨에 붙지 않는다', () => {
+    expect(runProgress('센터라이징', { done: 3, total: 23 }).label).toBe('센터라이징 3/23 (13%)');
+  });
+
+  it('★ 하위 진행바는 진행 중일 때만 비운다 — 끝나면 최종 실적을 남긴다', () => {
+    // 진행 중 게이트가 polling/running 조건과 AND 로 묶여 있어야 완료 후 라벨이 '진행 중'으로 굳지 않는다.
+    expect(functionSource(appSrc, 'discPoll')).toMatch(/preciseActive && view\.polling/);
+    expect(functionSource(appSrc, 'calPoll')).toMatch(/preciseActive && st === 'running'/);
+  });
+
+  it('중립화는 어디를 보라는지 남긴다(멈춘 것으로 오독 방지)', () => {
+    expect(functionSource(appSrc, 'neutralizeSubProgress')).toMatch(/위 진행바 참조/);
+  });
+});
+
+describe('정밀수집 완료 팝업', () => {
+  function runPopup(pl: unknown, msg: string): { title: string; lines: string[]; hidden: boolean } {
+    const lines: string[] = [];
+    const els: Record<string, unknown> = {
+      'cap-result-title': { textContent: '' },
+      'cap-result-body': {
+        innerHTML: '',
+        appendChild: (d: { textContent: string }) => { lines.push(d.textContent); },
+      },
+      'cap-result-modal': { hidden: true },
+    };
+    const doc = { createElement: () => ({ textContent: '' }) };
+    new Function('$', 'document', 'pl', 'msg',
+      `${functionSource(appSrc, 'showPreciseResult')}\nreturn showPreciseResult(pl, msg);`,
+    )((id: string) => els[id], doc, pl, msg);
+    return {
+      title: (els['cap-result-title'] as { textContent: string }).textContent,
+      lines,
+      hidden: (els['cap-result-modal'] as { hidden: boolean }).hidden,
+    };
+  }
+
+  it('정상 완료 → 모달이 열리고 메시지·커버리지를 담는다', () => {
+    const r = runPopup({ precise: true, coverage: { targets: 23, totalSlots: 23, uncovered: 0 } }, '정밀수집 완료 — …');
+    expect(r.hidden).toBe(false);
+    expect(r.title).toBe('정밀수집 완료');
+    expect(r.lines[0]).toBe('정밀수집 완료 — …');
+    expect(r.lines[1]).toBe('센터라이징 대상 23 / 전체 23 · 미대상 0');
+  });
+
+  it("★ '센터라이징 분리' run 은 제목으로 미실행을 먼저 알린다", () => {
+    const r = runPopup({ precise: true, note: '센터라이징 분리 — 탐색·점유영역까지 완료' }, 'msg');
+    expect(r.title).toBe('탐색·점유영역 완료 — 센터라이징 미실행');
+  });
+
+  it('coverage 가 없으면 그 줄을 지어내지 않는다', () => {
+    expect(runPopup({ precise: true }, 'msg').lines).toEqual(['msg']);
+  });
+
+  it('★ 완료 전이에서 1회만 띄운다(폴링마다 재팝업 금지)', () => {
+    expect(functionSource(appSrc, 'pollPipeline')).toMatch(/prevPipelineStage !== 'done'\) showPreciseResult/);
+  });
+});
+
+describe('진행바 소유권 반납(실측 결함 — 수동 LPD 실행이 상단 진행바를 움직였다)', () => {
+  it('★ 파이프라인 done/failed 에서 소유권을 반납한다', () => {
+    const body = functionSource(appSrc, 'pollPipeline');
+    // done·failed 두 분기 모두에 반납이 있어야 한다(둘 중 하나만이면 실패 후 잔여 소유권이 남는다).
+    expect(body.match(/preciseActive = false/g)?.length).toBe(2);
+  });
+
+  it("★ 수동 'LPD 실행'·'센터라이징' 시작도 소유권을 되가져간다(폴 대기 중 새는 경로 차단)", () => {
+    expect(functionSource(appSrc, 'discStart')).toMatch(/preciseActive = false/);
+    expect(functionSource(appSrc, 'calStart')).toMatch(/preciseActive = false/);
+  });
+});

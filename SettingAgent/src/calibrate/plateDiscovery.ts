@@ -53,6 +53,8 @@ export interface PlateDiscoveryOpts {
   outLongPx?: number; // 미지정 시 원본 장변(프레임에서 산출)
   matchRadiusNorm?: number; // 0.15 — full tier 앞면중심 게이트
   settleMs?: number; // 0 — 크롭은 무이동이라 정착 불요(기본 0)
+  roiExpand?: number; // 1.5 — 주차면 밖 판 기각 게이트의 ROI bbox 확장배수(실측: 정상 ≤0.826 / 오검 4.736)
+  minPlateRoiRatio?: number; // 0.04 — 퇴화 검출 기각(판폭/ROI폭. 실측: 정상 ≥0.068 / 퇴화 0.0181)
 }
 
 interface ResolvedOpts {
@@ -63,12 +65,64 @@ interface ResolvedOpts {
   outLongPx?: number;
   matchRadiusNorm: number;
   settleMs: number;
+  roiExpand: number;
+  minPlateRoiRatio: number;
 }
 
 const centerOf = (p: PlateBox): NormalizedPoint => {
   const r = quadBoundingRect(p.quad);
   return { x: r.x + r.w / 2, y: r.y + r.h / 2 };
 };
+
+/**
+ * 주차면 밖 판 기각 게이트: 판 중심이 **자기 슬롯 ROI bbox 를 expand 배 확장한 사각형** 안인가.
+ *
+ * 실측 결함(cam2/preset1 slot15)에서 다른 열 차량의 번호판이 채택됐다. 배타성(Voronoi)은 그 판이
+ * peer 앵커들보다 자기 앵커에 가까워 통과시켰고, 크롭 티어엔 거리 게이트가 아예 없었다.
+ * **거리 기반 게이트는 원리적으로 불가**하다 — 실측 전 23건에서 정상 검출 slot12 의 앵커거리(0.3013)가
+ * 오검 slot15(0.2364)보다 크다(근접·대형 슬롯은 앵커가 프레임 밖으로 산출된다). 단조 경계가 없다.
+ * 반면 ROI 포함 여부는 정상 22건 전원 ≤0.826배 · 오검 4.736배로 5.7배 마진이 있다.
+ *
+ * bbox(축정렬)를 쓰는 이유: 판은 지면 quad 보다 **위**에 떠 있어 다각형 포함 판정이 정상 검출도 떨어뜨린다
+ * (실측 6건 중 4건이 quad 밖). 확장은 그 수직 여유를 흡수하는 몫이다. roi 미전달 시 게이트 비활성.
+ */
+export function isInsideOwnRoi(
+  center: NormalizedPoint,
+  roi: readonly NormalizedPoint[] | undefined,
+  expand: number,
+): boolean {
+  if (!roi || roi.length < 3) return true; // 근거 없음 → 통과(하위호환, 위장 아님).
+  const xs = roi.map((p) => p.x);
+  const ys = roi.map((p) => p.y);
+  const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
+  const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+  const hw = ((Math.max(...xs) - Math.min(...xs)) / 2) * expand;
+  const hh = ((Math.max(...ys) - Math.min(...ys)) / 2) * expand;
+  return Math.abs(center.x - cx) <= hw && Math.abs(center.y - cy) <= hh;
+}
+
+/**
+ * 퇴화 검출 기각 게이트: 판 폭이 자기 슬롯 ROI 폭의 `minRatio` 이상인가.
+ *
+ * 격자가 미세 배율까지 내려가면 LPD 가 **판이 아닌 것을 판이라 답하는** 경우가 있다(실측 cam2/preset1 slot15:
+ * 폭 0.0049 = 9px). ROI 밖 게이트도 반경 게이트도 통과한다 — 위치는 그럴듯하고 크기만 틀리기 때문이다.
+ * 실측 23건 분포: 정상 22건 0.068~0.186 / 퇴화 1건 0.0181 → 3.8배 간격. 기본 0.04 는 그 사이에 둔다.
+ *
+ * ROI 폭 대비인 이유: 판도 ROI 도 거리·줌에 같은 비율로 작아지므로 이 비는 **스케일 불변**이다
+ * (절대 폭으로 자르면 먼 주차면의 정상 판이 죽는다). roi 미전달 시 게이트 비활성.
+ */
+export function isPlausiblePlateSize(
+  quadOrig: readonly NormalizedPoint[],
+  roi: readonly NormalizedPoint[] | undefined,
+  minRatio: number,
+): boolean {
+  if (!roi || roi.length < 3) return true; // 근거 없음 → 통과(하위호환).
+  const rxs = roi.map((p) => p.x);
+  const roiW = Math.max(...rxs) - Math.min(...rxs);
+  if (roiW <= 0) return true;
+  const qxs = quadOrig.map((p) => p.x);
+  return (Math.max(...qxs) - Math.min(...qxs)) / roiW >= minRatio;
+}
 
 /**
  * Voronoi 배타성 게이트(설계서 §9-3): 검출 후보 중 **자기 앵커가 모든 peer 앵커보다 엄격히 최근접**인
@@ -125,6 +179,8 @@ export class PlateDiscovery {
       ...(opts.outLongPx !== undefined ? { outLongPx: opts.outLongPx } : {}),
       matchRadiusNorm: opts.matchRadiusNorm ?? 0.15,
       settleMs: opts.settleMs ?? 0,
+      roiExpand: opts.roiExpand ?? 1.5,
+      minPlateRoiRatio: opts.minPlateRoiRatio ?? 0.04,
     };
   }
 
@@ -155,7 +211,12 @@ export class PlateDiscovery {
     const full = pickOwnedPlate(fullCands, anchor, peerAnchors);
     if (full) {
       const c = centerOf(full);
-      if (Math.hypot(c.x - anchor.x, c.y - anchor.y) <= this.o.matchRadiusNorm) {
+      // 반경 게이트 AND 주차면 밖 기각 게이트. 둘 다 통과해야 자기 판이다.
+      if (
+        Math.hypot(c.x - anchor.x, c.y - anchor.y) <= this.o.matchRadiusNorm &&
+        isInsideOwnRoi(c, t.roi, this.o.roiExpand) &&
+        isPlausiblePlateSize(full.quad, t.roi, this.o.minPlateRoiRatio)
+      ) {
         return { ...base, found: true, lpdOrig: full.quad, tier: 'full', step: 0, confidence: full.confidence };
       }
     }
@@ -182,10 +243,18 @@ export class PlateDiscovery {
       });
       const pick = pickOwnedPlate(cands, anchor, peerAnchors);
       if (pick) {
+        // ★ 주차면 밖 기각(실측 결함 cam2/preset1 slot15). level1 크롭창은 16:9 에서 세로 71%를 덮어
+        // 다른 열 차량까지 들어오고, 그 판이 peer 앵커보다 자기 앵커에 가까우면 배타성을 통과해 버린다.
+        // 기각 시 **격자를 계속 돈다** — 뒤 칸에서 자기 판을 찾을 수 있고, 끝내 못 찾으면 no_plate 로 정직하게 끝난다.
+        const po = cands.find((c) => c.plate === pick)!.centerOrig;
+        if (!isInsideOwnRoi(po, t.roi, this.o.roiExpand)) continue;
+        // 퇴화 검출(판이 아닌 것) 기각 — 미세 배율일수록 잦다. 원본 좌표로 되돌린 뒤 크기를 본다.
+        const quadOrig = backmapQuad(pick.quad, W);
+        if (!isPlausiblePlateSize(quadOrig, t.roi, this.o.minPlateRoiRatio)) continue;
         return {
           ...base,
           found: true,
-          lpdOrig: backmapQuad(pick.quad, W), // §2-1 아핀 역계산 → 원본 좌표.
+          lpdOrig: quadOrig, // §2-1 아핀 역계산 → 원본 좌표.
           tier: 'crop',
           step: k,
           cropWindow: W,

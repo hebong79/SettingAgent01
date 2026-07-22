@@ -53,6 +53,7 @@ export function expandDiscoveryTargets(views: SlotSetupView[]): DiscoveryTarget[
       globalIdx: v.slotId,
       anchor: lowerFrontAnchor(v.roi, v.slot3dFrontCenter),
       presetSlotIdx: v.presetSlotIdx,
+      roi: v.roi, // 주차면 밖 판 기각 게이트 근거(§isInsideOwnRoi). 좌표 재계산 없이 DB 정본 그대로.
     });
   }
   return targets;

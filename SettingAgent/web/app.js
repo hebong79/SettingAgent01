@@ -2114,18 +2114,34 @@ let prevPipelineStage = 'idle';
  * 정밀수집은 CaptureJob 을 발화하지 않아 `/capture/status` 가 idle 0/0 이다. 그대로 두면 진행바가 0 에 머무르므로
  * 탐색/센터라이징 잡의 실적(기존 `/discover/status`·`/calibrate/status` 폴)을 진행바에 **미러링**한다.
  * 켜져 있는 동안 renderCaptureStatus 는 진행바를 건드리지 않는다(두 소스가 서로 덮어쓰는 깜빡임 방지).
- * 종료(done/failed)에도 내리지 않는다 — 내리면 다음 capPoll 이 수집 status(idle 0/0)로 최종 실적을 즉시 지운다.
- * 소유권은 수집('수집 시작')이 시작될 때만 되가져간다.
+ *
+ * **종료(done/failed) 시 반드시 반납한다.** 쥔 채로 두면 이후 수동 'LPD 실행'·'센터라이징' 버튼의 진행이
+ * 상단 진행바로 새어 나온다(실측 결함 — 마스터 지적). 반납해도 최종 실적은 남는다: 완료를 감지한 그 폴에서
+ * renderCaptureStatus 는 이미 소유권 상태로 지나갔고, 그 뒤 capPoll 은 재예약되지 않기 때문이다.
  */
 let preciseActive = false;
 
-/** 정밀수집 진행바 미러(단계별 0~100%). 신규 집계 없음 — 잡 상태의 done/total 을 그대로 쓴다. */
+/**
+ * 정밀수집 진행바 미러(단계별 0~100%). 신규 집계 없음 — 잡 상태의 done/total 을 그대로 쓴다.
+ * `found`(탐색 발견수)가 있으면 라벨에 함께 싣는다 — 하위 패널 진행바를 비우는 대신 그 정보를 여기로 올린다.
+ */
 function renderPreciseProgress(phase, status) {
   const done = Number(status?.done ?? 0);
   const total = Number(status?.total ?? 0);
   const percent = total > 0 ? Math.round((done / total) * 100) : 0;
   $('cap-bar').value = percent;
-  $('cap-label').textContent = `${phase} ${done}/${total} (${percent}%)`;
+  const found = status?.found == null ? '' : ` · 발견 ${status.found}`;
+  $('cap-label').textContent = `${phase} ${done}/${total} (${percent}%)${found}`;
+}
+
+/**
+ * 정밀수집 중 하위 패널(LPD 검지 / 센터라이징) 진행바를 중립화한다.
+ * 같은 잡을 두 진행바가 동시에 그리면 어느 쪽을 봐야 하는지 모호하다 — 정밀수집의 정본은 상단 진행바 하나다.
+ * 값을 지우되 **어디를 보라는지** 라벨로 남긴다(멈춘 것처럼 보이는 오독 방지).
+ */
+function neutralizeSubProgress(barId, labelId) {
+  $(barId).value = 0;
+  $(labelId).textContent = '정밀수집 진행 중 — 위 진행바 참조';
 }
 // floor ROI LLM 경고 메시지박스 런당 1회 가드(매 폴링 반복 팝업 방지).
 let floorLlmWarnShown = false;
@@ -2169,6 +2185,27 @@ function showCaptureResult(status) {
       d.textContent = `프리셋 ${r[0]}: ${r[3]}/${r[4]} (${r[5]})`;
       body.appendChild(d);
     }
+  }
+  $('cap-result-modal').hidden = false;
+}
+
+/**
+ * 정밀수집 완료 팝업(요건8). 수집 결과 모달(cap-result-modal)의 제목·본문만 갈아끼워 재사용한다 —
+ * 신규 모달 없음. 본문은 이미 산출된 완료 메시지 + 커버리지(있을 때)이며 새 집계를 하지 않는다.
+ * '센터라이징 분리' run 은 제목으로 먼저 구분해 사용자가 다음 할 일(센터라이징)을 놓치지 않게 한다.
+ */
+function showPreciseResult(pl, msg) {
+  const separated = typeof pl?.note === 'string' && pl.note.startsWith('센터라이징 분리');
+  $('cap-result-title').textContent = separated ? '탐색·점유영역 완료 — 센터라이징 미실행' : '정밀수집 완료';
+  const body = $('cap-result-body');
+  body.innerHTML = '';
+  const c = pl?.coverage;
+  const lines = [msg];
+  if (c) lines.push(`센터라이징 대상 ${c.targets} / 전체 ${c.totalSlots} · 미대상 ${c.uncovered}`);
+  for (const l of lines) {
+    const d = document.createElement('div');
+    d.textContent = l;
+    body.appendChild(d);
   }
   $('cap-result-modal').hidden = false;
 }
@@ -2268,10 +2305,16 @@ async function pollPipeline() {
     $('cap-msg').textContent = '자동 센터라이징 중…';
   } else if (stage === 'failed') {
     const f = pl.failure || {};
+    preciseActive = false; // 소유권 반납(중단 시점 값 유지 — 100% 로 위장하지 않는다).
     $('cap-msg').textContent = `${pl.precise ? '정밀수집' : '자동 체인'} 중단(${f.stage ?? '?'}): ${f.reason ?? ''}`;
   } else if (stage === 'done') {
+    preciseActive = false; // 소유권 반납 — 이후 수동 버튼 진행이 상단 진행바로 새지 않게.
     if (pl.precise) {
-      $('cap-msg').textContent = await preciseDoneMessage(pl);
+      const msg = await preciseDoneMessage(pl);
+      $('cap-msg').textContent = msg;
+      // 완료 팝업 — 수집 경로의 결과 모달(cap-result-modal)을 그대로 재사용한다. 진행바·메시지만으로는
+      // 다른 패널을 보고 있던 사용자가 종료를 놓친다(수집은 이미 showCaptureResult 로 팝업을 띄운다).
+      if (prevPipelineStage !== 'done') showPreciseResult(pl, msg);
     } else {
       const c = pl.coverage;
       let msg = c ? `자동 셋업 완료 — 센터링 대상 ${c.targets} / 전체 ${c.totalSlots} · 미대상 ${c.uncovered}` : '자동 셋업 완료';
@@ -2598,6 +2641,7 @@ async function makeSetupResultFile() {
 }
 
 async function calStart() {
+  preciseActive = false; // 수동 센터라이징 — 상단 진행바 소유권 반납(discStart 미러).
   $('cal-msg').textContent = '';
   $('cal-summary').innerHTML = '';
   const res = await fetch('/calibrate/ptz', {
@@ -2677,9 +2721,16 @@ async function calPoll() {
   const done = status?.done ?? 0;
   const total = status?.total ?? 0;
   const percent = total > 0 ? Math.round((done / total) * 100) : 0;
-  if (preciseActive) renderPreciseProgress('센터라이징', status); // 정밀수집 진행바 미러(2단계).
-  $('cal-bar').value = percent;
-  $('cal-label').textContent = `${st} ${done}/${total}` + (status?.current ? ` — ${status.current.slotId}` : '');
+  if (preciseActive) {
+    renderPreciseProgress('센터라이징', status); // 정밀수집 진행바 미러(2단계).
+  }
+  // 중복 이동 제거 — 정본은 상단 진행바. **진행 중일 때만** 비운다(끝나면 평소대로 최종 실적을 남긴다).
+  if (preciseActive && st === 'running') {
+    neutralizeSubProgress('cal-bar', 'cal-label');
+  } else {
+    $('cal-bar').value = percent;
+    $('cal-label').textContent = `${st} ${done}/${total}` + (status?.current ? ` — ${status.current.slotId}` : '');
+  }
 
   // 진행 중이면 프레임 폴로 화면 실시간 갱신, 아니면 폴 중지.
   if (st === 'running') startCalFramePolling();
@@ -2762,6 +2813,7 @@ function stopDiscFramePolling() {
 }
 
 async function discStart() {
+  preciseActive = false; // 수동 LPD 실행 — 정밀수집이 갖고 있던 상단 진행바 소유권을 반납한다.
   $('disc-msg').textContent = '';
   // 현재 표시 프리셋 한정(runLiveDetect 미러) — 정밀수집 폴 중이면 표시 프레임, 아니면 라이브 선택 프리셋.
   const cam = state.capFrameKey2?.cam ?? state.cam;
@@ -2792,9 +2844,16 @@ async function discPoll() {
     status = null;
   }
   const view = discoverView(status ?? {}); // 순수 헬퍼(core.js) — vitest 대상.
-  if (preciseActive) renderPreciseProgress('번호판 탐색', status); // 정밀수집 진행바 미러(요건: 시작 후 진행상황 표시).
-  $('disc-bar').value = view.percent;
-  $('disc-label').textContent = view.label;
+  if (preciseActive) {
+    renderPreciseProgress('번호판 탐색', status); // 정밀수집 진행바 미러(요건: 시작 후 진행상황 표시).
+  }
+  // 중복 이동 제거 — 정본은 상단 진행바. **진행 중일 때만** 비운다(끝나면 평소대로 최종 실적을 남긴다).
+  if (preciseActive && view.polling) {
+    neutralizeSubProgress('disc-bar', 'disc-label');
+  } else {
+    $('disc-bar').value = view.percent;
+    $('disc-label').textContent = view.label;
+  }
   $('lpd-run').disabled = view.runDisabled;
 
   // 진행 중이면 프레임 폴로 화면 실시간 갱신, 아니면 폴 중지(startCalFramePolling 미러).

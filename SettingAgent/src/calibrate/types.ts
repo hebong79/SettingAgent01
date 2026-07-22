@@ -64,6 +64,12 @@ export interface DiscoveryTarget {
   anchor: NormalizedPoint | null;
   /** 프리셋 내 슬롯 순서(1-based). DB preset_slotidx 소스. 미도출 null. */
   presetSlotIdx: number | null;
+  /**
+   * 자기 주차면 바닥 ROI(정규화 다각형). 있으면 **주차면 밖 판 기각 게이트**의 근거가 된다
+   * (다른 열 차량의 번호판을 자기 것으로 채택하던 실측 결함 — cam2/preset1 slot15).
+   * 옵셔널 = 미전달 시 게이트 비활성(기존 거동 유지).
+   */
+  roi?: NormalizedPoint[];
 }
 
 /** 슬롯별 탐색 결과 1건(설계서 §5-1). lpdOrig = 원본(프리셋) 프레임 정규화 LPD OBB. */
