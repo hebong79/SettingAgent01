@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import sharp from 'sharp';
-import { PlateDiscovery, pickOwnedPlate, type CropFn } from '../src/calibrate/plateDiscovery.js';
+import { PlateDiscovery, pickOwnedPlate, isInsideOwnRoi, isPlausiblePlateSize, type CropFn } from '../src/calibrate/plateDiscovery.js';
 import { computeCropWindow, toCropPoint, backmapQuad, gridCenter } from '../src/calibrate/cropZoom.js';
 import { rectToQuad } from '../src/domain/geometry.js';
 import type { ICameraClient } from '../src/clients/CameraClient.js';
@@ -399,5 +399,174 @@ describe('discoverSlot · V-11 절도 재현 회귀(05_live_finding slot8) + V-1
     expect(r.step).toBe(1);
     expect(r.confidence).toBe(0.5); // 자기판(이웃 0.99 아님)
     expectQuadClose(r.lpdOrig!, backmapQuad(self.quad, W1));
+  });
+});
+
+/**
+ * 실측 결함 회귀(마스터 2026-07-22, cam2/preset1 slot15): 프리셋 주차면 **밖(다른 열)** 차량의
+ * 번호판이 채택됐다. 크롭 티어엔 거리 게이트가 없었고, 배타성(Voronoi)은 그 판이 peer 앵커들보다
+ * 자기 앵커에 가까워 통과시켰다.
+ *
+ * 거리 게이트가 답이 아닌 이유(실측 23건): 정상 검출 slot12 의 앵커거리 0.3013 이 오검 slot15 의
+ * 0.2364 보다 **크다** → 단조 경계 없음. ROI 포함은 정상 22건 ≤0.826배 / 오검 4.736배로 분리된다.
+ */
+describe('isInsideOwnRoi · 주차면 밖 판 기각 게이트', () => {
+  // cam2/preset1 slot15 실측 ROI bbox.
+  const ROI15: NormalizedQuad = rectToQuad({ x: 0.584, y: 0.451, w: 0.27, h: 0.097 });
+
+  it('★ 실측 오검(다른 열 차량 판 0.77,0.73)을 기각한다', () => {
+    expect(isInsideOwnRoi({ x: 0.77, y: 0.73 }, ROI15, 1.5)).toBe(false);
+  });
+
+  it('★ 실측 정상 검출은 전원 통과한다(cam2/preset1 5건)', () => {
+    const ok: Array<[NormalizedQuad, { x: number; y: number }]> = [
+      [rectToQuad({ x: 0.700, y: 0.437, w: 0.275, h: 0.090 }), { x: 0.929, y: 0.471 }], // slot14
+      [rectToQuad({ x: 0.461, y: 0.466, w: 0.264, h: 0.104 }), { x: 0.667, y: 0.511 }], // slot16
+      [rectToQuad({ x: 0.329, y: 0.482, w: 0.256, h: 0.112 }), { x: 0.534, y: 0.530 }], // slot17
+      [rectToQuad({ x: 0.188, y: 0.499, w: 0.246, h: 0.121 }), { x: 0.366, y: 0.554 }], // slot18
+      [rectToQuad({ x: 0.036, y: 0.517, w: 0.234, h: 0.131 }), { x: 0.194, y: 0.579 }], // slot19
+    ];
+    for (const [roi, c] of ok) expect(isInsideOwnRoi(c, roi, 1.5)).toBe(true);
+  });
+
+  it('roi 미전달·퇴화면 통과(하위호환 — 근거 없으면 막지 않는다)', () => {
+    expect(isInsideOwnRoi({ x: 0.9, y: 0.9 }, undefined, 1.5)).toBe(true);
+    expect(isInsideOwnRoi({ x: 0.9, y: 0.9 }, [{ x: 0, y: 0 }, { x: 1, y: 1 }], 1.5)).toBe(true);
+  });
+
+  it('확장배수가 커지면 통과 범위가 넓어진다(경계 단조성)', () => {
+    const far = { x: 0.719, y: 0.730 }; // ROI 중심에서 세로로 크게 벗어난 점.
+    expect(isInsideOwnRoi(far, ROI15, 1.5)).toBe(false);
+    expect(isInsideOwnRoi(far, ROI15, 5.0)).toBe(true);
+  });
+});
+
+describe('discoverSlot · 주차면 밖 판 기각(격자 티어)', () => {
+  /** 고정 원본점을 현재 크롭창 좌표로 환산해 내놓는 lpd 스텁(창 밖이면 미검출). */
+  function worldLpd(cropCalls: { W: NormalizedRect }[], points: Array<{ x: number; y: number }>) {
+    return {
+      detect: async (buf: Buffer) => {
+        if (buf === frame) return []; // tier0 미검출 → 항상 크롭 진입.
+        const W = cropCalls[cropCalls.length - 1].W;
+        const out: PlateBox[] = [];
+        for (const p of points) {
+          const cx = (p.x - W.x) / W.w;
+          const cy = (p.y - W.y) / W.h;
+          if (cx < 0 || cx > 1 || cy < 0 || cy > 1) continue;
+          out.push(plate(cx, cy));
+        }
+        return out;
+      },
+    } as unknown as Pick<LpdClient, 'detect'>;
+  }
+
+  const ANCHOR = { x: 0.5, y: 0.5 };
+  const ROI: NormalizedQuad = rectToQuad({ x: 0.42, y: 0.46, w: 0.16, h: 0.07 }); // 앵커 주변 주차면.
+
+  it('★ ROI 밖 판만 보이면 채택하지 않고 no_plate 로 끝낸다(위장 found 금지)', async () => {
+    const { camera } = makeCamera();
+    const { crop, calls } = makeCrop();
+    const disc = new PlateDiscovery({ camera, lpd: worldLpd(calls, [{ x: 0.48, y: 0.78 }]), crop });
+    const r = await disc.discoverSlot(target({ slotId: '15', roi: ROI }));
+    expect(r.found).toBe(false);
+    expect(r.reason).toBe('no_plate');
+    expect(r.lpdOrig).toBeNull();
+  });
+
+  it('ROI 밖 판과 자기 판이 함께 보이면 자기 판을 채택한다', async () => {
+    const { camera } = makeCamera();
+    const { crop, calls } = makeCrop();
+    const own = { x: 0.51, y: 0.49 };
+    const disc = new PlateDiscovery({ camera, lpd: worldLpd(calls, [{ x: 0.48, y: 0.78 }, own]), crop });
+    const r = await disc.discoverSlot(target({ slotId: '15', roi: ROI }));
+    expect(r.found).toBe(true);
+    const xs = r.lpdOrig!.map((p) => p.x);
+    const ys = r.lpdOrig!.map((p) => p.y);
+    expect((Math.min(...xs) + Math.max(...xs)) / 2).toBeCloseTo(own.x, 6);
+    expect((Math.min(...ys) + Math.max(...ys)) / 2).toBeCloseTo(own.y, 6);
+  });
+
+  it('★ roi 미전달이면 게이트 비활성 — 기존 거동 그대로(회귀 0)', async () => {
+    const { camera } = makeCamera();
+    const { crop, calls } = makeCrop();
+    const disc = new PlateDiscovery({ camera, lpd: worldLpd(calls, [{ x: 0.48, y: 0.78 }]), crop });
+    const r = await disc.discoverSlot(target({ slotId: '15' })); // roi 없음.
+    expect(r.found).toBe(true); // 결함 당시 거동을 그대로 재현(게이트가 켜져야만 막힌다).
+  });
+});
+
+/**
+ * 실측 결함 2차(마스터 2026-07-22): 주차면 밖 게이트가 뒷줄 차를 막자, 격자가 더 깊이 내려가
+ * **판이 아닌 것(폭 0.0049 = 9px)** 을 판이라 채택했다. 위치는 ROI 안·반경 안이라 앞선 두 게이트를 모두 통과한다.
+ * 실측 23건 분포: 정상 22건 판폭/ROI폭 0.068~0.186 / 퇴화 1건 0.0181 (3.8배 간격).
+ */
+describe('isPlausiblePlateSize · 퇴화 검출 기각', () => {
+  const ROI: NormalizedQuad = rectToQuad({ x: 0.584, y: 0.451, w: 0.27, h: 0.097 });
+  const plateOfWidth = (w: number): NormalizedQuad => rectToQuad({ x: 0.78 - w / 2, y: 0.49, w, h: w * 0.6 });
+
+  it('★ 실측 퇴화(폭 0.0049 = ROI 의 0.0181배)를 기각한다', () => {
+    expect(isPlausiblePlateSize(plateOfWidth(0.0049), ROI, 0.04)).toBe(false);
+  });
+
+  it('★ 실측 정상 범위(0.068~0.186배)는 전원 통과한다', () => {
+    for (const ratio of [0.068, 0.086, 0.104, 0.154, 0.186]) {
+      expect(isPlausiblePlateSize(plateOfWidth(0.27 * ratio), ROI, 0.04)).toBe(true);
+    }
+  });
+
+  it('경계 정확성 — 정확히 minRatio 면 통과(>=)', () => {
+    expect(isPlausiblePlateSize(plateOfWidth(0.27 * 0.04), ROI, 0.04)).toBe(true);
+    expect(isPlausiblePlateSize(plateOfWidth(0.27 * 0.039), ROI, 0.04)).toBe(false);
+  });
+
+  it('roi 미전달·퇴화 ROI 는 통과(하위호환 — 근거 없으면 막지 않는다)', () => {
+    expect(isPlausiblePlateSize(plateOfWidth(0.0049), undefined, 0.04)).toBe(true);
+    expect(isPlausiblePlateSize(plateOfWidth(0.0049), [{ x: 0.5, y: 0 }, { x: 0.5, y: 1 }, { x: 0.5, y: 0.5 }], 0.04)).toBe(true);
+  });
+
+  it('스케일 불변 — 먼 주차면(ROI·판 동시 축소)의 정상 판은 죽지 않는다', () => {
+    const farRoi: NormalizedQuad = rectToQuad({ x: 0.1, y: 0.2, w: 0.054, h: 0.02 }); // ROI 1/5 크기.
+    const farPlate: NormalizedQuad = rectToQuad({ x: 0.11, y: 0.21, w: 0.054 * 0.086, h: 0.002 });
+    expect(isPlausiblePlateSize(farPlate, farRoi, 0.04)).toBe(true);
+  });
+});
+
+describe('discoverSlot · 퇴화 검출은 채택하지 않는다', () => {
+  const ROI: NormalizedQuad = rectToQuad({ x: 0.42, y: 0.46, w: 0.16, h: 0.07 });
+
+  /** 고정 원본점에 **지정 폭**의 판을 놓는 스텁(창 좌표로 환산). */
+  function worldLpd(cropCalls: { W: NormalizedRect }[], pts: Array<{ x: number; y: number; w: number }>) {
+    return {
+      detect: async (buf: Buffer) => {
+        if (buf === frame) return [];
+        const W = cropCalls[cropCalls.length - 1].W;
+        const out: PlateBox[] = [];
+        for (const p of pts) {
+          const cx = (p.x - W.x) / W.w;
+          const cy = (p.y - W.y) / W.h;
+          if (cx < 0 || cx > 1 || cy < 0 || cy > 1) continue;
+          out.push(plate(cx, cy, p.w / W.w, (p.w * 0.6) / W.h));
+        }
+        return out;
+      },
+    } as unknown as Pick<LpdClient, 'detect'>;
+  }
+
+  it('★ ROI 안이어도 폭이 퇴화면 기각하고 계속 탐색한다', async () => {
+    const { camera } = makeCamera();
+    const { crop, calls } = makeCrop();
+    // 위치는 ROI 정중앙(=앞선 두 게이트 통과)인데 폭만 0.16*0.018 = 퇴화.
+    const disc = new PlateDiscovery({ camera, lpd: worldLpd(calls, [{ x: 0.5, y: 0.49, w: 0.0029 }]), crop });
+    const r = await disc.discoverSlot(target({ slotId: '15', roi: ROI }));
+    expect(r.found).toBe(false);
+    expect(r.reason).toBe('no_plate');
+  });
+
+  it('정상 폭이면 그대로 채택(회귀 0)', async () => {
+    const { camera } = makeCamera();
+    const { crop, calls } = makeCrop();
+    const disc = new PlateDiscovery({ camera, lpd: worldLpd(calls, [{ x: 0.5, y: 0.49, w: 0.016 }]), crop });
+    const r = await disc.discoverSlot(target({ slotId: '15', roi: ROI }));
+    expect(r.found).toBe(true);
   });
 });
