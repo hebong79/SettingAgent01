@@ -130,6 +130,35 @@ export interface PlatePtzOpts {
    * 카메라가 엉뚱한 곳으로 간다. speed=50 으로 큰 pan 을 도는 시간을 보수적으로 잡은 값(★라이브 미측정 — 튜닝 대상).
    */
   nativeAimSettleMs?: number;
+  /**
+   * (재포착) 추적 캡처가 미검일 때 프레이밍을 바꾸기 위한 **1배수 화면 변위**(정규화). 기본 0.0014(1080p 기준 ≈1.5px).
+   *
+   * ★ 단위가 각도가 아니라 **정규화 변위**인 이유(이터2 — 리더 실측): 검출기 불안정은 **픽셀 공간** 현상이다.
+   *   고정 각도(°)는 화면 변위가 zoom 에 반비례해 최대 36배까지 달라져(0.03° = base zoom 1.69 에서 1.5px,
+   *   zoom 36 에서 32px) 같은 노브가 zoom 마다 전혀 다른 일을 한다. 변위로 고정하면 어느 zoom 에서든
+   *   같은 픽셀만큼 흔든다. 실제 tilt 각은 `변위 × |fallbackGainTiltDeg| / zoom` 로 환산한다.
+   * ★ 같은 PTZ 로 다시 찍는 것은 무의미하다 — LPD 는 **같은 프레임에 대해 결정적**이고(리더 실측: 3회 반복 동일),
+   *   결과를 바꾸는 것은 재캡처가 아니라 **재프레이밍**이다.
+   * 축이 tilt 단독인 이유: 리더 실측 변동이 전부 세로 방향이다(pan ±0.06° 는 회복 실패, zoom 변경도 실패).
+   */
+  plateRecaptureDitherNorm?: number;
+  /**
+   * (재포착) 미세 디더 재캡처 최대 횟수. ★ 기본 0 = 재포착 없음 = **기존 동작**(1회 미검 → 즉시 plate_lost).
+   * 기본을 0 으로 둔 이유: 재시도가 0바퀴면 캡처 횟수·반환 PTZ·reason 이 수정 전과 완전히 동일해
+   * 기존 테스트·배치 경로에 **구조적으로** 회귀가 없다(켜면 미검 픽스처에서 캡처 횟수·실패 PTZ 가 달라진다).
+   * 개별(클릭) 경로에서만 PtzCalibrator 가 명시 주입한다(권장 6 = 에스컬레이팅 사다리 전체).
+   */
+  plateRecaptureRetries?: number;
+  /**
+   * (재포착·zoom 축) **줌 스텝 직후 캡처** 전용 1배수 승법 디더 비율. 기본 0.01(=±1%).
+   * 배수 사다리와 곱해져 `×[1.01, 0.99, 1.02, 0.98, 1.04, 0.96]` 이 된다.
+   *
+   * ★ 이 지점만 축이 다른 이유(이터3 — 리더 실측): 줌 스텝 직후 프레임은 **배율 자체가 바뀐 새 프레임**이라
+   *   회복 축도 zoom 이어야 한다. 실측(같은 pan/tilt, zoom 만 변경)에서 LPD 는 **좁고 산발적인 데드존**을 보였다:
+   *   7.8 ✗ / 8.0 ✗ / 8.1738 ✗ / **8.25 ✓** / 8.4 ✓ / 8.6 ✗ / 9.0 ✓ — 그 프레임에서 tilt 디더 7시도는 전부 실패했고
+   *   **+1%(8.1738→8.25)로 회복**됐다. pan/tilt 이동 지점(A·B)은 tilt 디더가 실측으로 효과가 확인됐으므로 그대로 둔다.
+   */
+  plateRecaptureZoomStep?: number;
 }
 
 export type PlatePtzFailReason =
@@ -178,6 +207,12 @@ export interface PlatePtzResult {
    * (`widthShortfall` 과 같은 정직성 관용구). 최종 오차는 `err` 에 실려 있다.
    */
   centerShortfall?: boolean;
+  /**
+   * (재포착) 이번 호출에서 **미세 디더로 추가 캡처한 총 횟수**(0 이면 필드 자체를 싣지 않는다).
+   * 성공·실패 양쪽에 실린다 — 성공이면 "몇 번 흔들어서 되찾았나", 실패면 "몇 번 흔들어도 안 나왔나"
+   * (`widthShortfall`/`centerShortfall` 과 같은 정직성 관용구).
+   */
+  recaptureDithers?: number;
 }
 
 interface ResolvedOpts {
@@ -197,6 +232,11 @@ interface ResolvedOpts {
   /** ★ 기본값 부여 금지 — undefined 가 "clampZoom 상한까지 자동 산출"이라는 의미를 갖는다(ladderRungBudget). */
   ladderMaxRungs?: number;
   nativeAimSettleMs: number;
+  /** 재포착 1배수 화면 변위(정규화)·재시도 횟수. 0 = 재포착 없음(기존 동작)이라 undefined 에 의미를 줄 필요가 없다. */
+  plateRecaptureDitherNorm: number;
+  plateRecaptureRetries: number;
+  /** 재포착 zoom 승법 디더 1배수 비율(줌 스텝 직후 캡처 전용). */
+  plateRecaptureZoomStep: number;
   /** ★ 기본값 부여 금지 — undefined 가 "게이트 없음"(기존 동작)이라는 의미를 갖는다. */
   initialRadiusNorm?: number;
   gain?: PtzGain;
@@ -291,6 +331,8 @@ const LADDER_ZOOM_STALL_LIMIT = 2;
 
 /** 로그 자릿수 축약(가독). 영속화가 아니므로 round5 규약 대상 아님. */
 const r3 = (v: number): number => Number(v.toFixed(3));
+/** 로그 자릿수 축약(정규화 변위용 — 0.0014 처럼 r3 이면 통째로 뭉개지는 값). */
+const r5 = (v: number): number => Number(v.toFixed(5));
 
 type Center = { cx: number; cy: number };
 
@@ -340,6 +382,11 @@ export class PlatePtz {
       maxZoomStepRatio: opts.maxZoomStepRatio ?? 1.5,
       preLatchZoomStepRatio: opts.preLatchZoomStepRatio ?? LADDER_PRELATCH_RATIO,
       nativeAimSettleMs: opts.nativeAimSettleMs ?? 1000,
+      // 0.0014 ≈ 1080p 1.5px. 실제 tilt 각은 captureTrack 이 zoom 별로 환산한다(픽셀 공간 고정).
+      plateRecaptureDitherNorm: opts.plateRecaptureDitherNorm ?? 0.0014,
+      // ★ 기본 0 = 재포착 없음 = 기존 동작(주입 없으면 코드가 재시도 루프에 진입조차 하지 않는다).
+      plateRecaptureRetries: opts.plateRecaptureRetries ?? 0,
+      plateRecaptureZoomStep: opts.plateRecaptureZoomStep ?? 0.01,
       // ★ ladderMaxRungs 는 기본값을 주지 않는다(undefined = clampZoom 상한까지 자동 산출 — ladderRungBudget).
       ...(opts.ladderMaxRungs !== undefined ? { ladderMaxRungs: opts.ladderMaxRungs } : {}),
       // ★ initialRadiusNorm 만 기본값을 주지 않는다(undefined = 게이트 없음 = 기존 동작).
@@ -413,19 +460,27 @@ export class PlatePtz {
       obsPtz = probed.obs.ptz;
     }
     let dampCount = 0;
+    // (재포착) 이번 호출에서 쓴 디더 캡처 누계(0 이면 결과에 싣지 않는다 = 기존 shape).
+    let dithers = 0;
 
     for (let iter = 0; iter < o.maxIterations; iter++) {
       const next = panTiltCorrection(err, gain, ptz.pan, ptz.tilt, o.maxStepDeg);
       // zoom 은 startPtz.zoom 고정(계약: 이 함수는 zoom 을 절대 바꾸지 않는다).
       const cmd: Ptz = { pan: next.pan, tilt: next.tilt, zoom: startPtz.zoom };
-      // 예측 prior: 직전 관측 위치 + (관측 시점 → 이번 명령) delta 의 예측 변위.
-      const prior = predictPlateCenter(obsCenter, { dPan: cmd.pan - obsPtz.pan, dTilt: cmd.tilt - obsPtz.tilt }, gain);
-      ptz = cmd;
-      const got = await this.captureAndDetect(camIdx, presetIdx, ptz, priorRect(prior), o.matchRadiusNorm);
-      if (!got) {
-        return { ok: false, ptz, plate, err, plateWidth: pr.w, gain, iterations: iter + 1, reason: 'plate_lost' };
+      // 예측 prior 는 captureTrack 이 시도마다(디더 포함) 재계산한다 — 직전 관측 + 명령 delta 의 예측 변위.
+      const tr = await this.captureTrack(camIdx, presetIdx, cmd, obsCenter, obsPtz, gain, o.matchRadiusNorm);
+      // ★ 디더된 PTZ 를 그대로 상태로 채택한다(원복 금지) — obsPtz 의 정의가 "obsCenter 를 관측한 그 프레임의
+      //   명령 PTZ" 라 디더 전 값을 쓰면 다음 prior 가 체계적으로 틀리고, 원복은 미검이 났던 그 프레임으로
+      //   되돌아가는 것이라 회복을 원점으로 되돌린다.
+      ptz = tr.ptz;
+      dithers += tr.dithers;
+      if (!tr.plate) {
+        return {
+          ok: false, ptz, plate, err, plateWidth: pr.w, gain, iterations: iter + 1, reason: 'plate_lost',
+          ...(dithers > 0 ? { recaptureDithers: dithers } : {}),
+        };
       }
-      plate = got;
+      plate = tr.plate;
       pr = quadBoundingRect(plate.quad);
       obsCenter = centerOfRect(pr);
       obsPtz = { ...ptz };
@@ -441,11 +496,17 @@ export class PlatePtz {
           { cat: 'centering', phase: 'center', cam: camIdx, preset: presetIdx, iterations: iter + 1, errX: Number(err.errX.toFixed(3)), errY: Number(err.errY.toFixed(3)), ptz },
           '번호판 센터링 수렴',
         );
-        return { ok: true, ptz, plate, err, plateWidth: pr.w, gain, iterations: iter + 1 };
+        return {
+          ok: true, ptz, plate, err, plateWidth: pr.w, gain, iterations: iter + 1,
+          ...(dithers > 0 ? { recaptureDithers: dithers } : {}),
+        };
       }
     }
     logger.warn({ cat: 'centering', phase: 'center', cam: camIdx, preset: presetIdx, errX: err.errX, errY: err.errY }, '번호판 센터링 반복 상한 소진');
-    return { ok: false, ptz, plate, err, plateWidth: pr.w, gain, iterations: o.maxIterations, reason: 'max_iterations' };
+    return {
+      ok: false, ptz, plate, err, plateWidth: pr.w, gain, iterations: o.maxIterations, reason: 'max_iterations',
+      ...(dithers > 0 ? { recaptureDithers: dithers } : {}),
+    };
   }
 
   /**
@@ -490,6 +551,8 @@ export class PlatePtz {
     if (isWidthConverged(plateWidth, o.targetPlateWidth, o.widthTol)) {
       return { ok: true, ptz, plate, err, plateWidth, gain: gainRef, iterations: 0 };
     }
+    // (재포착) 이번 호출에서 쓴 디더 캡처 누계(0 이면 결과에 싣지 않는다 = 기존 shape).
+    let dithers = 0;
 
     for (let iter = 0; iter < o.maxIterations; iter++) {
       const effGain = scaleGainForZoom(gainRef, ptz.zoom);
@@ -498,13 +561,17 @@ export class PlatePtz {
       if (!isCentered(err, o.centerTol)) {
         const rec = panTiltCorrection(err, effGain, ptz.pan, ptz.tilt, o.maxStepDeg);
         const cmd: Ptz = { pan: rec.pan, tilt: rec.tilt, zoom: ptz.zoom };
-        const prior = predictPlateCenter(obsCenter, { dPan: cmd.pan - obsPtz.pan, dTilt: cmd.tilt - obsPtz.tilt }, effGain);
-        ptz = cmd;
-        const got = await this.captureAndDetect(camIdx, presetIdx, ptz, priorRect(prior), o.matchRadiusNorm);
-        if (!got) {
-          return { ok: false, ptz, plate, err, plateWidth, gain: gainRef, iterations: iter + 1, reason: 'plate_lost' };
+        // (재포착) centerOnPlate 와 완전히 동일한 실패 패턴이라 같은 헬퍼를 쓴다(A 만 고치면 한 칸 뒤에서 재발).
+        const tr = await this.captureTrack(camIdx, presetIdx, cmd, obsCenter, obsPtz, effGain, o.matchRadiusNorm);
+        ptz = tr.ptz; // ★ 디더 채택(원복 금지 — centerOnPlate 와 같은 근거).
+        dithers += tr.dithers;
+        if (!tr.plate) {
+          return {
+            ok: false, ptz, plate, err, plateWidth, gain: gainRef, iterations: iter + 1, reason: 'plate_lost',
+            ...(dithers > 0 ? { recaptureDithers: dithers } : {}),
+          };
         }
-        plate = got;
+        plate = tr.plate;
         pr = quadBoundingRect(plate.quad);
         obsCenter = centerOfRect(pr);
         obsPtz = { ...ptz };
@@ -519,15 +586,28 @@ export class PlatePtz {
       // 포화: clamp 상한이라 zoom 이 더 못 오르는데 폭이 미달 → clamp 가 미달 수렴을 "성공"으로 위장하는 것 방지.
       if (newZoom === ptz.zoom && plateWidth < o.targetPlateWidth - o.widthTol) {
         logger.warn({ cat: 'centering', phase: 'zoom', cam: camIdx, preset: presetIdx, zoom: ptz.zoom, plateWidth }, 'zoom 포화(폭 목표 미달)');
-        return { ok: false, ptz, plate, err, plateWidth, gain: gainRef, iterations: iter + 1, reason: 'zoom_saturated' };
+        // 이 출구도 앞선 반복에서 쓴 디더 횟수를 버리지 않는다(정직성 관용구 — 다른 출구와 동일).
+        return {
+          ok: false, ptz, plate, err, plateWidth, gain: gainRef, iterations: iter + 1, reason: 'zoom_saturated',
+          ...(dithers > 0 ? { recaptureDithers: dithers } : {}),
+        };
       }
+      // 줌 후 prior 는 모델이 다르다(pan/tilt 변위가 아니라 배율 확대) → **줌 예측 중심을 앵커로** 넘긴다.
+      // ★ 이 지점의 재포착 축은 **zoom** 이다(이터3) — 배율이 바뀐 새 프레임이라 tilt 로 흔들어도 회복되지
+      //   않는 데드존이 실측됐고(tilt 7시도 전패), zoom +1%(8.1738→8.25)로 회복됐다.
+      //   pan/tilt 이동 지점(A·B)은 tilt 디더가 실측으로 효과가 확인됐으므로 그대로 둔다.
       const prior = predictCenterAfterZoom(obsCenter, ptz.zoom, newZoom);
-      ptz = { ...ptz, zoom: newZoom };
-      const got = await this.captureAndDetect(camIdx, presetIdx, ptz, priorRect(prior), o.matchRadiusNorm);
-      if (!got) {
-        return { ok: false, ptz, plate, err, plateWidth, gain: gainRef, iterations: iter + 1, reason: 'plate_lost' };
+      const zPtz: Ptz = { ...ptz, zoom: newZoom };
+      const tr = await this.captureTrackZoom(camIdx, presetIdx, zPtz, prior, o.matchRadiusNorm);
+      ptz = tr.ptz; // ★ 디더 채택(원복 금지).
+      dithers += tr.dithers;
+      if (!tr.plate) {
+        return {
+          ok: false, ptz, plate, err, plateWidth, gain: gainRef, iterations: iter + 1, reason: 'plate_lost',
+          ...(dithers > 0 ? { recaptureDithers: dithers } : {}),
+        };
       }
-      plate = got;
+      plate = tr.plate;
       pr = quadBoundingRect(plate.quad);
       obsCenter = centerOfRect(pr);
       obsPtz = { ...ptz };
@@ -538,11 +618,17 @@ export class PlatePtz {
           { cat: 'centering', phase: 'zoom', cam: camIdx, preset: presetIdx, iterations: iter + 1, plateWidth: Number(plateWidth.toFixed(3)), ptz },
           '번호판 폭 수렴',
         );
-        return { ok: true, ptz, plate, err, plateWidth, gain: gainRef, iterations: iter + 1 };
+        return {
+          ok: true, ptz, plate, err, plateWidth, gain: gainRef, iterations: iter + 1,
+          ...(dithers > 0 ? { recaptureDithers: dithers } : {}),
+        };
       }
     }
     logger.warn({ cat: 'centering', phase: 'zoom', cam: camIdx, preset: presetIdx, plateWidth }, '번호판 줌 반복 상한 소진');
-    return { ok: false, ptz, plate, err, plateWidth, gain: gainRef, iterations: o.maxIterations, reason: 'max_iterations' };
+    return {
+      ok: false, ptz, plate, err, plateWidth, gain: gainRef, iterations: o.maxIterations, reason: 'max_iterations',
+      ...(dithers > 0 ? { recaptureDithers: dithers } : {}),
+    };
   }
 
   /**
@@ -1136,6 +1222,189 @@ export class PlatePtz {
   }
 
   /**
+   * (재포착) **추적 캡처 1회 + 미검 시 미세 tilt 디더 재캡처**.
+   *
+   * 근거: 추적 중 1회 미검을 즉시 `plate_lost` 로 확정하던 계약은 LPD 의 **픽셀 단위 프레이밍 불안정**에
+   * 그대로 노출돼 있었다(리더 실측: 동일 이미지 1/2/3px 세로 시프트로 검출 5/7/7개). 프레임 내에서는
+   * 결정적이라 **같은 PTZ 재캡처로는 회복 불가** → 디더로 프레이밍을 바꿔 다시 본다.
+   *
+   * ★ 디더 폭은 **화면 변위(정규화)로 지정하고 매 호출 zoom 으로 각도 환산**한다(이터2). 검출기가 보는 것은
+   *   픽셀뿐이라 고정 각도는 zoom 마다 다른 일을 한다. 배수는 `[+1,−1,+2,−2,+4,−4]` 로 에스컬레이팅 —
+   *   실측상 1.5px·3px 로는 회복되지 않고 **6px 에서 재검출**됐다.
+   * ★ 게이트는 **절대 완화하지 않는다** — 재시도도 호출측이 준 **같은 `radius` 변수 하나**를 그대로 넘긴다
+   *   (시그니처에 "완화 반경" 개념이 존재하지 않는다 = 거짓 성공 금지선이 구조적으로 불변).
+   *   최대 디더 변위(4×0.0014 = 0.0056)는 `matchRadiusNorm`(0.08)의 7%, 이웃 판 간격 0.15 의 3.7% 라
+   *   어느 zoom 에서도 이웃을 게이트 안으로 끌어들일 수 없다.
+   * ★ prior 는 매 시도의 **디더된 cmd 기준으로 재계산**한다(분기 없음). 기존 코드와 동일한 식이라 근사가 아니며
+   *   비용 0 이다.
+   * ★ 발동 조건은 **`plate===null` 인 모든 경우** = 검출 0(`count=0`)과 반경 기각(`rejected`) 둘 다.
+   *   두 실패는 "LPD 가 그 프레임에서 대상 판을 내지 않았다"는 **같은 사건의 두 얼굴**이고(화면에 이웃이
+   *   있으면 rejected, 없으면 count=0), 실제 관측된 실패가 rejected 쪽이었다(count=4, dist 0.126 > 0.08).
+   *
+   * @param cmd  이번 반복에서 명령하려던 PTZ(디더 전 기준).
+   * @returns 성공 시 그 판과 **실제로 명령한 PTZ**(디더 포함 — 호출측이 상태로 채택한다. 원복 금지 §5),
+   *          실패 시 plate=null 과 **마지막으로 명령한 PTZ**(카메라의 실제 위치 — 지어내지 않는다).
+   *          dithers = 추가로 쓴 디더 캡처 횟수(0 이면 기존과 완전히 동일한 1회 캡처).
+   */
+  private async captureTrack(
+    camIdx: number,
+    presetIdx: number,
+    cmd: Ptz,
+    obsCenter: Center,
+    obsPtz: Ptz,
+    gain: { gainPan: number; gainTilt: number },
+    radius: number | null,
+  ): Promise<{ plate: PlateBox | null; ptz: Ptz; dithers: number }> {
+    const o = this.opts;
+    // 변위 배수 사다리 [+1,−1,+2,−2,+4,−4] (0 은 디더 없는 원 캡처).
+    const mults = [0, ...ditherMultipliers(o.plateRecaptureRetries)];
+    // 변위(정규화) → tilt 각(°) 환산 계수. predictPlateCenter 의 `변위 = dTilt/gainTilt` 역산이다.
+    // ★ 루프의 살아있는 `gain`(damp 로 절반씩 줄어드는 값)을 쓰지 않는다 — 감쇠는 제어 사정이지 검출기 사정이
+    //   아니라서, 감쇠된 게인으로 환산하면 정작 흔들어야 할 때 디더가 함께 작아진다(자기무력화).
+    //   검출기가 보는 것은 픽셀뿐이므로 환산은 **무측정 fallback 게인 × 현재 zoom** 이라는 고정 물리모델로만 한다.
+    const degPerNorm = Math.abs(
+      scaleGainForZoom({ gainPan: 0, gainTilt: o.fallbackGainTiltDeg, zoomRef: 1 }, cmd.zoom).gainTilt,
+    );
+    const u = o.plateRecaptureDitherNorm;
+    let last: Ptz = cmd;
+    for (let i = 0; i < mults.length; i++) {
+      const dNorm = mults[i]! * u;          // 이번 시도의 화면 변위(정규화, 부호 포함)
+      const dDeg = dNorm * degPerNorm;      // 그 변위를 만드는 tilt 각(°)
+      const p: Ptz = { pan: cmd.pan, tilt: cmd.tilt + dDeg, zoom: cmd.zoom };
+      const prior = predictPlateCenter(obsCenter, { dPan: p.pan - obsPtz.pan, dTilt: p.tilt - obsPtz.tilt }, gain);
+      const got = await this.captureDetectPick(camIdx, presetIdx, p, priorRect(prior), radius);
+      last = p;
+      if (got.plate) {
+        if (i > 0) {
+          logger.info(
+            {
+              cat: 'centering', phase: 'recapture', cam: camIdx, preset: presetIdx, attempt: i,
+              mult: mults[i]!, ditherNorm: r5(dNorm), ditherDeg: r3(dDeg), tilt: r3(p.tilt), zoom: r3(cmd.zoom),
+              plates: got.count,
+              nearestDist: got.nearestDist === null ? null : r3(got.nearestDist), radius, recovered: true,
+            },
+            '미세 디더 재캡처로 대상 재포착',
+          );
+        }
+        return { plate: got.plate, ptz: p, dithers: i };
+      }
+      if (i < mults.length - 1) {
+        const nextNorm = mults[i + 1]! * u;
+        logger.info(
+          {
+            cat: 'centering', phase: 'recapture', cam: camIdx, preset: presetIdx, attempt: i,
+            plates: got.count, rejected: got.rejected,
+            nearestDist: got.nearestDist === null ? null : r3(got.nearestDist), radius,
+            // 진단: 예측 prior 자체가 틀린 경우(예측 오차)와 검출기 미검을 구분하려면 prior 좌표가 필요하다.
+            prior: { x: r3(prior.cx), y: r3(prior.cy) }, tilt: r3(p.tilt),
+            ditherNorm: r5(dNorm), ditherDeg: r3(dDeg),
+            nextMult: mults[i + 1]!, nextDitherNorm: r5(nextNorm), nextDitherDeg: r3(nextNorm * degPerNorm),
+          },
+          '추적 캡처 미검(검출0 또는 반경기각) → 미세 디더 재캡처 시도',
+        );
+      }
+    }
+    if (mults.length > 1) {
+      logger.warn(
+        {
+          cat: 'centering', phase: 'recapture', cam: camIdx, preset: presetIdx,
+          attempts: mults.length, dithers: mults.length - 1, radius, recovered: false, ptz: last,
+          maxMult: mults[mults.length - 1]!,
+          maxDitherNorm: r5(Math.abs(mults[mults.length - 1]!) * u),
+          maxDitherDeg: r3(Math.abs(mults[mults.length - 1]!) * u * degPerNorm),
+        },
+        '미세 디더 재캡처를 모두 소진했으나 대상 미검 → plate_lost 확정',
+      );
+    }
+    return { plate: null, ptz: last, dithers: mults.length - 1 };
+  }
+
+  /**
+   * (재포착·zoom 축) **줌 스텝 직후 캡처 1회 + 미검 시 승법 zoom 디더 재캡처**.
+   *
+   * `captureTrack`(tilt 축)과 구조는 같고 **흔드는 축만 다르다**. 이 지점의 프레임은 pan/tilt 이동이 아니라
+   * **배율 변경**으로 만들어진 새 프레임이라, 리더 실측에서 tilt 디더 7시도가 전부 실패한 반면
+   * zoom +1% 한 칸으로 회복됐다(LPD 의 zoom 축 데드존이 좁고 산발적이다 — `plateRecaptureZoomStep` 주석의 표).
+   *
+   * ★ prior 는 매 시도 `predictCenterAfterZoom(anchor, cmd.zoom, 디더된 zoom)` 으로 보정한다
+   *   (tilt 디더가 `predictPlateCenter` 로 보정하는 것과 같은 원칙 — 흔든 만큼 예측도 옮긴다).
+   * ★ 게이트는 **불변** — 호출측이 준 같은 `radius` 를 그대로 넘긴다.
+   * ★ `clampZoom` 으로 값이 안 바뀌는 시도(장비 배율 상·하한 포화)는 **캡처하지 않고 건너뛴다** —
+   *   같은 프레임을 또 찍는 순수 낭비다(건너뛴 사실은 로그에 남긴다).
+   *
+   * @param anchor 줌 직후 예측 중심(`predictCenterAfterZoom` 결과) — 디더 보정의 기준점.
+   */
+  private async captureTrackZoom(
+    camIdx: number,
+    presetIdx: number,
+    cmd: Ptz,
+    anchor: Center,
+    radius: number | null,
+  ): Promise<{ plate: PlateBox | null; ptz: Ptz; dithers: number }> {
+    const o = this.opts;
+    const mults = [0, ...ditherMultipliers(o.plateRecaptureRetries)];
+    let last: Ptz = cmd;
+    let dithers = 0;
+    for (let i = 0; i < mults.length; i++) {
+      // i=0 은 디더 없는 원 캡처 — clampZoom 도 통과시키지 않는다(기존 동작과 완전 동형 보장).
+      const factor = 1 + mults[i]! * o.plateRecaptureZoomStep;
+      const z = i === 0 ? cmd.zoom : this.camera.clampZoom(cmd.zoom * factor);
+      if (i > 0 && Math.abs(z - cmd.zoom) <= ZOOM_EPS) {
+        logger.info(
+          {
+            cat: 'centering', phase: 'recapture', axis: 'zoom', cam: camIdx, preset: presetIdx, attempt: i,
+            mult: mults[i]!, factor: r3(factor), zoom: r3(cmd.zoom), skipped: 'clamped',
+          },
+          'zoom 디더가 clampZoom 포화로 같은 배율 → 캡처 생략',
+        );
+        continue;
+      }
+      const prior = predictCenterAfterZoom(anchor, cmd.zoom, z);
+      const p: Ptz = { pan: cmd.pan, tilt: cmd.tilt, zoom: z };
+      const got = await this.captureDetectPick(camIdx, presetIdx, p, priorRect(prior), radius);
+      last = p;
+      if (i > 0) dithers += 1;
+      if (got.plate) {
+        if (i > 0) {
+          logger.info(
+            {
+              cat: 'centering', phase: 'recapture', axis: 'zoom', cam: camIdx, preset: presetIdx, attempt: i,
+              mult: mults[i]!, factor: r3(factor), zoomFrom: r3(cmd.zoom), zoom: r3(z), plates: got.count,
+              nearestDist: got.nearestDist === null ? null : r3(got.nearestDist), radius, recovered: true,
+            },
+            'zoom 승법 디더 재캡처로 대상 재포착',
+          );
+        }
+        return { plate: got.plate, ptz: p, dithers };
+      }
+      if (i < mults.length - 1) {
+        const nextFactor = 1 + mults[i + 1]! * o.plateRecaptureZoomStep;
+        logger.info(
+          {
+            cat: 'centering', phase: 'recapture', axis: 'zoom', cam: camIdx, preset: presetIdx, attempt: i,
+            plates: got.count, rejected: got.rejected,
+            nearestDist: got.nearestDist === null ? null : r3(got.nearestDist), radius,
+            prior: { x: r3(prior.cx), y: r3(prior.cy) }, zoom: r3(z), factor: r3(factor),
+            nextMult: mults[i + 1]!, nextFactor: r3(nextFactor), nextZoom: r3(cmd.zoom * nextFactor),
+          },
+          '줌 직후 캡처 미검(검출0 또는 반경기각) → zoom 승법 디더 재캡처 시도',
+        );
+      }
+    }
+    if (mults.length > 1) {
+      logger.warn(
+        {
+          cat: 'centering', phase: 'recapture', axis: 'zoom', cam: camIdx, preset: presetIdx,
+          attempts: dithers + 1, dithers, radius, recovered: false, ptz: last,
+          maxFactor: r3(1 + Math.abs(mults[mults.length - 1]!) * o.plateRecaptureZoomStep),
+        },
+        'zoom 승법 디더 재캡처를 모두 소진했으나 대상 미검 → plate_lost 확정',
+      );
+    }
+    return { plate: null, ptz: last, dithers };
+  }
+
+  /**
    * 명령 PTZ override 로 캡처 → LPD → prior 최근접 번호판(동작은 종전과 동일 — captureDetectPick 의 얇은 래퍼).
    * radius 가 주어지면 prior 로부터 그 거리를 넘는 후보는 기각한다(=대상 소실. 이웃 갈아타기 차단 — §2.5).
    */
@@ -1186,6 +1455,24 @@ export class PlatePtz {
     if (radius !== null && dist > radius) return { plate: null, rejected: true, count: plates.length, nearestDist: dist, ...diag };
     return { plate: picked, rejected: false, count: plates.length, nearestDist: dist, ...diag };
   }
+}
+
+/**
+ * (재포착) **에스컬레이팅 디더 배수** 수열 `[+1, −1, +2, −2, +4, −4, …]` 를 n 개. n=0 이면 빈 배열 = 재포착 없음.
+ *
+ * - **배수를 2배씩 키우는 이유(이터2 — 리더 실측)**: 같은 실패 프레임에서 1.5px(±1)·3px(±2)로는 회복되지 않고
+ *   **6px(±4)에서 검출됐다**. 고정 폭이었다면 몇 번을 흔들어도 못 넘는다. 작은 폭부터 시도해 대상 위치를
+ *   불필요하게 많이 흔들지 않으면서, 필요한 만큼은 확실히 도달한다.
+ * - **부호를 번갈아 내는 이유**: 전부 실패해도 순 이동이 마지막 한 칸(−4u)뿐이라 한 방향으로 누적해
+ *   대상을 프레임 밖으로 밀어내지 않는다.
+ */
+function ditherMultipliers(n: number): number[] {
+  const out: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const step = 2 ** Math.floor(i / 2);
+    out.push(i % 2 === 0 ? step : -step);
+  }
+  return out;
 }
 
 /** 오차 크기(유클리드) 개선량. >0 이면 개선. (PtzCalibrator.ts 와 동일 — 그쪽은 module-private 라 import 불가) */

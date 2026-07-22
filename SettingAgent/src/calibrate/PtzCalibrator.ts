@@ -63,6 +63,27 @@ const LPD_WIDTH_EPS = 1e-4;
 const POINT_MATCH_RADIUS_DEFAULT = 0.1;
 
 /**
+ * (개별 클릭 전용) 추적 캡처 미검 시 재포착 **1배수 화면 변위(정규화)**·재시도 횟수 기본값(cfg 미설정 시).
+ *
+ * 0.0014 = 1080p 기준 ≈1.5px(사다리의 첫 칸). 재시도 6 = 에스컬레이팅 사다리 전체
+ * `[+1,−1,+2,−2,+4,−4]` → **1.5px → 3px → 6px 를 양방향으로** 훑는다.
+ * ★ 근거는 리더 라이브 실측(이터2): 실패 프레임에서 ±0.03°(1.5px)·±0.06°(3px) 는 회복 실패,
+ *   **±0.12°(6px) 에서 대상 재검출**. pan ±0.06°·zoom 변경은 모두 실패 → tilt 축·큰 폭이 정답이다.
+ *   즉 이터1 이 실패한 원인은 방향이 아니라 **폭이 4배 부족**했던 것.
+ * ★ 배치(calibrateSlot)에는 주입하지 않는다 — PlatePtz 기본값이 0(재포착 없음)이라 회귀가 구조적으로 0.
+ */
+const POINT_RECAPTURE_DITHER_NORM_DEFAULT = 0.0014;
+const POINT_RECAPTURE_RETRIES_DEFAULT = 6;
+
+/**
+ * (개별 클릭 전용) **줌 스텝 직후 캡처**의 재포착 승법 디더 1배수 비율(cfg 미설정 시). 0.01 = ±1%.
+ * 사다리 배수와 곱해 `×[1.01,0.99,1.02,0.98,1.04,0.96]`. ★ 근거는 리더 라이브 실측(이터3):
+ * `zoom 8.1738` 프레임이 화면 전체 미검(plates:0)이고 tilt 디더 7시도가 전부 실패했는데
+ * **zoom 8.25(+1%)에서 재검출**됐다 — 줌 축에 좁고 산발적인 데드존이 있다.
+ */
+const POINT_RECAPTURE_ZOOM_STEP_DEFAULT = 0.01;
+
+/**
  * PlatePtz 중 이 잡이 쓰는 표면(테스트 시임 경계).
  * ★ centerAndZoomByLadder 는 **Partial** — 기존 makePlatePtz 스텁(2메서드만 구현)을 쓰는 테스트를
  *   타입 에러로 죽이지 않기 위해서다. 호출측은 존재 확인 후 없으면 기존 경로로 폴백한다.
@@ -188,7 +209,9 @@ export class PtzCalibrator {
    *    ★ initialRadiusNorm(기본 0.10) 주입 — 클릭점 반경 밖 판을 **대신 채택하지 않는다**(거짓 성공 제거).
    *    ★ zoom!==false 이고 사다리가 켜져 있으면(cfg.pointZoomLadder, 'auto'=네이티브 소스만) 3~4 대신
    *      PlatePtz.centerAndZoomByLadder 한 호출로 완결한다(조준 먼저 → 확대하며 찾기).
-   * 4. center 성공 & zoom!==false 이면 center.gain 체이닝으로 zoomToPlateWidth 1회 마감(성공 시 z, 실패 시 center 반환 — 정직).
+   * 4. center 성공 & zoom!==false 이면 center.gain 체이닝으로 zoomToPlateWidth 1회 마감.
+   *    ★ **줌을 시도했으면 그 결과가 정본**이다 — 성공·실패 모두 z 를 반환한다(실패 시 ok:false + z.reason).
+   *      줌 실패를 삼키고 center 결과를 ok:true 로 돌려주면 "줌이 전혀 안 됐는데 완료" 라는 위장 성공이 된다.
    * 5. 저장 호출 없음(writer/saveCenteringSlots/saveSetupSnapshot/upsertSlotCentering 미호출).
    *    onFrame 은 makePlatePtz 생성자에 이미 배선되어 진행 중 lastFrame 갱신(/calibrate/frame 폴링 자동).
    * 6. opts.camera 주입 시 그 카메라로만 동작(뷰어가 보고 있는 소스 = 명령 대상). 미주입이면 파이프라인 카메라.
@@ -216,7 +239,7 @@ export class PtzCalibrator {
       }
       const prior: NormalizedRect = { x: point.x, y: point.y, w: 0, h: 0 };
       const centered = await this.makePlatePtz(
-        { ...this.baseOpts(), plateRoi: prior, initialRadiusNorm: this.pointRadius() },
+        { ...this.baseOpts(), plateRoi: prior, initialRadiusNorm: this.pointRadius(), ...this.recaptureOpts() },
         cam,
       ).centerOnPlate(camIdx, presetIdx, startPtz);
       if (centered.ok && opts?.zoom !== false) {
@@ -224,8 +247,16 @@ export class PtzCalibrator {
           ...this.baseOpts(),
           plateRoi: quadBoundingRect(centered.plate!.quad),
           gain: centered.gain,
+          ...this.recaptureOpts(),
         }, cam).zoomToPlateWidth(camIdx, presetIdx, centered.ptz);
-        if (z.ok) return { ok: z.ok, ptz: z.ptz, plateWidth: z.plateWidth, ...(z.reason ? { reason: z.reason } : {}) };
+        // ★ 줌 실패를 삼키지 않는다(P1 — 거짓 성공 금지선). 구 코드는 `if (z.ok)` 만 있어 줌이 실패하면
+        //   그대로 흘러내려 **센터링 결과를 ok:true + reason 없이** 반환했다 — 줌이 전혀 안 됐는데(zoom 1.69,
+        //   plateWidth 0.032 = base 폭) UI 는 "개별 센터라이징 완료" 로 보이는 위장 성공이었다(리더 라이브 실측).
+        //   줌을 요청받아 시도했다면 **그 결과가 정본**이다: 실패면 사유(plate_lost 등)를 그대로 싣고,
+        //   ptz/plateWidth 는 줌 단계가 실제로 도달한 마지막 실측값(카메라의 현재 위치)을 싣는다.
+        //   ★ 사다리(centerAndZoomByLadder)의 "장비 한계라 폭 미달이지만 ok:true + reason" 과 혼동 금지 —
+        //     그쪽은 장비가 할 수 있는 일을 다 한 경우고, 이쪽 실패는 **대상 소실**이라 실패가 맞다.
+        return { ok: z.ok, ptz: z.ptz, plateWidth: z.plateWidth, ...(z.reason ? { reason: z.reason } : {}) };
       }
       return { ok: centered.ok, ptz: centered.ptz, plateWidth: centered.plateWidth, ...(centered.reason ? { reason: centered.reason } : {}) };
     } finally {
@@ -286,6 +317,19 @@ export class PtzCalibrator {
   /** 개별(클릭) 최초 대상 선정 반경. 배치 경로에는 주입하지 않는다(§회귀 안전성). */
   private pointRadius(): number {
     return this.cfg.pointMatchRadiusNorm ?? POINT_MATCH_RADIUS_DEFAULT;
+  }
+
+  /**
+   * (개별 클릭 전용) LPD 프레이밍 불안정 회복용 재포착 옵션.
+   * ★ `baseOpts()` 에 넣지 않는다 — 그러면 배치(calibrateSlot)까지 함께 켜져 R5(배치 회귀 금지)를
+   *   "무해할 것이다"라는 논증에 맡기게 된다. 여기서만 주입하면 배치에는 코드가 도달조차 하지 않는다.
+   */
+  private recaptureOpts(): PlatePtzOpts {
+    return {
+      plateRecaptureDitherNorm: this.cfg.pointRecaptureDitherNorm ?? POINT_RECAPTURE_DITHER_NORM_DEFAULT,
+      plateRecaptureRetries: this.cfg.pointRecaptureRetries ?? POINT_RECAPTURE_RETRIES_DEFAULT,
+      plateRecaptureZoomStep: this.cfg.pointRecaptureZoomStep ?? POINT_RECAPTURE_ZOOM_STEP_DEFAULT,
+    };
   }
 
   /** 사다리 전용 opts(cfg 미설정 필드는 전달하지 않아 PlatePtz 코드 기본값을 쓰게 한다). */
