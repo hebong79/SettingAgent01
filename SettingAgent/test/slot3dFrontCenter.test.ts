@@ -38,6 +38,9 @@ import type { ToolsConfig } from '../src/config/toolsConfig.js';
 import type { CaptureSnapshot } from '../src/capture/CaptureJob.js';
 import type { DetectionRow } from '../src/capture/types.js';
 import { round5 } from '../src/util/round.js';
+import { buildGroundInputs } from '../src/ground/groundInputs.js';
+import { estimateGroundModels } from '../src/ground/groundModel.js';
+import { loadToolsConfig } from '../src/config/toolsConfig.js';
 
 const DEG = Math.PI / 180;
 
@@ -465,45 +468,74 @@ describe('[후속] frontFaceCenter — 감김순서(winding)-불변 판정', () 
 });
 
 // ─────────────────────────────────────────────────────────────
-// 5) 실데이터 스모크 — data/Place01/PtzCamRoi.json 프리셋2(idx 8–13)
-//    지면모델은 라이브 서버(GET /capture/ground-model, 13020) 응답을 픽스처로 고정(결정적).
-//    프리셋2 슬롯은 winding 이 회전형(근접 edge=[0,1]) — 옛 [0,3,7,4] 였다면 측면으로 밀렸을 슬롯.
+// 5) 실데이터 스모크 — data/Place01/PtzCamRoi.json **전 카메라·전 프리셋**
+//
+//    ★ 재정박 이력(2026-07-22): 이 블록은 원래 "cam1 프리셋2(idx 8–13, 6면)" 에 하드코딩돼 있었고
+//      지면모델도 옛 라이브 응답을 상수로 동결했었다. 시뮬레이터가 ROI 파일을 재생성하면서
+//      (프리셋 구성·면 개수·winding·PTZ 전부 변경) 세 전제가 모두 만료돼 실패했다.
+//      → 특정 프리셋/개수/winding 에 기대지 않도록 **데이터 주도**로 재작성한다:
+//        · 지면모델은 상수 대신 **실제 파이프라인**(buildGroundInputs→estimateGroundModels)으로 산출
+//        · 대상은 파일이 담은 전 프리셋, 개수는 파일에서 유도
+//        · winding 불변 자체는 위 1~4(합성·4회전 전수)가 결정적으로 봉인한다. 여기서는 실데이터에서
+//          **새 로직이 자기 슬롯을 이탈하지 않는다**는 불변만 본다(옛 로직 이탈 건수는 참고 출력).
 // ─────────────────────────────────────────────────────────────
-describe('[후속] 실데이터 스모크 — PtzCamRoi.json 프리셋2 근접면 검증', () => {
+describe('[후속] 실데이터 스모크 — PtzCamRoi.json 앞면중심 근접면 검증', () => {
   const ROI_PATH = join(process.cwd(), 'data', 'Place01', 'PtzCamRoi.json');
-  // 라이브 서버(GET /capture/ground-model) 프리셋2 지면모델(source:'file', conf≈1.0). 결정적 픽스처.
-  const G_PRESET2 = {
-    imgW: 1920, imgH: 1080, f: 3518.0493632966404,
-    n: [1.0845100063827663e-7, 0.9916711686126353, 0.12879554861266915] as [number, number, number],
-    d: 4.949992919848079,
-  } as unknown as ViewerGroundModel;
-
   const hasFile = existsSync(ROI_PATH);
-  (hasFile ? it : it.skip)('프리셋2 각 슬롯 앞면중심 x 가 자기 x범위 내 근접면(우측 이웃 넘어가지 않음)', () => {
+
+  (hasFile ? it : it.skip)('전 프리셋의 앞면중심이 자기 슬롯 x범위 안(이웃 넘어가지 않음)·화면 안', () => {
     const raw = JSON.parse(readFileSync(ROI_PATH, 'utf8'));
-    const cam = raw.cameras[0];
-    const W = cam.camera.imageWidth, H = cam.camera.imageHeight;
-    const p2 = cam.presets.find((p: { preset_idx: number }) => p.preset_idx === 2);
-    expect(p2).toBeTruthy();
+    const tools = loadToolsConfig();
+
+    // 지면모델을 실제 산출 경로로 구한다(옛 동결 상수 폐기 — 데이터가 바뀌면 모델도 같이 따라간다).
+    const modelByKey = new Map<string, GroundModel>();
+    for (const camInput of buildGroundInputs(raw, [])) {
+      for (const m of estimateGroundModels(camInput, tools.ground).models) {
+        modelByKey.set(`${m.camIdx}:${m.presetIdx}`, m);
+      }
+    }
+    expect(modelByKey.size, '실데이터에서 지면모델이 하나도 안 나왔다').toBeGreaterThan(0);
 
     let evaluated = 0;
-    for (const sp of p2.parking_spaces as Array<{ idx: number; points: number[][] }>) {
-      const quad: NormalizedPoint[] = sp.points.map(([x, y]) => ({ x: x / W, y: y / H }));
-      const xs = quad.map((p) => p.x);
-      const minX = Math.min(...xs), maxX = Math.max(...xs);
-      const cub = projectCuboid(quad, G_PRESET2, 1.5);
-      expect(cub, `idx ${sp.idx} 육면체 투영 실패`).not.toBeNull();
-      const fnew = frontFaceCenter(cub)!;
-      const fold = meanFront(cub!.corners); // 옛 고정 [0,3,7,4]
+    let oldWouldEscape = 0; // 옛 고정 [0,3,7,4] 였다면 자기 슬롯을 벗어났을 건수(버그 교정 증거, 참고).
+    let totalSpaces = 0;
+    for (const camEntry of raw.cameras as Array<{
+      camera: { cam_id: number; imageWidth: number; imageHeight: number };
+      presets: Array<{ preset_idx: number; parking_spaces: Array<{ idx: number; points: number[][] }> }>;
+    }>) {
+      const W = camEntry.camera.imageWidth, H = camEntry.camera.imageHeight;
+      for (const preset of camEntry.presets) {
+        totalSpaces += preset.parking_spaces.length;
+        const key = `${camEntry.camera.cam_id}:${preset.preset_idx}`;
+        const g = modelByKey.get(key);
+        if (!g) continue; // 그 프리셋 추정 실패 → 육면체 미산출(강등 철학). 평가 대상에서 제외.
+        for (const sp of preset.parking_spaces) {
+          const quad: NormalizedPoint[] = sp.points.map(([x, y]) => ({ x: x / W, y: y / H }));
+          const xs = quad.map((p) => p.x);
+          const minX = Math.min(...xs), maxX = Math.max(...xs);
+          const cub = projectCuboid(quad, g as unknown as ViewerGroundModel, 1.5);
+          if (!cub) continue; // 퇴화(지평선 위 등) → 그 면만 skip(렌더와 동일 강등).
+          const fnew = frontFaceCenter(cub)!;
 
-      // (a) 새 로직 앞면중심은 자기 슬롯 x범위 안(정규화 0~1, 근접면).
-      expect(fnew.x, `idx ${sp.idx} new.x ${fnew.x} 범위 [${minX},${maxX}] 이탈`).toBeGreaterThanOrEqual(minX);
-      expect(fnew.x).toBeLessThanOrEqual(maxX);
-      expect(fnew.y).toBeGreaterThan(0); expect(fnew.y).toBeLessThan(1);
-      // (b) 프리셋2 winding=회전형 → 옛 로직과 유의미하게 다른 x(우측으로 밀림) — 버그 교정 증거.
-      expect(fold.x).toBeGreaterThan(fnew.x + 0.1);
-      evaluated++;
+          // ★ 불변: 새 로직 앞면중심은 자기 슬롯 x범위 안이고 화면 안이다.
+          expect(fnew.x, `${key} idx ${sp.idx}: new.x ${fnew.x} 가 자기 범위 [${minX},${maxX}] 이탈`)
+            .toBeGreaterThanOrEqual(minX);
+          expect(fnew.x, `${key} idx ${sp.idx}: new.x ${fnew.x} 가 자기 범위 [${minX},${maxX}] 이탈`)
+            .toBeLessThanOrEqual(maxX);
+          expect(fnew.y).toBeGreaterThan(0);
+          expect(fnew.y).toBeLessThan(1);
+
+          const fold = meanFront(cub.corners); // 옛 고정 [0,3,7,4]
+          if (fold.x < minX || fold.x > maxX) oldWouldEscape++;
+          evaluated++;
+        }
+      }
     }
-    expect(evaluated).toBe(6); // idx 8–13
+    // 파일이 담은 면 수는 데이터에서 유도(하드코딩 금지). 최소 1건은 실제로 평가돼야 스모크 의미가 있다.
+    expect(totalSpaces).toBeGreaterThan(0);
+    expect(evaluated, '평가된 슬롯이 0건 — 지면모델·투영이 전부 강등됐다').toBeGreaterThan(0);
+    console.log(
+      `[실데이터 스모크] 파일 ${totalSpaces}면 중 ${evaluated}면 평가 · 옛 고정인덱스였다면 이탈했을 건수 ${oldWouldEscape}`,
+    );
   });
 });
