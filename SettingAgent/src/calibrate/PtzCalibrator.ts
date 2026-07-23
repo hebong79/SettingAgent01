@@ -16,6 +16,14 @@ import type { PlateTarget, Ptz, SlotPtzItem, CalibrateState, CalibrateStatus } f
 
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+/**
+ * PlatePtz 결과(centerAndZoomByLadder / zoomToPlateWidth / centerOnPlate)를 centerOnPoint 의 외부 반환 shape 로 매핑.
+ * reason 은 값이 있을 때만 싣는다(없으면 필드 자체를 생략 — 기존 인라인 관용구와 동일).
+ */
+function toPointResult(r: PlatePtzResult): { ok: boolean; ptz: Ptz; plateWidth: number | null; reason?: string } {
+  return { ok: r.ok, ptz: r.ptz, plateWidth: r.plateWidth, ...(r.reason ? { reason: r.reason } : {}) };
+}
+
 /** 프리셋 PTZ 조회 실패 시 폴백(조용한 강등 금지 — warn 동반). */
 const FALLBACK_START_PTZ: Ptz = { pan: 0, tilt: 0, zoom: 1 };
 
@@ -238,7 +246,7 @@ export class PtzCalibrator {
         const ladder = this.makePlatePtz({ ...this.baseOpts(), ...this.ladderOpts() }, cam);
         if (ladder.centerAndZoomByLadder) {
           const r = await ladder.centerAndZoomByLadder(camIdx, presetIdx, point, startPtz);
-          return { ok: r.ok, ptz: r.ptz, plateWidth: r.plateWidth, ...(r.reason ? { reason: r.reason } : {}) };
+          return toPointResult(r);
         }
       }
       const prior: NormalizedRect = { x: point.x, y: point.y, w: 0, h: 0 };
@@ -260,9 +268,9 @@ export class PtzCalibrator {
         //   ptz/plateWidth 는 줌 단계가 실제로 도달한 마지막 실측값(카메라의 현재 위치)을 싣는다.
         //   ★ 사다리(centerAndZoomByLadder)의 "장비 한계라 폭 미달이지만 ok:true + reason" 과 혼동 금지 —
         //     그쪽은 장비가 할 수 있는 일을 다 한 경우고, 이쪽 실패는 **대상 소실**이라 실패가 맞다.
-        return { ok: z.ok, ptz: z.ptz, plateWidth: z.plateWidth, ...(z.reason ? { reason: z.reason } : {}) };
+        return toPointResult(z);
       }
-      return { ok: centered.ok, ptz: centered.ptz, plateWidth: centered.plateWidth, ...(centered.reason ? { reason: centered.reason } : {}) };
+      return toPointResult(centered);
     } finally {
       this.pointBusy = false;
     }

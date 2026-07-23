@@ -12,12 +12,12 @@
 
 import { buildVehicleCuboids, type SegVehicle } from './contact.js';
 import { computeAnchorMetrics } from './anchor.js';
-import { associateDetSeg, DEFAULT_ASSOC_OPTIONS, type AssocPair } from './segAssoc.js';
+import { associateDetSeg, DEFAULT_ASSOC_OPTIONS, type AssocPair, type AssocResult } from './segAssoc.js';
 import { DEFAULT_ANCHOR_OPTIONS, DEFAULT_CONTACT_OPTIONS } from './contactTypes.js';
 import { isVehicleOnPlace } from '../capture/onPlaceFilter.js';
 import type { AnchorMetrics, Px, RejectedVehicle, VehicleCuboid } from './contactTypes.js';
 import type { GroundModel } from './types.js';
-import type { VpdClient } from '../clients/VpdClient.js';
+import type { VpdClient, SegBox } from '../clients/VpdClient.js';
 import type { NormalizedPolygon, VehicleBox } from '../domain/types.js';
 import { logger } from '../util/logger.js';
 
@@ -162,6 +162,82 @@ function degraded(args: {
 }
 
 /**
+ * 미정합 det 사유 — 세 경우를 **정확히** 구분한다. "IoU 0.428 < 임계 0.4" 같은 **거짓 문장을 쓰지 않는다** —
+ *   이 문자열이 운영자가 미정합을 이해하는 유일한 표면이다(실제로 한 번 틀린 문장을 냈다가 잡았다).
+ * @internal 테스트 노출(공개 API 아님).
+ */
+export function unmatchedReason(best: number): string {
+  if (best === 0) return 'seg 후보 0 — seg 모델이 이 차량을 못 봄(육면체 없이 통과)';
+  if (best < DEFAULT_ASSOC_OPTIONS.minIou)
+    return `seg 최고 IoU ${best.toFixed(3)} < 임계 ${DEFAULT_ASSOC_OPTIONS.minIou} — 마스크 파편화/병합 의심(육면체 없이 통과)`;
+  return (
+    `1:1 경합 패배 — 최고 IoU ${best.toFixed(3)}(임계 이상)인 seg 를 **다른 det 이 더 높은 IoU 로 가져갔다**. ` +
+    `det 두 대가 같은 마스크를 다툰다 = 마스크 병합 의심(육면체 없이 통과)`
+  );
+}
+
+/**
+ * [−1] 정합 + SegVehicle 조립. det bbox(권위) ↔ seg rect 를 정규화 좌표에서 직접 IoU(A1) 로 잇고,
+ *   정합 결과를 SegVehicle 로 조립한다. **cls·confidence·bbox 는 det(권위) / mask 만 seg**(설계 §2-2).
+ *   미정합 det 은 사유 + bestIou 를 담아 unmatched 로 드러낸다(조용한 실패 금지).
+ * @internal 테스트 노출(공개 API 아님).
+ */
+export function assembleSegVehicles(
+  detBoxes: readonly VehicleBox[],
+  segBoxes: SegBox[],
+  keptIdx: readonly number[],
+  model: GroundModel,
+): { assoc: AssocResult; vehicles: SegVehicle[]; unmatched: UnmatchedDet[] } {
+  const a = associateDetSeg(detBoxes.map((b) => b.rect), segBoxes.map((b) => b.rect), DEFAULT_ASSOC_OPTIONS);
+  const px = (p: { x: number; y: number }): Px => ({ x: p.x * model.imgW, y: p.y * model.imgH });
+  const segByDet = new Map(a.pairs.map((p) => [p.detIdx, p.segIdx]));
+
+  const vehicles: SegVehicle[] = [];
+  const unmatched: UnmatchedDet[] = [];
+  for (const detIdx of keptIdx) {
+    const segIdx = segByDet.get(detIdx);
+    if (segIdx === undefined) {
+      const best = a.bestIouByDet[detIdx] ?? 0;
+      unmatched.push({ detIdx, bestIou: best, reason: unmatchedReason(best) });
+      continue;
+    }
+    const d = detBoxes[detIdx];
+    vehicles.push({
+      vpdIdx: detIdx, // ★ **det(권위) 검출 인덱스.** 점유 판정이 쓰는 그 배열로 되짚는다.
+      mask: segBoxes[segIdx].mask!.map(px), // seg 의 존재 이유 — 이것만 seg 에서 온다.
+      cls: d.cls,
+      confidence: d.confidence,
+      bboxPx: {
+        x1: d.rect.x * model.imgW,
+        y1: d.rect.y * model.imgH,
+        x2: (d.rect.x + d.rect.w) * model.imgW,
+        y2: (d.rect.y + d.rect.h) * model.imgH,
+      },
+    });
+  }
+  return { assoc: a, vehicles, unmatched };
+}
+
+/**
+ * 가림 배제([2])용 마스크 수집 — **필터 전 전량 + seg-only 마스크까지**(리더 승인 Q3).
+ *   가림은 **실루엣의 물리적 성질**이지 det 권위와 무관하다 — 앞차가 뒷차 발을 가리면, 그 앞차가 det 에 없어도 **가린다**.
+ *   occluder 는 오염된 접지열을 **제거만** 하고 육면체를 **만들 수 없다** → "det 가 권위"를 위반할 수 없다.
+ *   자기 자신 제외는 `buildVehicleCuboids` 가 **참조 동일성**으로 한다 → 정합된 차량의 마스크는 vehicles 의 배열을 그대로 넣는다.
+ */
+function collectOccluderMasks(assoc: AssocResult, vehicles: SegVehicle[], segBoxes: SegBox[], model: GroundModel): Px[][] {
+  const px = (p: { x: number; y: number }): Px => ({ x: p.x * model.imgW, y: p.y * model.imgH });
+  const maskByDet = new Map(vehicles.map((v) => [v.vpdIdx, v.mask]));
+  const occluderMasks: Px[][] = [];
+  for (const p of assoc.pairs) {
+    const own = maskByDet.get(p.detIdx);
+    // 필터로 빠진 차(주차면 밖 통행차)도 **가리기는 한다** → 필터 전 전량을 넣는다.
+    occluderMasks.push(own ?? segBoxes[p.segIdx].mask!.map(px));
+  }
+  for (const j of assoc.unmatchedSeg) occluderMasks.push(segBoxes[j].mask!.map(px)); // seg-only 도 occluder(Q3).
+  return occluderMasks;
+}
+
+/**
  * det(권위) + seg(마스크) → 차량 육면체. 파이프라인은 기존 [0]~[9] **앞에 [−1] 정합만** 추가한 것이다.
  *
  * ```
@@ -227,57 +303,8 @@ export async function buildFrameCuboids(args: BuildFrameCuboidsArgs): Promise<Fr
 
   // [−1] ★ 정합 — det bbox(권위) ↔ seg rect. 정규화 좌표에서 직접 IoU(A1: 두 응답의 정규화 기준이 같다).
   const segBoxes = seg.boxes; // 마스크 유효분만(VpdClient 가 이미 drop).
-  const a = associateDetSeg(detBoxes.map((b) => b.rect), segBoxes.map((b) => b.rect), DEFAULT_ASSOC_OPTIONS);
-
-  // 정합 결과 → SegVehicle 조립. **cls·confidence·bbox 는 det(권위) / mask 만 seg**(설계 §2-2).
-  const px = (p: { x: number; y: number }): Px => ({ x: p.x * model.imgW, y: p.y * model.imgH });
-  const segByDet = new Map(a.pairs.map((p) => [p.detIdx, p.segIdx]));
-
-  const vehicles: SegVehicle[] = [];
-  const unmatched: UnmatchedDet[] = [];
-  for (const detIdx of keptIdx) {
-    const segIdx = segByDet.get(detIdx);
-    if (segIdx === undefined) {
-      const best = a.bestIouByDet[detIdx] ?? 0;
-      // ⚠️ 세 사유를 **정확히** 구분한다. "IoU 0.428 < 임계 0.4" 같은 **거짓 문장을 쓰지 않는다** —
-      //   이 문자열이 운영자가 미정합을 이해하는 유일한 표면이다(실제로 한 번 틀린 문장을 냈다가 잡았다).
-      const reason =
-        best === 0
-          ? 'seg 후보 0 — seg 모델이 이 차량을 못 봄(육면체 없이 통과)'
-          : best < DEFAULT_ASSOC_OPTIONS.minIou
-            ? `seg 최고 IoU ${best.toFixed(3)} < 임계 ${DEFAULT_ASSOC_OPTIONS.minIou} — 마스크 파편화/병합 의심(육면체 없이 통과)`
-            : `1:1 경합 패배 — 최고 IoU ${best.toFixed(3)}(임계 이상)인 seg 를 **다른 det 이 더 높은 IoU 로 가져갔다**. ` +
-              `det 두 대가 같은 마스크를 다툰다 = 마스크 병합 의심(육면체 없이 통과)`;
-      unmatched.push({ detIdx, bestIou: best, reason });
-      continue;
-    }
-    const d = detBoxes[detIdx];
-    vehicles.push({
-      vpdIdx: detIdx, // ★ **det(권위) 검출 인덱스.** 점유 판정이 쓰는 그 배열로 되짚는다.
-      mask: segBoxes[segIdx].mask!.map(px), // seg 의 존재 이유 — 이것만 seg 에서 온다.
-      cls: d.cls,
-      confidence: d.confidence,
-      bboxPx: {
-        x1: d.rect.x * model.imgW,
-        y1: d.rect.y * model.imgH,
-        x2: (d.rect.x + d.rect.w) * model.imgW,
-        y2: (d.rect.y + d.rect.h) * model.imgH,
-      },
-    });
-  }
-
-  // ⚠️ 가림 배제([2])는 **필터 전 전량 + seg-only 마스크까지** 쓴다(리더 승인 Q3).
-  //   가림은 **실루엣의 물리적 성질**이지 det 권위와 무관하다 — 앞차가 뒷차 발을 가리면, 그 앞차가 det 에 없어도 **가린다**.
-  //   occluder 는 오염된 접지열을 **제거만** 하고 육면체를 **만들 수 없다** → "det 가 권위"를 위반할 수 없다.
-  //   자기 자신 제외는 `buildVehicleCuboids` 가 **참조 동일성**으로 한다 → 정합된 차량의 마스크는 vehicles 의 배열을 그대로 넣는다.
-  const maskByDet = new Map(vehicles.map((v) => [v.vpdIdx, v.mask]));
-  const occluderMasks: Px[][] = [];
-  for (const p of a.pairs) {
-    const own = maskByDet.get(p.detIdx);
-    // 필터로 빠진 차(주차면 밖 통행차)도 **가리기는 한다** → 필터 전 전량을 넣는다.
-    occluderMasks.push(own ?? segBoxes[p.segIdx].mask!.map(px));
-  }
-  for (const j of a.unmatchedSeg) occluderMasks.push(segBoxes[j].mask!.map(px)); // seg-only 도 occluder(Q3).
+  const { assoc: a, vehicles, unmatched } = assembleSegVehicles(detBoxes, segBoxes, keptIdx, model);
+  const occluderMasks = collectOccluderMasks(a, vehicles, segBoxes, model);
 
   const built = buildVehicleCuboids({
     vehicles,

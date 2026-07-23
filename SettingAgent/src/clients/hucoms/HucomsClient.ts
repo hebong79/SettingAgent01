@@ -73,6 +73,41 @@ function ipv4(name: string, value: string): string {
 }
 
 /**
+ * multipart/x-mixed-replace 프레임 1개 파싱(0x0a/0x0d 바이트 경계). `from` 은 boundary 마커 직후 오프셋.
+ * 완결 프레임을 못 찾으면(헤더 미완·payload 미도착·다음 마커 미도착) null → 호출부가 더 읽는다.
+ * @internal 테스트 노출용(공개 API 아님).
+ */
+export function parseMultipartFrame(
+  buffer: Buffer,
+  marker: Buffer,
+  from: number,
+): { frame: Buffer; nextOffset: number } | null {
+  let start = from;
+  if (buffer.subarray(start, start + 2).equals(Buffer.from('\r\n'))) start += 2;
+  else if (buffer[start] === 0x0a) start += 1;
+  let headerEnd = buffer.indexOf(Buffer.from('\r\n\r\n'), start);
+  let separatorLength = 4;
+  if (headerEnd < 0) {
+    headerEnd = buffer.indexOf(Buffer.from('\n\n'), start);
+    separatorLength = 2;
+  }
+  if (headerEnd < 0) return null;
+  const headers = buffer.subarray(start, headerEnd).toString('latin1');
+  const payloadStart = headerEnd + separatorLength;
+  const lengthMatch = /^content-length\s*:\s*(\d+)\s*$/im.exec(headers);
+  if (lengthMatch) {
+    const length = Number(lengthMatch[1]);
+    if (buffer.length < payloadStart + length) return null;
+    return { frame: buffer.subarray(payloadStart, payloadStart + length), nextOffset: payloadStart + length };
+  }
+  const next = buffer.indexOf(marker, payloadStart);
+  if (next < 0) return null;
+  let end = next;
+  while (end > payloadStart && (buffer[end - 1] === 0x0a || buffer[end - 1] === 0x0d)) end -= 1;
+  return { frame: buffer.subarray(payloadStart, end), nextOffset: next };
+}
+
+/**
  * Hucoms HTTP API v1.22 전체 기능을 제공하는 Node 20+ 네이티브 클라이언트.
  * 런타임 의존성 없이 fetch를 사용하며, 장비 규격상 id/passwd query 인증을 사용한다.
  */
@@ -571,33 +606,12 @@ export class HucomsClient {
             if (buffer.length > marker.length) buffer = buffer.subarray(buffer.length - marker.length);
             break;
           }
-          let start = boundaryAt + marker.length;
+          const start = boundaryAt + marker.length;
           if (buffer.subarray(start, start + 2).equals(Buffer.from('--'))) return;
-          if (buffer.subarray(start, start + 2).equals(Buffer.from('\r\n'))) start += 2;
-          else if (buffer[start] === 0x0a) start += 1;
-          let headerEnd = buffer.indexOf(Buffer.from('\r\n\r\n'), start);
-          let separatorLength = 4;
-          if (headerEnd < 0) {
-            headerEnd = buffer.indexOf(Buffer.from('\n\n'), start);
-            separatorLength = 2;
-          }
-          if (headerEnd < 0) break;
-          const headers = buffer.subarray(start, headerEnd).toString('latin1');
-          const payloadStart = headerEnd + separatorLength;
-          const lengthMatch = /^content-length\s*:\s*(\d+)\s*$/im.exec(headers);
-          if (lengthMatch) {
-            const length = Number(lengthMatch[1]);
-            if (buffer.length < payloadStart + length) break;
-            yield buffer.subarray(payloadStart, payloadStart + length);
-            buffer = buffer.subarray(payloadStart + length);
-          } else {
-            const next = buffer.indexOf(marker, payloadStart);
-            if (next < 0) break;
-            let end = next;
-            while (end > payloadStart && (buffer[end - 1] === 0x0a || buffer[end - 1] === 0x0d)) end -= 1;
-            yield buffer.subarray(payloadStart, end);
-            buffer = buffer.subarray(next);
-          }
+          const parsed = parseMultipartFrame(buffer, marker, start);
+          if (!parsed) break;
+          yield parsed.frame;
+          buffer = buffer.subarray(parsed.nextOffset);
         }
       }
     } finally {

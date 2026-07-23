@@ -434,10 +434,9 @@ export class PlatePtz {
           '클릭점 반경 밖 판만 검출 → 대신 채택하지 않고 실패(no_plate_near_click)',
         );
       }
-      return {
-        ok: false, ptz, plate: null, err: null, plateWidth: null, gain: fb, iterations: 0,
-        reason: first.rejected ? 'no_plate_near_click' : 'no_plate',
-      };
+      return failResult(first.rejected ? 'no_plate_near_click' : 'no_plate', {
+        ptz, plate: null, err: null, plateWidth: null, gain: fb, iterations: 0,
+      });
     }
     let plate: PlateBox = first.plate;
 
@@ -445,7 +444,7 @@ export class PlatePtz {
     let err = plateCenterError(pr);
     if (isCentered(err, o.centerTol)) {
       // 이미 수렴 — probe 캡처 생략.
-      return { ok: true, ptz, plate, err, plateWidth: pr.w, gain: fb, iterations: 0 };
+      return okResult({ ptz, plate, err, plateWidth: pr.w, gain: fb, iterations: 0 });
     }
 
     // 관측 앵커: 마지막으로 대상을 본 중심과 그때의 명령 PTZ(예측 prior 의 기준점).
@@ -475,10 +474,7 @@ export class PlatePtz {
       ptz = tr.ptz;
       dithers += tr.dithers;
       if (!tr.plate) {
-        return {
-          ok: false, ptz, plate, err, plateWidth: pr.w, gain, iterations: iter + 1, reason: 'plate_lost',
-          ...(dithers > 0 ? { recaptureDithers: dithers } : {}),
-        };
+        return failResult('plate_lost', { ptz, plate, err, plateWidth: pr.w, gain, iterations: iter + 1 }, { dithers });
       }
       plate = tr.plate;
       pr = quadBoundingRect(plate.quad);
@@ -496,17 +492,11 @@ export class PlatePtz {
           { cat: 'centering', phase: 'center', cam: camIdx, preset: presetIdx, iterations: iter + 1, errX: Number(err.errX.toFixed(3)), errY: Number(err.errY.toFixed(3)), ptz },
           '번호판 센터링 수렴',
         );
-        return {
-          ok: true, ptz, plate, err, plateWidth: pr.w, gain, iterations: iter + 1,
-          ...(dithers > 0 ? { recaptureDithers: dithers } : {}),
-        };
+        return okResult({ ptz, plate, err, plateWidth: pr.w, gain, iterations: iter + 1 }, { dithers });
       }
     }
     logger.warn({ cat: 'centering', phase: 'center', cam: camIdx, preset: presetIdx, errX: err.errX, errY: err.errY }, '번호판 센터링 반복 상한 소진');
-    return {
-      ok: false, ptz, plate, err, plateWidth: pr.w, gain, iterations: o.maxIterations, reason: 'max_iterations',
-      ...(dithers > 0 ? { recaptureDithers: dithers } : {}),
-    };
+    return failResult('max_iterations', { ptz, plate, err, plateWidth: pr.w, gain, iterations: o.maxIterations }, { dithers });
   }
 
   /**
@@ -541,7 +531,7 @@ export class PlatePtz {
     let ptz: Ptz = { ...startPtz };
 
     let plate = await this.captureAndDetect(camIdx, presetIdx, ptz, o.plateRoi, null);
-    if (!plate) return { ok: false, ptz, plate: null, err: null, plateWidth: null, gain: gainRef, iterations: 0, reason: 'no_plate' };
+    if (!plate) return failResult('no_plate', { ptz, plate: null, err: null, plateWidth: null, gain: gainRef, iterations: 0 });
 
     let pr = quadBoundingRect(plate.quad);
     let obsCenter = centerOfRect(pr);
@@ -549,7 +539,7 @@ export class PlatePtz {
     let plateWidth = pr.w;
     let err = plateCenterError(pr);
     if (isWidthConverged(plateWidth, o.targetPlateWidth, o.widthTol)) {
-      return { ok: true, ptz, plate, err, plateWidth, gain: gainRef, iterations: 0 };
+      return okResult({ ptz, plate, err, plateWidth, gain: gainRef, iterations: 0 });
     }
     // (재포착) 이번 호출에서 쓴 디더 캡처 누계(0 이면 결과에 싣지 않는다 = 기존 shape).
     let dithers = 0;
@@ -566,10 +556,7 @@ export class PlatePtz {
         ptz = tr.ptz; // ★ 디더 채택(원복 금지 — centerOnPlate 와 같은 근거).
         dithers += tr.dithers;
         if (!tr.plate) {
-          return {
-            ok: false, ptz, plate, err, plateWidth, gain: gainRef, iterations: iter + 1, reason: 'plate_lost',
-            ...(dithers > 0 ? { recaptureDithers: dithers } : {}),
-          };
+          return failResult('plate_lost', { ptz, plate, err, plateWidth, gain: gainRef, iterations: iter + 1 }, { dithers });
         }
         plate = tr.plate;
         pr = quadBoundingRect(plate.quad);
@@ -587,10 +574,7 @@ export class PlatePtz {
       if (newZoom === ptz.zoom && plateWidth < o.targetPlateWidth - o.widthTol) {
         logger.warn({ cat: 'centering', phase: 'zoom', cam: camIdx, preset: presetIdx, zoom: ptz.zoom, plateWidth }, 'zoom 포화(폭 목표 미달)');
         // 이 출구도 앞선 반복에서 쓴 디더 횟수를 버리지 않는다(정직성 관용구 — 다른 출구와 동일).
-        return {
-          ok: false, ptz, plate, err, plateWidth, gain: gainRef, iterations: iter + 1, reason: 'zoom_saturated',
-          ...(dithers > 0 ? { recaptureDithers: dithers } : {}),
-        };
+        return failResult('zoom_saturated', { ptz, plate, err, plateWidth, gain: gainRef, iterations: iter + 1 }, { dithers });
       }
       // 줌 후 prior 는 모델이 다르다(pan/tilt 변위가 아니라 배율 확대) → **줌 예측 중심을 앵커로** 넘긴다.
       // ★ 이 지점의 재포착 축은 **zoom** 이다(이터3) — 배율이 바뀐 새 프레임이라 tilt 로 흔들어도 회복되지
@@ -602,10 +586,7 @@ export class PlatePtz {
       ptz = tr.ptz; // ★ 디더 채택(원복 금지).
       dithers += tr.dithers;
       if (!tr.plate) {
-        return {
-          ok: false, ptz, plate, err, plateWidth, gain: gainRef, iterations: iter + 1, reason: 'plate_lost',
-          ...(dithers > 0 ? { recaptureDithers: dithers } : {}),
-        };
+        return failResult('plate_lost', { ptz, plate, err, plateWidth, gain: gainRef, iterations: iter + 1 }, { dithers });
       }
       plate = tr.plate;
       pr = quadBoundingRect(plate.quad);
@@ -618,17 +599,11 @@ export class PlatePtz {
           { cat: 'centering', phase: 'zoom', cam: camIdx, preset: presetIdx, iterations: iter + 1, plateWidth: Number(plateWidth.toFixed(3)), ptz },
           '번호판 폭 수렴',
         );
-        return {
-          ok: true, ptz, plate, err, plateWidth, gain: gainRef, iterations: iter + 1,
-          ...(dithers > 0 ? { recaptureDithers: dithers } : {}),
-        };
+        return okResult({ ptz, plate, err, plateWidth, gain: gainRef, iterations: iter + 1 }, { dithers });
       }
     }
     logger.warn({ cat: 'centering', phase: 'zoom', cam: camIdx, preset: presetIdx, plateWidth }, '번호판 줌 반복 상한 소진');
-    return {
-      ok: false, ptz, plate, err, plateWidth, gain: gainRef, iterations: o.maxIterations, reason: 'max_iterations',
-      ...(dithers > 0 ? { recaptureDithers: dithers } : {}),
-    };
+    return failResult('max_iterations', { ptz, plate, err, plateWidth, gain: gainRef, iterations: o.maxIterations }, { dithers });
   }
 
   /**
@@ -666,7 +641,7 @@ export class PlatePtz {
     // ── ① 클릭점 조준(rung 진입 전 1회) ──
     const aim = await this.recenterTo(camIdx, point, ptz, fb);
     if (!aim.ok) {
-      return { ok: false, ptz, plate: null, err: null, plateWidth: null, gain: fb, iterations: 0, reason: 'aim_failed' };
+      return failResult('aim_failed', { ptz, plate: null, err: null, plateWidth: null, gain: fb, iterations: 0 });
     }
     ptz = aim.ptz;
     logger.info(
@@ -724,35 +699,35 @@ export class PlatePtz {
       if (got.count > 0) sawAnyPlate = true;
 
       // [수정 11] 명령은 올렸는데 장비 실측 zoom 이 제자리면 물리 상한이다 — 성공으로 믿고 rung 을 낭비하지 않는다.
-      if (prevAct !== null && prevCmd !== null) {
-        const dAct = Math.abs(got.act.zoom - prevAct);
-        const dCmd = Math.abs(ptz.zoom - prevCmd);
-        if (dAct > LADDER_ZOOM_STALL_EPS) actLive = true; // 실측이 명령을 따라온다 = 판정 재료가 유효
-        if (actLive && dCmd > LADDER_ZOOM_STALL_EPS && dAct <= LADDER_ZOOM_STALL_EPS) stall += 1;
-        else stall = 0;
-        if (stall >= LADDER_ZOOM_STALL_LIMIT) {
-          // [수정 13] 정체 시점의 **이번 rung 실측**으로 판정한다(직전 rung 값으로 성공을 주지 않는다).
-          const pr = got.plate ? quadBoundingRect(got.plate.quad) : null;
-          const e = pr ? plateCenterError(pr) : null;
-          const w = pr ? pr.w : plateWidth;
-          const fin = await this.finalizeAtDeviceLimit(camIdx, presetIdx, ptz, got.plate ?? plate, e ?? err, w, latched, fb);
-          logger.warn(
-            {
-              cat: 'centering', phase: 'ladder', rung, cam: camIdx, preset: presetIdx,
-              zoomCmd: r3(ptz.zoom), zoomAct: r3(got.act.zoom), prevAct: r3(prevAct), stall,
-              plateWidth: fin.plateWidth === null ? null : r3(fin.plateWidth), atDeviceLimit: 'zoomAct', ok: fin.ok,
-              recenterAttempts: fin.attempts,
-              errX: fin.err === null ? null : r3(fin.err.errX), errY: fin.err === null ? null : r3(fin.err.errY),
-            },
-            'zoom 명령이 장비 실측에 반영되지 않음(연속 정체) → 그 지점을 최종 위치로 확정',
-          );
-          return {
-            ok: fin.ok, ptz: fin.ptz, plate: fin.plate, err: fin.err, plateWidth: fin.plateWidth,
-            gain: fb, iterations: rung + 1, reason: 'zoom_saturated',
+      // 정체 판정 수치부는 detectZoomStall 로 뽑고, 카운터(actLive/stall) 갱신은 여기(루프)가 소유한다.
+      const zs = detectZoomStall(prevAct, prevCmd, got.act.zoom, ptz.zoom, actLive, stall);
+      actLive = zs.actLive;
+      stall = zs.stall;
+      if (zs.stalled) {
+        // [수정 13] 정체 시점의 **이번 rung 실측**으로 판정한다(직전 rung 값으로 성공을 주지 않는다).
+        const pr = got.plate ? quadBoundingRect(got.plate.quad) : null;
+        const e = pr ? plateCenterError(pr) : null;
+        const w = pr ? pr.w : plateWidth;
+        const fin = await this.finalizeAtDeviceLimit(camIdx, presetIdx, ptz, got.plate ?? plate, e ?? err, w, latched, fb);
+        logger.warn(
+          {
+            cat: 'centering', phase: 'ladder', rung, cam: camIdx, preset: presetIdx,
+            // zs.stalled 는 prevAct !== null 일 때만 참이다(detectZoomStall) — 단언은 그 불변식의 표기다.
+            zoomCmd: r3(ptz.zoom), zoomAct: r3(got.act.zoom), prevAct: r3(prevAct!), stall,
+            plateWidth: fin.plateWidth === null ? null : r3(fin.plateWidth), atDeviceLimit: 'zoomAct', ok: fin.ok,
+            recenterAttempts: fin.attempts,
+            errX: fin.err === null ? null : r3(fin.err.errX), errY: fin.err === null ? null : r3(fin.err.errY),
+          },
+          'zoom 명령이 장비 실측에 반영되지 않음(연속 정체) → 그 지점을 최종 위치로 확정',
+        );
+        return limitResult(fin.ok, 'zoom_saturated', {
+          ptz: fin.ptz, plate: fin.plate, err: fin.err, plateWidth: fin.plateWidth, gain: fb, iterations: rung + 1,
+        }, {
+          rest: {
             widthShortfall: fin.plateWidth !== null && fin.plateWidth < o.targetPlateWidth,
             recenterAttempts: fin.attempts,
-          };
-        }
+          },
+        });
       }
       prevAct = got.act.zoom;
       prevCmd = ptz.zoom;
@@ -790,22 +765,25 @@ export class PlatePtz {
             },
             fin.aligned ? '사다리 폭 수렴 — 완료' : '사다리 폭 수렴 — 완료(정렬 잔차 남음)',
           );
-          return {
-            ok: true, ptz: fin.ptz, plate: fin.plate, err: fin.err, plateWidth: fin.plateWidth,
-            gain: fb, iterations: rung + 1,
-            ...(fin.attempts > 0 ? { recenterAttempts: fin.attempts } : {}),
-            ...(fin.aligned ? {} : { centerShortfall: true }),
-            // 재중심 뒤 재측정에서 폭이 목표 아래로 벗어났다면 그 사실도 남긴다(수정 18 의 best 복귀는
-            // max_iterations/plate_lost 전용 경로라 이 성공 출구와 코드 경로가 겹치지 않는다 — 충돌 없음).
-            ...(fin.plateWidth < o.targetPlateWidth - o.widthTol ? { widthShortfall: true } : {}),
-          };
+          return okResult({
+            ptz: fin.ptz, plate: fin.plate, err: fin.err, plateWidth: fin.plateWidth, gain: fb, iterations: rung + 1,
+          }, {
+            // 이 출구의 선택 필드는 출구마다 조건이 달라 rest 로 존재여부까지 확정해 넘긴다(비균일 관용구).
+            rest: {
+              ...(fin.attempts > 0 ? { recenterAttempts: fin.attempts } : {}),
+              ...(fin.aligned ? {} : { centerShortfall: true }),
+              // 재중심 뒤 재측정에서 폭이 목표 아래로 벗어났다면 그 사실도 남긴다(수정 18 의 best 복귀는
+              // max_iterations/plate_lost 전용 경로라 이 성공 출구와 코드 경로가 겹치지 않는다 — 충돌 없음).
+              ...(fin.plateWidth < o.targetPlateWidth - o.widthTol ? { widthShortfall: true } : {}),
+            },
+          });
         }
         // ③ 판중심 재중심(중심 오차가 tol 밖일 때만 — 불필요한 왕복 억제).
         if (!isCentered(err, o.centerTol)) {
           const c = centerOfRect(pr);
           const re = await this.recenterTo(camIdx, { x: c.cx, y: c.cy }, ptz, fb);
           if (!re.ok) {
-            return { ok: false, ptz, plate, err, plateWidth, gain: fb, iterations: rung + 1, reason: 'aim_failed' };
+            return failResult('aim_failed', { ptz, plate, err, plateWidth, gain: fb, iterations: rung + 1 });
           }
           ptz = re.ptz;
         }
@@ -817,52 +795,38 @@ export class PlatePtz {
           zHi = ptz.zoom;
         }
 
-        let zNext: number;
-        if (zLo !== null && zHi !== null && zHi - zLo > ZOOM_EPS) {
-          // ── 괄호 안 이분 탐색 ──
-          // ★ 선형 외삽(zoomForWidth)을 쓰지 않는 이유: `width ∝ zoom` 가정이 장비 상단에서 깨진다
-          //   (실측 w/z 가 16배 0.00131 → 36배 0.00661, **5배** 변화). 그 가정으로 외삽하면 괄호 밖으로 튀어
-          //   36 ↔ 32.5 를 오가는 **극한 순환**이 성립한다(라이브 3주기 관측).
-          //   이분은 **모델을 전혀 가정하지 않는다** — 필요한 것은 "zoom↑ ⇒ width↑" 단조성뿐이고 물리적으로 보장된다.
-          // ★ maxZoomStepRatio 클램프를 **면제**한다(판단 근거): 그 클램프는 "측정하지 않은 zoom 으로 크게 튀어
-          //   중심오차를 배율만큼 확대해 대상을 날리는 것"을 막는 장치다. 괄호의 두 끝은 **이미 측정했고 그 자리에서
-          //   대상을 검출한** zoom 이므로 그 사이 중점에는 그 위험이 존재하지 않는다. 반대로 클램프를 걸면
-          //   넓은 괄호(예 16↔36)의 중점(26)이 1/1.3 밖이라 막혀 수렴이 지연되거나 정체된다. 장비 범위 클램프
-          //   (`clampZoom`)는 그대로 적용한다.
-          zNext = this.camera.clampZoom((zLo + zHi) / 2);
+        // 다음 rung zoom 은 순수 수치부(nextLadderZoom)가 결정한다 — 괄호 이분/미형성 외삽의 근거는 그 함수 doc 참조.
+        // 복귀(restoreBest)·확정(finalize)·상태 갱신·종료 반환은 이 루프가 소유한다(수치부만 추출 — 과분해 금지).
+        const zdec = nextLadderZoom(
+          ptz.zoom, zLo, zHi, plateWidth, o.targetPlateWidth, o.maxZoomStepRatio, (z) => this.camera.clampZoom(z),
+        );
+        const zNext = zdec.zNext;
+        if (zdec.bracketExhausted) {
           // 괄호가 장비 해상도까지 좁혀졌거나 중점이 현재와 같으면 줌으로 더 가까이 갈 방법이 없다 → best 로 종료.
-          if (zHi - zLo <= LADDER_BRACKET_MIN_SPAN || Math.abs(zNext - ptz.zoom) <= ZOOM_EPS) {
-            const back = await this.restoreBest(camIdx, presetIdx, ptz, plateWidth, best, o.widthTol);
-            const fin = await this.finalizeAtDeviceLimit(
-              camIdx, presetIdx, back.restored ? back.ptz : ptz,
-              back.plate ?? plate, back.err ?? err, back.plateWidth ?? plateWidth, latched, fb,
-            );
-            logger.warn(
-              {
-                cat: 'centering', phase: 'ladder', rung, cam: camIdx, preset: presetIdx,
-                zLo: r3(zLo), zHi: r3(zHi), span: r3(zHi - zLo), zoom: fin.ptz.zoom,
-                plateWidth: fin.plateWidth === null ? null : r3(fin.plateWidth), targetPlateWidth: o.targetPlateWidth,
-                ok: fin.ok, recenterAttempts: fin.attempts, restoredToBest: back.restored,
-              },
-              '괄호가 장비 zoom 해상도까지 좁혀짐 — 최선 지점을 최종 위치로 확정',
-            );
-            return {
-              ok: fin.ok, ptz: fin.ptz, plate: fin.plate, err: fin.err, plateWidth: fin.plateWidth,
-              gain: fb, iterations: rung + 1, reason: 'zoom_resolution_limit',
+          const back = await this.restoreBest(camIdx, presetIdx, ptz, plateWidth, best, o.widthTol);
+          const fin = await this.finalizeAtDeviceLimit(
+            camIdx, presetIdx, back.restored ? back.ptz : ptz,
+            back.plate ?? plate, back.err ?? err, back.plateWidth ?? plateWidth, latched, fb,
+          );
+          logger.warn(
+            {
+              cat: 'centering', phase: 'ladder', rung, cam: camIdx, preset: presetIdx,
+              // bracketExhausted 는 괄호 형성(zLo/zHi 비null) 시에만 참이다(nextLadderZoom) — 단언은 그 불변식.
+              zLo: r3(zLo!), zHi: r3(zHi!), span: r3(zHi! - zLo!), zoom: fin.ptz.zoom,
+              plateWidth: fin.plateWidth === null ? null : r3(fin.plateWidth), targetPlateWidth: o.targetPlateWidth,
+              ok: fin.ok, recenterAttempts: fin.attempts, restoredToBest: back.restored,
+            },
+            '괄호가 장비 zoom 해상도까지 좁혀짐 — 최선 지점을 최종 위치로 확정',
+          );
+          return limitResult(fin.ok, 'zoom_resolution_limit', {
+            ptz: fin.ptz, plate: fin.plate, err: fin.err, plateWidth: fin.plateWidth, gain: fb, iterations: rung + 1,
+          }, {
+            restoredToBest: back.restored,
+            rest: {
               widthShortfall: fin.plateWidth !== null && fin.plateWidth < o.targetPlateWidth,
               recenterAttempts: fin.attempts,
-              ...(back.restored ? { restoredToBest: true } : {}),
-            };
-          }
-        } else {
-          // ── 괄호 미형성(아직 목표의 한쪽만 봤다) → 기존 동작 그대로 ──
-          // 게인무관 직행 목표를 maxZoomStepRatio 로 **대칭** 클램프(zoomToPlateWidth 와 동일 관용구).
-          // ★ 상승 전용이면 목표보다 큰 판(=근거리 클릭)에서 줌아웃 경로가 없어 zoom_saturated 로 실패한다 —
-          //   기존 zoomToPlateWidth 가 정상 수렴하던 케이스라 그대로 두면 "가까운 건 되던데 이제 안 된다" 회귀가 된다.
-          const zWant = zoomForWidth(ptz.zoom, plateWidth, o.targetPlateWidth, (z) => this.camera.clampZoom(z));
-          zNext = this.camera.clampZoom(
-            Math.min(ptz.zoom * o.maxZoomStepRatio, Math.max(ptz.zoom / o.maxZoomStepRatio, zWant)),
-          );
+            },
+          });
         }
         // 포화: 양방향 모두 막힌 경우(clampZoom 상한/하한). 폭 수렴은 위에서 이미 반환했으므로 여기는 항상 미수렴.
         if (Math.abs(zNext - ptz.zoom) <= ZOOM_EPS) {
@@ -881,12 +845,14 @@ export class PlatePtz {
             },
             '사다리 zoom 포화 — 장비 상한 지점을 최종 위치로 확정',
           );
-          return {
-            ok: fin.ok, ptz: fin.ptz, plate: fin.plate, err: fin.err, plateWidth: fin.plateWidth,
-            gain: fb, iterations: rung + 1, reason: 'zoom_saturated',
-            widthShortfall: fin.plateWidth !== null && fin.plateWidth < o.targetPlateWidth,
-            recenterAttempts: fin.attempts,
-          };
+          return limitResult(fin.ok, 'zoom_saturated', {
+            ptz: fin.ptz, plate: fin.plate, err: fin.err, plateWidth: fin.plateWidth, gain: fb, iterations: rung + 1,
+          }, {
+            rest: {
+              widthShortfall: fin.plateWidth !== null && fin.plateWidth < o.targetPlateWidth,
+              recenterAttempts: fin.attempts,
+            },
+          });
         }
         ptz = { ...ptz, zoom: zNext };
         continue;
@@ -913,11 +879,10 @@ export class PlatePtz {
       if (latched) {
         // (수정 18) 대상을 놓친 자리에 그대로 멈추지 말고, 도달했던 최선 폭 지점으로 되돌아가 끝낸다.
         const back = await this.restoreBest(camIdx, presetIdx, ptz, null, best, o.widthTol);
-        return {
-          ok: false, ptz: back.ptz, plate: back.plate ?? plate, err: back.err ?? err,
-          plateWidth: back.plateWidth ?? plateWidth, gain: fb, iterations: rung + 1, reason: 'plate_lost',
-          ...(back.restored ? { restoredToBest: true } : {}),
-        };
+        return failResult('plate_lost', {
+          ptz: back.ptz, plate: back.plate ?? plate, err: back.err ?? err,
+          plateWidth: back.plateWidth ?? plateWidth, gain: fb, iterations: rung + 1,
+        }, { restoredToBest: back.restored });
       }
       // latch 전 미검출 → 눈먼 1스텝 줌인(광학중심 보존 가정).
       // 배율은 latch 인지형: 검출이 하나도 없는 구간만 성긴 preLatchZoomStepRatio(칸수↓=소요시간↓),
@@ -929,10 +894,9 @@ export class PlatePtz {
           { cat: 'centering', phase: 'ladder', rung, cam: camIdx, preset: presetIdx, zoom: ptz.zoom, plates: got.count, rejectedEver, zoomCmd: r3(ptz.zoom), zoomAct: r3(got.act.zoom), sha: got.sha },
           '사다리 최대 줌 도달 — 대상 판 미확보',
         );
-        return {
-          ok: false, ptz, plate: null, err: null, plateWidth: null, gain: fb, iterations: rung + 1,
-          reason: rejectedEver ? 'no_plate_near_click' : 'plate_not_found_at_max_zoom',
-        };
+        return failResult(rejectedEver ? 'no_plate_near_click' : 'plate_not_found_at_max_zoom', {
+          ptz, plate: null, err: null, plateWidth: null, gain: fb, iterations: rung + 1,
+        });
       }
       ptz = { ...ptz, zoom: zNext };
     }
@@ -946,12 +910,10 @@ export class PlatePtz {
       },
       '사다리 rung 상한 소진',
     );
-    return {
-      ok: false, ptz: back.ptz, plate: back.plate ?? plate, err: back.err ?? err,
+    return failResult(latched ? 'max_iterations' : rejectedEver ? 'no_plate_near_click' : 'plate_not_found_at_max_zoom', {
+      ptz: back.ptz, plate: back.plate ?? plate, err: back.err ?? err,
       plateWidth: back.plateWidth ?? plateWidth, gain: fb, iterations: rungBudget + 1,
-      reason: latched ? 'max_iterations' : rejectedEver ? 'no_plate_near_click' : 'plate_not_found_at_max_zoom',
-      ...(back.restored ? { restoredToBest: true } : {}),
-    };
+    }, { restoredToBest: back.restored });
   }
 
   /**
@@ -1495,4 +1457,126 @@ function pickOwnedByOffsets(plates: PlateBox[], prior: NormalizedRect, offsets: 
   });
   const peerAnchors = offsets.map((o) => ({ x: selfRef.x + o.x, y: selfRef.y + o.y }));
   return pickOwnedPlate(cands, selfRef, peerAnchors);
+}
+
+/** 필수 6필드(ok 제외) — 모든 PlatePtzResult 반환점이 공유한다. */
+interface PlatePtzResultCore {
+  ptz: Ptz;
+  plate: PlateBox | null;
+  err: { errX: number; errY: number } | null;
+  plateWidth: number | null;
+  gain: PtzGain;
+  iterations: number;
+}
+
+/**
+ * 결과별 **선택 필드**. 두 가지는 **정직성 관용구가 균일**해 여기서 판정을 중앙화한다:
+ *  · `dithers` — 0 초과일 때만 `recaptureDithers` 를 싣는다(그 외엔 필드 자체를 생략 — `in` 검사 보존).
+ *  · `restoredToBest` — truthy 일 때만 `restoredToBest:true` 를 싣는다.
+ * 나머지(`recenterAttempts`/`widthShortfall`/`centerShortfall`)는 출구마다 존재조건이 **다르므로**
+ * 호출부가 `rest` 로 존재여부까지 확정해 넘긴다(균일하지 않은 관용구를 억지로 통일하지 않는다 — deep-equal 보존).
+ */
+interface PlatePtzResultExtras {
+  dithers?: number;
+  restoredToBest?: boolean;
+  rest?: Partial<PlatePtzResult>;
+}
+
+function applyResultExtras(base: PlatePtzResult, extras: PlatePtzResultExtras): PlatePtzResult {
+  const dithers = extras.dithers ?? 0;
+  return {
+    ...base,
+    ...(extras.rest ?? {}),
+    ...(dithers > 0 ? { recaptureDithers: dithers } : {}),
+    ...(extras.restoredToBest ? { restoredToBest: true } : {}),
+  };
+}
+
+/**
+ * @internal 성공 결과 빌더. `ok:true` + 필수 6필드 + (있으면) 선택 필드. 반환객체는 기존 인라인 생성과 deep-equal.
+ */
+export function okResult(core: PlatePtzResultCore, extras: PlatePtzResultExtras = {}): PlatePtzResult {
+  return applyResultExtras({ ok: true, ...core }, extras);
+}
+
+/**
+ * @internal 실패 결과 빌더. `ok:false` + reason + 필수 6필드 + (있으면) 선택 필드. deep-equal 보존.
+ */
+export function failResult(
+  reason: PlatePtzFailReason,
+  core: PlatePtzResultCore,
+  extras: PlatePtzResultExtras = {},
+): PlatePtzResult {
+  return applyResultExtras({ ok: false, ...core, reason }, extras);
+}
+
+/**
+ * @internal 장비 zoom 한계 확정 결과. **ok 를 호출측이 정하고 reason 은 항상 함께 싣는다** —
+ * "장비가 할 수 있는 일을 전부 했다(ok:true)"와 그 사유(zoom_saturated/zoom_resolution_limit)가 공존하는
+ * 정직성 관용구다(ok:true + reason). okResult(reason 없음)/failResult(ok:false 고정)로는 표현할 수 없다.
+ */
+export function limitResult(
+  ok: boolean,
+  reason: PlatePtzFailReason,
+  core: PlatePtzResultCore,
+  extras: PlatePtzResultExtras = {},
+): PlatePtzResult {
+  return applyResultExtras({ ok, ...core, reason }, extras);
+}
+
+/**
+ * @internal (사다리) zoom **실측 정체** 판정의 순수 수치부. 상태전이(actLive/stall 갱신)는 호출측 루프가 소유하고
+ * 이 함수는 다음 상태값과 정체 여부만 계산한다(과분해 금지 — 카운터 변수는 루프에 남는다).
+ *
+ * prevAct/prevCmd 가 없으면(첫 rung) 판정 불가 → actLive/stall 을 그대로 돌려주고 stalled:false.
+ * 그 외엔 원 로직과 동일: 실측이 명령을 한 번이라도 따라오면 actLive, 이후 "명령은 올랐는데 실측 제자리"가
+ * 연속 LADDER_ZOOM_STALL_LIMIT 회면 정체로 판정한다.
+ */
+export function detectZoomStall(
+  prevAct: number | null,
+  prevCmd: number | null,
+  currAct: number,
+  currCmd: number,
+  actLive: boolean,
+  stall: number,
+): { actLive: boolean; stall: number; stalled: boolean } {
+  if (prevAct === null || prevCmd === null) return { actLive, stall, stalled: false };
+  const dAct = Math.abs(currAct - prevAct);
+  const dCmd = Math.abs(currCmd - prevCmd);
+  const nextActLive = actLive || dAct > LADDER_ZOOM_STALL_EPS;
+  const nextStall =
+    nextActLive && dCmd > LADDER_ZOOM_STALL_EPS && dAct <= LADDER_ZOOM_STALL_EPS ? stall + 1 : 0;
+  return { actLive: nextActLive, stall: nextStall, stalled: nextStall >= LADDER_ZOOM_STALL_LIMIT };
+}
+
+/**
+ * @internal (사다리) 다음 rung zoom 산출의 순수 수치부. **모델을 가정하지 않는 이분 + 괄호 미형성 외삽**만 결정하고,
+ * 복귀(restoreBest)·확정(finalize)·상태 갱신·종료 반환은 호출측 루프가 소유한다(수치부만 추출).
+ *
+ * ① 실측쌍 괄호(zLo<target<zHi)가 유효하면 **중점 이분**. 선형 외삽(zoomForWidth)을 쓰지 않는 이유는
+ *    `width ∝ zoom` 가정이 장비 상단에서 깨져(실측 w/z 5배 변화) 괄호 밖으로 튀는 극한 순환이 생기기 때문이다.
+ *    이분은 "zoom↑ ⇒ width↑" 단조성만 요구한다. maxZoomStepRatio 클램프는 **면제**한다 — 괄호 두 끝은 이미
+ *    측정·검출된 zoom 이라 "측정 안 한 zoom 으로 크게 튀어 대상을 날린다"는 클램프 근거가 성립하지 않고,
+ *    반대로 클램프를 걸면 넓은 괄호의 중점이 막혀 수렴이 정체된다. 장비 범위 클램프(clampZoom)는 그대로 적용.
+ *    괄호가 장비 해상도(LADDER_BRACKET_MIN_SPAN)까지 좁혀졌거나 중점이 현재와 같으면 `bracketExhausted`.
+ * ② 괄호 미형성(목표의 한쪽만 봄) → 게인무관 직행 목표(zoomForWidth)를 maxZoomStepRatio 로 **대칭** 클램프
+ *    (줌아웃 경로 보존 — 근거리 클릭에서 zoom_saturated 회귀 방지).
+ */
+export function nextLadderZoom(
+  zoom: number,
+  zLo: number | null,
+  zHi: number | null,
+  plateWidth: number,
+  targetPlateWidth: number,
+  maxZoomStepRatio: number,
+  clampZoom: (z: number) => number,
+): { zNext: number; bracketExhausted: boolean } {
+  if (zLo !== null && zHi !== null && zHi - zLo > ZOOM_EPS) {
+    const zNext = clampZoom((zLo + zHi) / 2);
+    const bracketExhausted = zHi - zLo <= LADDER_BRACKET_MIN_SPAN || Math.abs(zNext - zoom) <= ZOOM_EPS;
+    return { zNext, bracketExhausted };
+  }
+  const zWant = zoomForWidth(zoom, plateWidth, targetPlateWidth, clampZoom);
+  const zNext = clampZoom(Math.min(zoom * maxZoomStepRatio, Math.max(zoom / maxZoomStepRatio, zWant)));
+  return { zNext, bracketExhausted: false };
 }
