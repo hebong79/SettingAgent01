@@ -48,3 +48,6 @@ desktop.ini
 # 런타임 로그(회전 파일)
 logs/
 SettingAgent/logs/
+
+# 세션 워크트리(transient — 워크트리 기본 정책이 .claude/worktrees/ 아래 생성)
+.claude/worktrees/
