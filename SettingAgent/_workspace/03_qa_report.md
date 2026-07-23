@@ -1,98 +1,92 @@
-# 03 — 검증 보고 (정밀수집 "시작" 파이프라인)
+# 03 QA 검증 리포트 — 전역번호 재번호(A안) 적대적 검증
 
-설계서: `docs/20260722_181647_정밀수집시작_파이프라인_설계.md` §11.1 (U1~U14)
-구현 보고: `_workspace/02_developer_changes.md`
-검증: 2026-07-22 · `SettingAgent/` · vitest 2.1.9 · `npx tsc --noEmit` 통과
-
----
-
-## 1. 요약
-
-| 항목 | 결과 |
-|------|------|
-| 전량 회귀 `npx vitest run` | **209 파일 / 2465 테스트 전량 통과 · 실패 0** |
-| 신규 테스트 파일 | 7개 / **71 테스트** (전부 통과) |
-| 기존 테스트 수정 | **0** (기존 202파일·2394테스트 그대로 + 71 = 2465, 산술 일치) |
-| 발견한 구현 결함 | **0** — `dev-precise` 재수정 요청 없음 |
-| 실데이터 파괴 | **없음**(DB 전부 `:memory:`, ROI/camerapos 는 동결 픽스처를 `os.tmpdir()` 로 복사) |
-
-브리핑에 언급된 선행 실패(`test/slot3dFrontCenter.test.ts > 프리셋2 근접면 검증`)는 **현재 존재하지 않는다**.
-커밋 `2d48088`("slot3dFrontCenter 실데이터 스모크 재정박")로 이미 해소되어 22 테스트 전량 green 이다.
+작성: 검증자(qa-tester) / 대상: `01_architect_plan.md` + `02_developer_changes.md` 구현물.
+작업 위치 = WT(`.claude/worktrees/analyze-fill-check`). 모든 경로 WT 절대경로.
 
 ---
 
-## 2. U1~U14 항목별 결과
+## 0. 총평
 
-| ID | 파일 | 결과 | 비고 |
-|----|------|------|------|
-| **U1** | `test/setupPipelinePrecise.test.ts` | ✅ 8 | discovering→(1s)→calibrating→done · `discovery.start({}, {betweenSlotMs:500, occupySettleMs:300})` · `calibrator.start(undefined, {betweenSlotMs:1000[, camera]})` · finalize/getSnapshot **미접촉** |
-| **U2** | 〃 | ✅ 3 | 앵커 0 → `discovery.start` 미호출 + `failed{discover}` + 사유에 "ROI 파일 로딩" · preflight 실패 후 잠기지 않음 |
-| **U3** | 〃 | 6 ✅ | 비무장 no-op · 수집 경로는 `discovery.start` 인자 1개·`calibrator.start()` 인자 0개·**sleep 0회** · `precise` 키 미부착(응답 shape 불변) · 정밀→수집 전환 시 오버라이드 누수 없음 |
-| **U4** | `test/plateDiscoveryJobDelay.test.ts` | ✅ 8 | **fake sleep 실측**: 500 = 슬롯수(6/3), 300 = **프리셋 그룹수**(2/3, Q3 확인) · 순서 `[500×N, 300×P]` · 미검출 프리셋은 300 없음 · **미지정/빈opts/0 → sleep 0회** |
-| **U5** | `test/ptzCalibratorDelay.test.ts` | ✅ 7 | 1000 = 슬롯수(4/1/필터2) · `camera` 오버라이드가 배치의 **모든** PlatePtz 로 전달 · **미지정 → sleep 0회 + camera undefined** |
-| **U6** | `test/ptzCalibratorZoomSaturated.test.ts` | ✅ 5 | **요건5 봉인**: `centered:true / converged:false / reason:'zoom_saturated'` · item.ptz·plateWidth 는 **줌 단계(포화)** 결과 · `upsertSlotCentering` 행 = `{slotId, pan, tilt, zoom, centered:1, img1:null, updatedAt}` **전 필드 단언** · `max_iterations` 동일 규약 · 수렴 시 대조군 |
-| **U7** | `test/captureStartPreciseRoutes.test.ts` | ✅ 9 | 200+`{ok,stage:'discovering',precise:true}` · busy 409 · source 미존재 400 · sources 미주입 400 · invalid body 400 · preflight 실패 시 **200 이지만 ok:false + failure** · pipeline 미주입 시 404 · `listCameras` 실패 502 · source 어댑터가 `calibrator.start` 로 전달됨 |
-| **U8** | 〃 | ✅ 5 | 프리셋 1/4 보유 → **400** + 사유에 '프리셋'·'1개' + `missing:['1:2','2:1','2:2']` + 잡 미발화·파이프라인 미무장 · 전량 보유/여분 보유는 200 · **source 미지정 시 preflight 미수행**(구현자 §7-5 구멍을 봉인이 아니라 관측으로 기록) |
-| **U9** | `test/dbCenteringOverlay.test.ts` | ✅ 9 | `web/app.js` 의 `drawDbCentering` **원본 소스를 그대로 떼어** `new Function` 으로 실행(복사본 아님). lpd bounding rect 중심 · r=5 · `#ffd60a` · `centered=0`/`lpd=null` **스킵** · 비축정렬 quad 도 bbox 중심(꼭짓점 평균 아님) · 체크박스 2개 삭제·버튼 분리 배선 |
-| **U10** | `test/setupResult.test.ts` | ✅ 7 | 무변경 회귀 통과 |
-| **U11** | `test/loadRoiFrontCenterAuto.test.ts` | ✅ 2 | load-roi 200/ok:true + `issues` 에 `앞면 중심 산출 N건 … (h=1.5m)` · **보고 N = DB non-null 실적 일치** · 산출값 소수점 ≤5자리(round5 규약) |
-| **U12** | 〃 | ✅ 3 | `ground` **미주입** / `ground.enabled=false` 둘 다 **200 + ok:true + slots>0**, `issues` 에 '앞면 중심 미산출 — …ground.enabled=false', front_center 전부 null(위장 저장 없음) · `/capture/slots` 응답 shape 불변 |
-| **U13** | 〃 | ✅ 3 | **전 컬럼 비교**: 모든 컬럼을 실데이터처럼 시드(lpd/occupy/pan/tilt/zoom/centered/img1)한 뒤 라우트와 **동일 인자**로 `buildSlotFrontCenters` 실행 → `slot3dFrontCenter`·`updatedAt` 외 전 필드 동일(`toEqual` 전체 + 8개 필드 개별 단언). `updated>0` 로 무동작 통과 차단 · skipped 슬롯의 기존 front_center 미파괴 · **라우트 경로 쓰기 추적**: `replaceSlotSetup` 이후 DB 쓰기는 `['upsertSlotFrontCenter']` 하나뿐 |
-| **U14** | 〃 | ✅ 3 | 같은 서버에서 `POST /capture/slots/cuboid`(heightM 미지정) 후 값 **완전 동일** + `updated` = 자동 산출 건수 · **독립 서버 대조**(A=자동만 / B=자동+버튼) 슬롯 신원 기준 완전 일치 · `heightM:2.5` 명시 시 값이 **달라짐**(일치가 자명한 결과가 아님을 반증) |
+**구현은 적대적 검증을 통과했다.** 개발자 테스트 22개가 실제로 green 이며, 추가로 작성한 적대 테스트 12개(원자성·바이트보존·순열다양성·FK가드·경계면 교차정합·slot_ptz 방어)도 전부 green. **데이터 파괴·원자성 위반·경계면 불일치 결함 없음.** 아래 §5에 설계상 트레이드오프 1건(마스터 기승인)을 한계로 명시.
+
+- 전량 vitest: **220 files / 2593 tests 전부 green** (개발자 기준 219/2581 → 적대 테스트 파일 +1 / +12).
+- `npm run typecheck`(tsc --noEmit): **0 에러**.
 
 ---
 
-## 3. 구현자가 "확인 못 했다"고 보고한 항목의 처리
+## 1. 실행한 검증
 
-| 구현자 보고 | 본 검증의 결론 |
-|-------------|----------------|
-| SC2 슬롯 간격 0.5s 실측 불가 | **U4 로 확정** — fake sleep 호출 인자·횟수 직접 계수(슬롯 6개 → `sleep(500)` 정확히 6회). 미지정 시 0회도 함께 봉인 |
-| SC5 센터링 1.0s 실측 불가 | **U5 로 확정** — 슬롯 4개 → `sleep(1000)` 정확히 4회 |
-| U12 `ground.enabled=false` 강등 미재현 | **U12 로 재현·확정**(라우트 경유 200/ok:true/issues/전 null) |
-| U13 전 컬럼 비교 미수행 | **U13 로 수행**(전 컬럼 `toEqual` + 쓰기 호출 추적 2중) |
-| SC7/SC8/SC9 프론트 렌더 | **부분 확정** — `drawDbCentering` 의 좌표·스킵 로직은 실소스 실행으로 확정. 실제 canvas 픽셀·브라우저 렌더는 **미검증**(§5) |
+### 1-A. 개발자 테스트 재실행(실측 green)
+| 파일 | 테스트 수 | 결과 |
+|------|:---:|:---:|
+| `test/renumberMapping.test.ts` | 8 | ✅ |
+| `test/sqliteStore.renumber.test.ts` | 5 | ✅ |
+| `test/slotPtzRenumber.test.ts` | 5 | ✅ (파싱실패 케이스의 SyntaxError 콘솔로그 = best-effort 격리 증거) |
+| `test/renumberRoute.test.ts` | 4 | ✅ |
 
----
+### 1-B. 신규 적대 테스트 — `test/renumber.adversarial.test.ts` (12, 전부 green)
+과제의 적대 항목별 대응:
 
-## 4. 신규 테스트 파일
-
-```
-test/setupPipelinePrecise.test.ts        17  U1·U2·U3
-test/plateDiscoveryJobDelay.test.ts       8  U4
-test/ptzCalibratorDelay.test.ts           7  U5
-test/ptzCalibratorZoomSaturated.test.ts   5  U6
-test/captureStartPreciseRoutes.test.ts   14  U7·U8
-test/dbCenteringOverlay.test.ts           9  U9
-test/loadRoiFrontCenterAuto.test.ts      11  U11·U12·U13·U14
-                                         ──
-                                         71
-```
-
-격리 관용구: DB `SqliteStore(':memory:')` · ROI/camerapos 는 `test/fixtures/PtzCamRoi.unity.json`·
-`camerapos.sample.json` 을 `mkdtempSync(tmpdir())` 로 복사 · 잡 `writer` 는 전부 스텁(파일 IO 0) ·
-외부 REST(카메라/LPD/VPD/소스)는 전부 스텁 — 실 서비스 왕복 **0**.
+| # | 적대 항목 | 추가 테스트 | 결과 |
+|---|-----------|-------------|:---:|
+| A | **원시 바이트 보존** | 직접 INSERT 로 round5 를 안 거친 `pan=12.3456789`(7소수)·`tilt`·`zoom`·vpd/lpd/occupy/front TEXT·`updated_at='ORIG-TS'` 주입 → 재번호 후 raw SELECT 로 **전부 바이트 동일**(round5 재적용 X, updated_at 덮어쓰기 X) 실증 | ✅ |
+| B | **순열 다양성** | 항등(변화없음)·완전역순 `{1→3,2→2,3→1}`·3-사이클 `{1→2,2→3,3→1}` → PK 충돌 없이 정확 이동, 물리슬롯 데이터(img1) 라벨만 이동 | ✅ |
+| C | **FK 방어(parking_slot)** | 개발자는 parking_evnt 만 검증 → **parking_slot 참조행 주입** 케이스 추가, `/not empty/` throw + DB 무변경 | ✅ |
+| D | **비순열 원자성** | new범위밖·new중복·old중복(누락)·old존재안함·개수불일치 **5케이스** 각각 라우트 통합으로 400 + **DB slot_id 불변 + slot_ptz.json 바이트 불변 + setup_result.json 미생성 + setup_artifact 미저장** 동시 실증(검증 전 DB/파일 무접촉) | ✅ |
+| E | **경계면 3파일 교차정합** | 순열 `{1→3,2→1,3→2}` 후 **DB↔setup_result↔setup_artifact↔slot_ptz** 를 `presetIdx`(물리슬롯) 조인으로 대조. 각 소스에서 `globalIdx===Number(slotId)` 불변식 + 4소스 전역ID 완전 일치 + slot_ptz new asc 정렬 + plateWidth 물리고정 검증 | ✅ |
+| F | **slot_ptz remap 방어** | 유효 JSON 이나 `items` 가 배열 아님 → `'skipped'` + 파일 원본 바이트 불변 | ✅ |
 
 ---
 
-## 5. 검증하지 못한 것 (정직한 명시)
+## 2. 데이터 보존 실증(요건 핵심)
 
-1. **브라우저 실렌더** — `startPrecise()` 진행 메시지, 완료 메시지 문자열(`preciseDoneMessage`), 노란 원의
-   실제 canvas 픽셀은 확인하지 못했다. U9 는 `drawDbCentering` 의 **좌표·스킵 로직**만 실소스로 확정했고,
-   `#roi-db` 체크 → `drawDbCentering` 호출까지의 DOM 이벤트 경로는 **정적 문자열 검사**에 그친다.
-2. **실시간 대기의 벽시계 검증** — U4/U5 는 fake sleep 이라 `sleep(500)` 이 실제로 500ms 를 소비하는지는
-   보지 않는다(기본 `setTimeout` 구현 신뢰). 구현자의 라이브 실측(SC4 탐색→센터링 1.003s)이 이를 보완한다.
-3. **`data/setting.sqlite` 실 DB 상 동작** — 전부 `:memory:` 로 수행했다. 실 파일 DB 의 잠금·트랜잭션 거동은
-   기존 `sqliteStore.test.ts` 범위이며 본 변경이 건드리지 않았다.
-4. **시뮬레이터 라이브 스모크** — 본 검증은 전부 모킹이다(브리핑 요구). 라이브 실적은 구현자 보고 §6 이 정본.
-5. **`source` 미지정 시 프리셋 preflight 미수행**(구현자 §7-5) — 이는 결함이 아니라 **설계 범위 밖의 구멍**으로
-   판단해 U8 마지막 케이스로 **현 거동을 관측·기록**했다(봉인하지 않음). API 직접 호출 시 잘못된 소스로
-   순회가 시작될 수 있다 — 마스터 판단 필요.
+- `renumberSlotIds` 는 원시 SELECT → 트랜잭션 DELETE+re-INSERT. **slot_id 만 remap, 나머지 14컬럼 원시값 그대로.**
+- ★ **round5 재적용 없음**을 non-round5 값(7소수 pan)으로 직접 증명 — 개발자 테스트는 replaceSlotSetup 경유(이미 round5된 값)라 이 경로가 약했는데, 적대 테스트가 raw INSERT 로 보강.
+- ★ `updated_at` 덮어쓰기 없음 실증(`'ORIG-TS'` 그대로).
+- lpd/occupy/vpd/slot3d_front_center/slot_roi TEXT 바이트 동일.
+
+## 3. 원자성 실증(요건 #5)
+
+- 검증(`validateRenumberMapping`)이 DB 접촉 **전** 게이트. 5종 비순열 전부 400 + slot_setup 한 행도 안 바뀜 + 파일 전파 자체가 없음(slot_ptz 바이트 불변·setup_result 미생성·artifact 미저장). "검증 전 DB 안 건드림" 규약 실증.
+- DB 재번호는 단일 트랜잭션(better-sqlite3 자동 롤백) — idMap 미커버/new중복/FK참조행 시 throw & 무변경 실증.
+
+## 4. 경계면 교차 비교(핵심)
+
+소비측 shape 확인:
+- `buildArtifactFromSlotSetup`(artifactFromSlotSetup.ts:53): `globalIndex[].globalIdx = v.slotId`, `slotId = String(v.slotId)` → **globalIdx == Number(slotId)** 불변식.
+- `buildSetupResult`(setupResult.ts:37): `slots[].slotId = s.slotId`(= DB slot_id = new).
+- `remapSlotPtz`: `items[].slotId=String(new)`, `globalIdx=new`.
+
+→ 재번호 후 3파일 + DB 를 `presetIdx`(물리슬롯 불변 키)로 조인했을 때 전역ID가 4소스 모두 동일함을 §1-B E 로 실증. **경계면 불일치 없음.**
 
 ---
 
-## 6. 부수 관찰(수정하지 않음)
+## 5. 발견 사항 / 한계 (결함 아님 — 판단·기록용)
 
-- `SettingAgent/config/camerapos.json` 이 구현자의 라이브 실행(19:00)으로 갱신되어 있다. 본 검증은 이 파일을
-  읽지도 쓰지도 않았다(mtime 무변동 확인).
-- `test/viewerPtzSyncCoverage.test.ts` 가 신규 라우트를 `MOVES_CAMERA` 로 분류하도록 강제하는 하네스 제약은
-  구현자가 이미 반영했고, 전량 회귀에서 통과한다.
+### 5-1. (한계·설계승인) setup_artifact.json ROI 표현 = bbox 고정
+- `buildArtifactFromSlotSetup` 은 `roiByPreset` 을 `bboxOf(slot_roi)`(축정렬 사각형)로 산출. 재번호 시 `repo.saveArtifact` 가 setup_artifact.json 을 DB-파생본으로 덮어쓴다.
+- **단, 이는 신규 손실이 아니다:** `SetupArtifact.slots[].roiByPreset` 타입 자체가 `NormalizedRect`(사각형)이며, GET /mapping DB 폴백도 동일 표현. **폴리곤 정본은 DB `slot_roi` 와 setup_result.json `floor_roi` 에 보존**(재번호가 이 둘의 폴리곤 바이트 보존 실증됨). plateRoi(quad)도 DB lpd 에서 그대로 전파.
+- 설계서 §5 결정 C = 마스터 기승인 트레이드오프. **재확인만 필요, 조치 불필요.**
+
+### 5-2. (가정·안전장치 병존) FK 가드 = 하드 throw
+- parking_evnt/parking_slot 에 행이 있으면 재번호 전면 차단(throw). 현행 writer 미작성 → 항상 비어 있음(설계 가정 A). 방어 카운트가 실제 동작함을 A·C 로 실증. 향후 이 테이블 writer 도입 시 재번호는 cascade 전략 재설계 필요(현재 범위 밖).
+
+### 5-3. 스모크(라이브 REST) 미수행 — 해당 없음
+- 이 기능은 외부 서비스(VPD/LPD/Unity) 연동이 아니라 순수 DB 트랜잭션 + 파일 IO. 라우트 통합(fastify inject)으로 전 경로 실증 완료 → 별도 스모크 불요.
+
+---
+
+## 6. 회귀
+
+- 전량 `npx vitest run`: **220 files / 2593 tests green**. 기존 라우트(PUT /mapping·finalize·autoChain·calibrate·viewerPtzSyncCoverage 봉인) 회귀 0.
+- `npm run typecheck`: **0 에러**.
+- 프론트 `saveManualIndex`(app.js:3304)·커버리지 분류(viewerPtzSyncCoverage.test.ts:74) 설계대로 반영 확인.
+
+---
+
+## 7. 산출물
+
+- 신규 테스트: `WT\SettingAgent\test\renumber.adversarial.test.ts` (12 tests).
+- 본 리포트: `WT\SettingAgent\_workspace\03_qa_report.md`.
+
+**결론: 구현 결함 없음. developer 재호출 불필요. documenter 진행 가능.** (§5 한계 2건은 설계 승인·가정으로 기록만.)

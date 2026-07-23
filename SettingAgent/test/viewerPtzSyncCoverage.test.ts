@@ -71,6 +71,7 @@ const NO_MOVE: Record<string, string> = {
   '/llm/models': '조회',
   '/llm/select': '설정',
   '/mapping': '파일 IO',
+  '/mapping/renumber': 'DB slot_id 재번호 + json 전파(파일 IO·DB 만; 카메라 미이동)',
   '/ptz': '읽기 전용 PTZ 조회(동기화 자체가 쓰는 경로)',
   '/rpc': 'Unity RPC 패스스루',
   '/rpc/catalog': '카탈로그 조회',

@@ -197,7 +197,7 @@ describe('정밀수집 완료 팝업', () => {
   });
 
   it('★ 완료 전이에서 1회만 띄운다(폴링마다 재팝업 금지)', () => {
-    expect(functionSource(appSrc, 'pollPipeline')).toMatch(/prevPipelineStage !== 'done'\) showPreciseResult/);
+    expect(functionSource(appSrc, 'pollPipeline')).toMatch(/prevPipelineStage !== 'done'\)\s*\{?\s*showPreciseResult/);
   });
 });
 
