@@ -193,6 +193,7 @@
               <button id="cap-stop">정지</button>
               <button id="cap-finalize" title="DB(slot_setup) 기준으로 번호판(LPD)·점유영역·센터라이징 위치를 화면에 표시한다(표시 전용 — DB 를 바꾸지 않는다)">최종화</button>
               <button id="cap-reset-db" title="DB(slot_setup)의 검출(VPD/LPD)·점유영역·센터라이징(PTZ)을 모두 초기화. 바닥 ROI/슬롯은 유지. 되돌릴 수 없음(재캡처·재센터링 필요)">검출·센터링 초기화</button>
+              <button id="cap-touring" title="setup_result.json(읽기 전용)을 카메라→프리셋→주차면 순으로 순회하며 각 위치로 이동(각 1초). DB·검출·오버레이를 바꾸지 않는 독립 점검 기능">Touring Test</button>
             </div>
             <div class="cap-progress capture-progress">
               <progress id="cap-bar" max="100" value="0"></progress>
@@ -515,6 +516,17 @@
         <div class="modal-actions">
           <button id="cap-result-finalize" class="primary">최종화</button>
           <button id="cap-result-close">확인</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Touring Test 순회 완료 안내(독립 모달). -->
+    <div id="touring-done-modal" class="modal" hidden>
+      <div class="modal-box">
+        <h3>Touring Test 완료</h3>
+        <div id="touring-done-body" class="modal-body"></div>
+        <div class="modal-actions">
+          <button id="touring-done-close" class="primary">확인</button>
         </div>
       </div>
     </div>

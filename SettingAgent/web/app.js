@@ -65,6 +65,7 @@ import {
   frontFaceCenter, // 육면체 앞면(근접면) 중심점(정규화, 순수) — 2D 위치표시 원
   formatGroundBadge, // 지면모델 소스 배지 문자열(순수)
   groundModelsByKey, // ground-model 응답 models[] → cam:preset 맵(순수)
+  buildTouringPlan, // setup_result → Touring 순회 스텝 배열(카메라→프리셋→슬롯, 순수)
 } from './core.js';
 import { OccupancyJudge } from './occupancy.js'; // 번호판 우선·bbox 폴백 점유 판정(순수 컴포넌트).
 import { computeOccupancyRegions } from './occupancyRegion.js'; // 번호판 기준 점유영역 사다리꼴(겹침 회피 자동 배율, 순수).
@@ -121,6 +122,7 @@ const state = {
   vcuboidByKey: {}, // cam:preset → 차량 육면체(정밀수집 job-cuboids / 검출 응답 인라인 / 수동 라이브 촬영).
   vcuboidLoading: new Set(), // 중복 요청 가드(프리셋 키 단위).
   vcuboidRound: {}, // cam:preset → 마지막으로 받아온 잡 라운드. status 인덱스가 바뀔 때만 전문을 재요청(폴링 비용 0).
+  touringActive: false, // Touring Test 순회 진행 중(재진입 방지).
 };
 
 const DB_LIMIT = 200; // DB 뷰어 페이지 크기(서버 clamp 상한 1000 내).
@@ -1643,6 +1645,79 @@ async function gotoPreset() {
   } catch {
     /* ignore */
   }
+}
+
+// --- Touring Test (독립 순회) -------------------------------------------
+// setup_result.json(읽기전용)을 카메라→프리셋→슬롯 순으로 순회하며 각 위치로 물리 이동(각 1초).
+// DB·discover/detect·오버레이 데이터는 읽지도 쓰지도 않는다. move()/gotoPreset()/UI동기화/모달만 사용.
+async function runTouringTest() {
+  if (state.touringActive) return; // 재진입 방지.
+  const btn = $('cap-touring');
+  const origLabel = btn?.textContent;
+
+  // 1) 로딩 — 루트 경로(/capture/*), api() 미사용, no-store.
+  let data;
+  try {
+    const res = await fetch('/capture/saves/setup_result', { cache: 'no-store' });
+    if (!res.ok) {
+      $('cap-msg').textContent = `Touring: setup_result 로딩 실패(${res.status}) — 정밀수집 결과가 없습니다.`;
+      return;
+    }
+    data = await res.json();
+  } catch (err) {
+    $('cap-msg').textContent = `Touring: 로딩 오류 — ${err instanceof Error ? err.message : err}`;
+    return;
+  }
+
+  // 2) 스텝 산출.
+  const { steps, skipped } = buildTouringPlan(data);
+  const presetCount = steps.filter((s) => s.kind === 'preset').length;
+  const slotCount = steps.filter((s) => s.kind === 'slot').length;
+  if (!steps.length) {
+    $('cap-msg').textContent = 'Touring: 순회할 슬롯/프리셋이 없습니다(빈 setup_result).';
+    return;
+  }
+
+  // 3) 순회.
+  state.touringActive = true;
+  if (btn) btn.disabled = true;
+  let done = 0;
+  try {
+    for (const step of steps) {
+      done += 1;
+      if (btn) btn.textContent = `순회 중… (${done}/${steps.length})`;
+      if (step.kind === 'preset') {
+        syncTouringPreset(step.camId, step.presetId); // state.cam/preset + UI 동기화.
+        const home = findPresetPtz(state.cameras, step.camId, step.presetId);
+        if (home) await move(home);
+        else await gotoPreset(); // PTZ 미제공(일부 실카메라) → snapshot 폴백으로 프리셋 이동(스킵 안 함).
+      } else {
+        await move(step.ptz);
+      }
+      await new Promise((r) => setTimeout(r, 1000)); // 각 위치 1초 대기.
+    }
+  } finally {
+    state.touringActive = false;
+    if (btn) { btn.disabled = false; btn.textContent = origLabel; }
+  }
+
+  // 4) 완료 모달.
+  $('touring-done-body').textContent =
+    `프리셋 ${presetCount}곳, 주차면 ${slotCount}곳 순회 완료.` +
+    (skipped ? ` (센터링 없는 ${skipped}개 슬롯 건너뜀)` : '');
+  $('touring-done-modal').hidden = false;
+}
+
+/** cam/preset 전환 UI 동기화(수동 sel-cam/sel-preset 핸들러와 동일 절차, gotoPreset 물리이동은 호출측이 담당). */
+function syncTouringPreset(camId, presetId) {
+  state.cam = camId;
+  state.preset = presetId;
+  state.selectedSlotId = null;
+  state.selectedDetect = null;
+  renderDetectSelection();
+  renderCamSelect();      // → renderPresetSelect → syncPtzFromPreset + renderSlotList (sel-cam/sel-preset value 세팅)
+  drawRoiOverlay();
+  renderSelectionInfo();
 }
 
 // --- 카메라 PTZ 프리셋 편집(camerapos.json) -----------------------------
@@ -3938,6 +4013,10 @@ function wire() {
   $('occupy-build').addEventListener('click', buildOccupyRange); // DB lpd → occupy_range 결정형 재생성.
   $('roi-clear').addEventListener('click', resetOverlayDisplay); // #5: 표시 초기화 — 모든 오버레이 토글 off(데이터 보존).
   $('cap-reset-db').addEventListener('click', resetSlotSetupDb); // 검출·센터링 DB 초기화(slot_setup vpd/lpd/occupy/ptz 비움).
+  $('cap-touring').addEventListener('click', runTouringTest); // Touring Test — setup_result 순회 이동(독립, DB 미변경).
+  $('touring-done-close').addEventListener('click', () => {
+    $('touring-done-modal').hidden = true;
+  });
   $('cap-load-roi').addEventListener('click', loadRoiToDb); // PtzCamRoi.json → slot_setup 전량 재구성.
   $('cap-build-cuboid').addEventListener('click', buildSlotCuboids); // 지면모델 → slot3d_front_center 산출·저장·표시.
   // 산출물(setup_artifact) 편집·결과 파일 도구(분석 탭으로 이관 — 핸들러·id 는 동일).

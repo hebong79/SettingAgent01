@@ -1560,3 +1560,45 @@ export function defaultResultFilename(date = new Date()) {
     `_${p(date.getHours())}${p(date.getMinutes())}${p(date.getSeconds())}.json`
   );
 }
+
+/**
+ * setup_result.json → Touring 순회 스텝 배열(순수). 카메라→프리셋→슬롯 순.
+ * - preset 스텝: 그룹(camId:presetId) 최초 진입 시 1개. ptz는 런타임(findPresetPtz)이 채우므로 여기선 camId/presetId만.
+ * - slot 스텝: centering!=null 슬롯만. centering==null은 스킵(위장 이동 금지)하고 skipped로 카운트.
+ * - slots가 이미 정렬(cam,preset,slotidx)돼 있어도 방어적으로 재정렬한다.
+ * @returns {{ steps: Array<object>, skipped: number }}
+ */
+export function buildTouringPlan(setupResult) {
+  const slots = Array.isArray(setupResult?.slots) ? setupResult.slots : [];
+  const sorted = [...slots].sort(
+    (a, b) =>
+      (a.camId - b.camId) ||
+      (a.presetId - b.presetId) ||
+      ((a.presetSlotIdx ?? 0) - (b.presetSlotIdx ?? 0)) ||
+      (a.slotId - b.slotId),
+  );
+  const steps = [];
+  let skipped = 0;
+  let curKey = null;
+  for (const s of sorted) {
+    const key = `${s.camId}:${s.presetId}`;
+    if (key !== curKey) {
+      curKey = key;
+      steps.push({ kind: 'preset', camId: s.camId, presetId: s.presetId });
+    }
+    const c = s.centering;
+    if (c && c.pan != null && c.tilt != null && c.zoom != null) {
+      steps.push({
+        kind: 'slot',
+        camId: s.camId,
+        presetId: s.presetId,
+        presetSlotIdx: s.presetSlotIdx ?? null,
+        slotId: s.slotId,
+        ptz: { pan: c.pan, tilt: c.tilt, zoom: c.zoom },
+      });
+    } else {
+      skipped += 1;
+    }
+  }
+  return { steps, skipped };
+}

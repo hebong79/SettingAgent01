@@ -520,3 +520,19 @@ export function formatGroundBadge(model: ViewerGroundModel | null | undefined): 
 export function groundModelsByKey(
   models: ViewerGroundModel[] | null | undefined,
 ): Record<string, ViewerGroundModel>;
+
+// ===== Touring Test 순회 시퀀스 빌더(순수) =====
+export interface TouringSetupSlot {
+  slotId: number;
+  camId: number;
+  presetId: number;
+  presetSlotIdx: number | null;
+  centering: { pan: number; tilt: number; zoom: number } | null;
+  [k: string]: unknown; // floor_roi/occupy_roi 등은 빌더가 읽지 않음.
+}
+export type TouringStep =
+  | { kind: 'preset'; camId: number; presetId: number }
+  | { kind: 'slot'; camId: number; presetId: number; presetSlotIdx: number | null; slotId: number; ptz: Ptz };
+export function buildTouringPlan(
+  setupResult: { slots?: TouringSetupSlot[] } | null | undefined,
+): { steps: TouringStep[]; skipped: number };
