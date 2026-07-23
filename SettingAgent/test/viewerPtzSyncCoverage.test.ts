@@ -54,6 +54,8 @@ const NO_MOVE: Record<string, string> = {
   '/capture/slots/lpd': '조회',
   '/capture/slots/occupy': 'DB(lpd→occupy_range 재생성)',
   '/capture/setup-result': '파일 IO(DB→setup_result.json)',
+  '/capture/saves/setup_result': '저장본 조회(GET setup_result.json — Touring 순회 입력)', // 파일 읽기만; 카메라 미이동
+
   '/capture/slots/reset': 'DB',
   '/capture/slots/load-roi': 'DB', // PtzCamRoi.json → slot_setup 재구성(파일·DB 만; 카메라 미이동)
   '/capture/slots/cuboid': 'DB', // 지면모델 → slot3d_front_center 산출·저장(순수 계산·DB 만; 카메라 미이동)
