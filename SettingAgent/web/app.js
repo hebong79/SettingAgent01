@@ -144,12 +144,17 @@ function clearRoiDisplay() {
  * [표시 초기화 버튼] 바닥 ROI(파일 기반 state.placeRoi)만 남기고 나머지 오버레이 **데이터를 삭제**한다.
  * Hide(토글 off)가 아니라 실제 삭제 — 재토글로도 복원되지 않는다(다음 검출/수집 때 새로 채워짐).
  * 바닥은 파일 소스(placeRoi)와 #roi-floor 토글을 건드리지 않아 그대로 표시된다.
+ * 예외 1건: #roi-db 는 **DB 소스 게이트**라 데이터 삭제로 끌 수 없다(state.parkingSlotsByKey 는
+ * renderSlotList 의 최종화 판정 소스라 지우면 회귀) → 체크만 해제해 DB 박스를 화면에서 내린다.
+ * 다시 체크하면 loadParkingSlots 로 DB 를 재조회해 VPD/LPD/점유/센터라이징이 되살아난다(마스터 요청 2026-07-23).
  */
 function resetOverlayDisplay() {
   state.detectByKey = {};        // 검출 차량/번호판 삭제.
+  state.discoverByKey = {};      // discovery(앞면중심 LOOP) LPD quad 삭제 — 없으면 LPD 실행 잔여 박스가 남는다.
   state.occComputeByKey = {};    // 로직 점유(원) 삭제.
   state.occByKey = {};           // 점유율 요약 삭제.
   state.vcuboidByKey = {};       // 차량 육면체 + seg 마스크 삭제.
+  $('roi-db').checked = false;   // DB 소스 오버레이 게이트 off — DB 박스도 화면에서 사라진다(데이터는 DB에 보존).
   state.selectedSlotId = null;   // 슬롯 선택 해제.
   state.selectedPlaceIdx = null; // 바닥 선택 하이라이트 해제.
   state.selectedDetect = null;   // [기능2] 검출 박스 선택 해제.
@@ -2531,6 +2536,29 @@ async function loadParkingSlots() {
   }
 }
 
+const HOME_CAM = 1;    // 기준 뷰 카메라(1-based) — 최종화 마감 시 복귀 대상.
+const HOME_PRESET = 1; // 기준 뷰 프리셋(1-based).
+
+/**
+ * 기준 뷰(1번 카메라·1번 프리셋)로 드롭다운 선택 전환 + 카메라 물리 이동(마스터 요청 2026-07-23).
+ * 수동 드롭다운 전환(#sel-cam/#sel-preset change)과 동일한 절차를 그대로 재사용한다 — 선택 해제·재렌더·gotoPreset·스트림 재연결.
+ * /cameras 목록에 1:1 이 없으면(카메라 구성이 다른 현장) 조용히 skip 하고 false 반환 — 없는 프리셋으로 이동을 위장하지 않는다.
+ */
+async function gotoHomePreset() {
+  const cam = state.cameras.find((c) => c.camIdx === HOME_CAM);
+  if (!cam || !(cam.presets ?? []).some((p) => p.presetIdx === HOME_PRESET)) return false;
+  state.cam = HOME_CAM;
+  state.preset = HOME_PRESET;
+  state.selectedSlotId = null;  // 프리셋 컨텍스트 전환 → 선택 해제(수동 전환과 동일).
+  state.selectedDetect = null;
+  renderDetectSelection();
+  renderCamSelect();            // 드롭다운 값 동기화(프리셋 셀렉트·PTZ 표시·목록 갱신 동반).
+  renderSelectionInfo();
+  await gotoPreset();           // 프리셋 PTZ 로 물리 이동(/move → /req_move).
+  reconnectLiveIfActive();      // 라이브 중이면 새 cam:preset 으로 스트림 재연결.
+  return true;
+}
+
 /**
  * ★ 최종화 = **표시 전용**(요건9). `POST /capture/finalize` 를 부르지 않는다 —
  *   Finalizer 의 `replaceSlotSetup` 은 모든 슬롯의 pan/tilt/zoom 을 null, centered 를 0 으로 되돌리므로
@@ -2541,6 +2569,7 @@ async function loadParkingSlots() {
 async function capFinalize() {
   $('roi-db').checked = true; // DB 소스 오버레이 ON — LPD/점유/센터링 전부 이 게이트를 통과한다.
   state.roiHidden = false; // 결과를 다시 표시.
+  await gotoHomePreset(); // 마스터 요청 2026-07-23: 마감 후 기준 뷰(1번 카메라·1번 프리셋)로 물리 복귀.
   await loadParkingSlots(); // slot_setup 정본 조회 → state.parkingSlotsByKey.
   await loadMapping(); // 정밀 결과를 검수 탭에 반영.
   drawRoiOverlay();
@@ -3976,9 +4005,9 @@ function wire() {
   $('roi-floor').addEventListener('change', drawRoiOverlay);
   $('roi-occupancy').addEventListener('change', drawRoiOverlay); // 점유 오버레이 토글.
   // DB(slot_setup) 소스 오버레이 토글(vpd/lpd/occupy 를 DB 소스로 전환).
-  // 소스가 아직 없으면(정밀수집 탭 미방문 등) 그 자리에서 1회 로드 — 어느 탭에서 켜도 표시되게.
+  // 켤 때마다 DB 재조회 — 어느 탭에서 켜도(소스 미로드) 표시되고, '표시 초기화' 후 재체크 시에도 최신 DB 가 보인다.
   $('roi-db').addEventListener('change', async (e) => {
-    if (e.target.checked && !state.parkingSlotsByKey) await loadParkingSlots();
+    if (e.target.checked) await loadParkingSlots();
     drawRoiOverlay();
   });
   $('roi-cuboid').addEventListener('change', drawRoiOverlay); // 3D 육면체 레이어 토글(기본 off → 회귀 0).

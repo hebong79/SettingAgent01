@@ -50,11 +50,20 @@ describe("'DB 보기' = slot_setup 소스 전환(폴백 아님)", () => {
     expect(body).toContain('fill()');
   });
 
-  it('#roi-db 토글은 소스 미로드 시 loadParkingSlots 를 await 한 뒤 재렌더한다', () => {
+  // 켤 때마다 재조회 — '표시 초기화'(#roi-clear)가 #roi-db 를 해제하므로, 재체크 시 캐시가 아니라
+  // 최신 DB 를 다시 그려야 "다시 DB 내용 보여주기"가 성립한다(마스터 요청 2026-07-23).
+  it('#roi-db 토글은 체크 시 loadParkingSlots 를 await 한 뒤 재렌더한다', () => {
     const wire = app.slice(app.indexOf("$('roi-db').addEventListener"));
     const handler = wire.slice(0, wire.indexOf('drawRoiOverlay();') + 'drawRoiOverlay();'.length);
     expect(handler).toContain('async');
-    expect(handler).toMatch(/!state\.parkingSlotsByKey.*await loadParkingSlots\(\)/s);
+    expect(handler).toMatch(/e\.target\.checked.*await loadParkingSlots\(\)/s);
+    expect(handler).not.toContain('!state.parkingSlotsByKey'); // 캐시 있으면 skip 하던 구 규약 제거.
+  });
+
+  // LPD 검지(discover) 잔여 quad 는 #roi-plate 게이트만 통과하므로, 초기화 대상에 반드시 포함돼야 한다.
+  it('discovery LPD quad 는 표시 초기화(resetOverlayDisplay)에서 삭제된다', () => {
+    expect(detect).toContain('state.discoverByKey');
+    expect(functionBody(app, 'resetOverlayDisplay')).toMatch(/state\.discoverByKey\s*=\s*\{\}/);
   });
 
   it("index.html 툴팁이 실제 동작(소스 전환·null 미표시)을 설명한다", () => {

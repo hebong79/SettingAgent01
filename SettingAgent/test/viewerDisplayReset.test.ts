@@ -32,19 +32,31 @@ describe('표시 초기화(#roi-clear) — 바닥 제외 오버레이 데이터 
     expect(app).toMatch(/\$\(['"]roi-clear['"]\)\.addEventListener\(\s*['"]click['"]\s*,\s*resetOverlayDisplay\s*\)/);
   });
 
-  it('resetOverlayDisplay 는 검출/점유/차량육면체·마스크 데이터를 삭제한다', () => {
+  it('resetOverlayDisplay 는 검출/LPD탐색/점유/차량육면체·마스크 데이터를 삭제한다', () => {
     const body = functionBody(app, 'resetOverlayDisplay');
     expect(body).toMatch(/state\.detectByKey\s*=\s*\{\}/);      // 검출 차량/번호판.
+    expect(body).toMatch(/state\.discoverByKey\s*=\s*\{\}/);    // discovery(앞면중심 LOOP) LPD quad — 미삭제 시 잔여 박스.
     expect(body).toMatch(/state\.occComputeByKey\s*=\s*\{\}/);  // 로직 점유(원).
     expect(body).toMatch(/state\.occByKey\s*=\s*\{\}/);         // 점유율 요약.
     expect(body).toMatch(/state\.vcuboidByKey\s*=\s*\{\}/);     // 차량 육면체 + seg 마스크.
   });
 
-  it('resetOverlayDisplay 는 바닥 ROI(placeRoi)와 #roi-floor 토글을 삭제/변경하지 않는다', () => {
+  // DB 소스만 예외: state.parkingSlotsByKey 는 renderSlotList 의 최종화 판정 소스라 삭제 금지 →
+  // 게이트(#roi-db)를 내려 화면에서만 내리고, 재체크 시 loadParkingSlots 로 되살린다(마스터 요청 2026-07-23).
+  it('resetOverlayDisplay 는 #roi-db 를 해제하되 DB 소스(parkingSlotsByKey)는 삭제하지 않는다', () => {
+    const body = functionBody(app, 'resetOverlayDisplay');
+    expect(body).toMatch(/\$\(['"]roi-db['"]\)\.checked\s*=\s*false/);
+    expect(body).not.toMatch(/state\.parkingSlotsByKey\s*=/); // 목록 최종화 판정 보존.
+  });
+
+  it('resetOverlayDisplay 는 바닥 ROI(placeRoi)와 표시 토글을 삭제/변경하지 않는다', () => {
     const body = functionBody(app, 'resetOverlayDisplay');
     expect(body).not.toMatch(/state\.placeRoi\s*=/);   // 바닥 파일 ROI 보존.
     expect(body).not.toContain("'roi-floor'");         // 바닥 토글 미변경.
-    expect(body).not.toContain('.checked = false');    // Hide(토글 off) 방식 금지 — 삭제여야 함.
+    // Hide(토글 off) 방식 금지 — 검출/점유/육면체는 삭제여야 한다(#roi-db 는 위 예외).
+    for (const id of ['roi-vehicle', 'roi-plate', 'roi-occupancy', 'roi-cuboid', 'roi-vcuboid', 'roi-mask']) {
+      expect(body).not.toContain(`'${id}'`);
+    }
   });
 
   it('resetOverlayDisplay 는 선택 해제 + 재렌더 + 목록 갱신한다', () => {

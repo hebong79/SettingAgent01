@@ -75,6 +75,10 @@ export function discoverView(status: { state?: string; done?: number; total?: nu
   runDisabled: boolean;
   polling: boolean;
 };
+export function alignProtocolToKind(
+  kind: 'sim' | 'hucoms',
+  protocol: 'unity-rpc' | 'unity-rest' | 'hucoms-v1.22' | undefined,
+): 'unity-rpc' | 'unity-rest' | 'hucoms-v1.22';
 export function capFrameKey(
   cam: number | string | null | undefined,
   preset: number | string | null | undefined,
