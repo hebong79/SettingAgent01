@@ -50,6 +50,7 @@ import {
   reindexPlaceSpace, // 전역 인덱스 재지정(밀어내기, 순수, R4)
   removePlaceSpace, // 주차면 삭제 + 1..N 재압축(순수, R4)
   settingsFormErrors, // 옵션 폼 클라이언트 검증(순수, URL/detPath 형식)
+  alignProtocolToKind, // 카메라 타입(kind) 전환 시 protocol 계열 정합(순수)
   buildDbTableModel, // DB 뷰어 표 모델(columns/rows → headers/cells, 순수, §08 F6)
   pickSelected, // 목록 갱신 후 이전 cam/preset 선택 유지(순수)
   camerasChanged, // 카메라/프리셋 집합 변경 감지 → 변경 시에만 재렌더(순수)
@@ -3240,6 +3241,8 @@ function captureCameraSourceEdits() {
   const source = editableCameraSources.find((item) => item.id === renderedCameraSourceId);
   if (!source) return;
   source.label = $('opt-camera-label').value.trim();
+  source.kind = $('opt-camera-kind').value === 'hucoms' ? 'hucoms' : 'sim'; // 콤보 선택을 데이터 모델(kind)로 확정.
+  source.protocol = alignProtocolToKind(source.kind, source.protocol); // kind 계열에 맞춰 protocol 정합(hucoms↔sim 전환 시).
   source.baseUrl = $('opt-camera-baseurl').value.trim();
   source.username = $('opt-camera-username').value.trim();
   source.rtspUrl = $('opt-camera-rtsp').value.trim();
@@ -3251,7 +3254,7 @@ function renderCameraSource(id) {
   const source = editableCameraSources.find((item) => item.id === id);
   renderedCameraSourceId = source?.id ?? '';
   $('opt-camera-label').value = source?.label ?? '';
-  $('opt-camera-kind').value = source ? (source.kind === 'sim' ? '시뮬레이터' : 'Hucoms 실카메라') : '';
+  $('opt-camera-kind').value = source?.kind === 'hucoms' ? 'hucoms' : 'sim'; // 콤보: 시뮬레이터(sim)/리얼카메라(hucoms).
   $('opt-camera-baseurl').value = source?.baseUrl ?? '';
   $('opt-camera-username').value = source?.username ?? '';
   $('opt-camera-password').value = source?.pendingPassword ?? '';
@@ -3817,6 +3820,11 @@ function wire() {
   $('opt-camera-selected').addEventListener('change', (event) => {
     captureCameraSourceEdits();
     renderCameraSource(event.target.value);
+  });
+  // 카메라 타입(시뮬레이터/리얼카메라) 전환 → 편집 확정 후 재렌더(RTSP 활성·note 갱신).
+  $('opt-camera-kind').addEventListener('change', () => {
+    captureCameraSourceEdits();
+    renderCameraSource(renderedCameraSourceId);
   });
 
   // Unity RPC 콘솔 + LLM 런타임 모델 전환.

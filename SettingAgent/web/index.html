@@ -378,7 +378,10 @@
                 <input id="opt-camera-label" type="text" autocomplete="off" />
               </label>
               <label class="settings-field">카메라 타입
-                <input id="opt-camera-kind" type="text" readonly />
+                <select id="opt-camera-kind">
+                  <option value="sim">시뮬레이터</option>
+                  <option value="hucoms">리얼카메라</option>
+                </select>
               </label>
               <label class="settings-field settings-field-wide">제어 URL
                 <input id="opt-camera-baseurl" type="text" autocomplete="off" placeholder="http://192.168.0.153:80" />

@@ -213,6 +213,18 @@ export function settingsFormErrors(form) {
 }
 
 /**
+ * 카메라 타입(kind) 전환 시 protocol 을 kind 계열에 맞춰 정합한다(순수).
+ * 런타임 소스 선택(sourceRegistry): sim+unity-rpc→RPC, sim+그외→REST, hucoms→RealPtz(protocol 무시).
+ * - hucoms → 'hucoms-v1.22'(유일 옵션).
+ * - sim → 기존이 unity 계열('unity-rpc'|'unity-rest')이면 유지(RPC/REST 선택 보존), 아니면 'unity-rpc'(기본 RPC 경로).
+ * sim 이면서 이미 unity 계열이면 무변경 → 실제 kind 전환(hucoms↔sim) 때만 바뀐다. 멱등.
+ */
+export function alignProtocolToKind(kind, protocol) {
+  if (kind === 'hucoms') return 'hucoms-v1.22';
+  return protocol === 'unity-rpc' || protocol === 'unity-rest' ? protocol : 'unity-rpc';
+}
+
+/**
  * 정밀수집 라이브 프레임의 유일 키(cam:preset:round). 최신 캡처 1건을 식별.
  * 직전 키와 같으면(라운드 사이 대기 중 동일 프레임) 재디코드를 스킵하는 데 쓴다.
  * 인자가 모두 null/undefined 면 null(식별 불가 → 스킵하지 않음).
