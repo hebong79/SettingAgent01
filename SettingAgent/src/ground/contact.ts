@@ -472,6 +472,144 @@ export function buildFootprint(fit: LineFit, axes: SlotAxes, opts: ContactOption
 // [8] 조립
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * 앞선 적합 실패 사유 → issues 문자열. 네 경우를 정확히 구분한다(조용한 실패 금지).
+ * §6-2 조기반환 평탄화(문자열 바이트 불변 — 중첩 삼항을 if 나열로 옮긴 것뿐).
+ * @internal 테스트 노출(공개 API 아님).
+ */
+export function lineFitRejectReason(r: LineFitReject, opts: ContactOptions): string {
+  if (r.kind === 'front-span')
+    return (
+      `앞범퍼 접지선 미검출(앞선 폭 스팬 ${r.frontSpanM.toFixed(2)}m < ${opts.minFrontSpanM}m, 앞선열 ${r.frontCount}개) — ` +
+      `flank 만 보임 / 원경 / 가림 과다 → 육면체 미산출`
+    );
+  if (r.kind === 'front-cols') return `앞선 밴드 열 ${r.frontCount}개(< ${opts.minFrontCols}) — 육면체 미산출`;
+  if (r.kind === 'front-mad')
+    return `앞선 잔차(MAD) ${r.frontMadM.toFixed(2)}m > ${opts.frontMadMaxM}m — 마스크 파편화(bridge) 의심 → 육면체 미산출`;
+  return '접지점 없음 — 육면체 미산출';
+}
+
+/**
+ * 차량 1대의 육면체 파이프라인([1]~[8]) — 성공 시 cuboid, 실패는 사유 담은 rejected(조용한 실패 금지).
+ * occluders/axes/g/opts 는 buildVehicleCuboids 가 프리셋 단위로 한 번 해결해 넘긴다.
+ */
+function buildOneCuboid(
+  i: number,
+  v: SegVehicle,
+  occluders: OtherMask[],
+  axes: SlotAxes,
+  g: GroundModel,
+  opts: ContactOptions,
+): { cuboid: VehicleCuboid } | { rejected: RejectedVehicle } {
+  const vIssues: string[] = [];
+
+  // #4 마스크 퇴화.
+  if (v.mask.length < 3 || polygonArea(v.mask) < opts.minMaskAreaPx) {
+    return { rejected: { boxIdx: i, vpdIdx: v.vpdIdx, issues: [`마스크 퇴화(점 ${v.mask.length}개/면적 부족) — 육면체 미산출`] } };
+  }
+
+  // [1] 하단 윤곽 → [2] 가림 배제. 자기 자신은 **참조 동일성**으로 제외한다
+  //     (occluderMasks 는 vehicles[i].mask 와 **같은 배열 참조**를 담아야 한다 — 라우트가 보장).
+  const cols = bottomContour(v.mask, opts.colStepPx);
+  const { valid, cleanRatio } = rejectOccluded(
+    cols,
+    occluders.filter((o) => o.poly !== v.mask),
+    opts.belowPx,
+    g.imgH,
+  );
+  // #5 유효 접지열 부족.
+  if (valid.length < opts.minContactCols) {
+    return {
+      rejected: {
+        boxIdx: i,
+        vpdIdx: v.vpdIdx,
+        issues: [`유효 접지열 ${valid.length}개(< ${opts.minContactCols}) — 가림 과다, 육면체 미산출`],
+      },
+    };
+  }
+  // #6 cleanRatio 낮음 → 산출은 하되 advisory(실측 하한 23%).
+  if (cleanRatio < opts.cleanRatioWarn) {
+    vIssues.push(`접지선 유효비율 ${(cleanRatio * 100).toFixed(0)}% — 가림 많음(육면체 정확도 낮을 수 있음)`);
+  }
+
+  // [3] 지면 역투영.
+  const groundPts: Array<{ a: number; b: number }> = [];
+  for (const c of valid) {
+    const X = backprojectToGround(c, g);
+    if (X) groundPts.push(toAxisCoords(X, axes));
+  }
+  // #7 전부 지평선 위.
+  if (groundPts.length === 0) {
+    return { rejected: { boxIdx: i, vpdIdx: v.vpdIdx, issues: ['접지점 지면 역투영 전량 실패(지평선 위) — 육면체 미산출'] } };
+  }
+
+  // [5] ★ 앞선 적합 v2(near-edge). 실패 사유는 전부 issues 문자열로 드러난다.
+  const fitRes = fitContactLine(groundPts, opts);
+  if ('reject' in fitRes) {
+    return { rejected: { boxIdx: i, vpdIdx: v.vpdIdx, issues: [lineFitRejectReason(fitRes.reject, opts)] } };
+  }
+  const fit = fitRes.fit;
+
+  // [6] footprint.
+  const fp = buildFootprint(fit, axes, opts);
+  // #10 폭 관측 실패(부족) 또는 F-1 클램프 발동 → W 출처 'prior' 강등. 원 스팬을 사유에 그대로 남긴다.
+  if (fp.wSource === 'prior') {
+    vIssues.push(
+      `폭 관측 스팬 ${fp.rawSpanM.toFixed(2)}m 가 허용대역 ` +
+        `[${(opts.priorW * opts.widthClampLoFactor).toFixed(2)}, ${(opts.priorW * opts.widthClampHiFactor).toFixed(2)}]m ` +
+        `밖 — 차폭 ${fp.widthM.toFixed(2)}m 로 강등(W:'prior'). 실루엣 현(chord) 오염 의심`,
+    );
+  }
+
+  // [7] 높이 = **차종 prior 고정**(관측 불가 — 위 [7] 블록의 논증). 강등이 아니라 **설계**다.
+  const heightM = opts.priorH;
+
+  // [8] 바닥 4점 재투영 → 정규화(뷰어 projectCuboid 입력). 하나라도 퇴화하면 미산출.
+  const px = projectCuboidPixels(fp.corners, heightM, g);
+  if (!px) {
+    return { rejected: { boxIdx: i, vpdIdx: v.vpdIdx, issues: ['육면체 재투영 퇴화(지평선 위/카메라 뒤) — 육면체 미산출'] } };
+  }
+  const floorQuad = px.slice(0, 4).map((p) => ({ x: p.x / g.imgW, y: p.y / g.imgH })) as NormalizedQuad;
+
+  // ★ G2b — 재투영 앞선(FL–FR) ↔ **앞선 밴드 접지열**의 수직 픽셀거리 중앙값. 관측과 모델을 같은 좌표계에서 비교.
+  //   (앞선 밴드로 재는 이유: flank 열은 정의상 앞선에서 멀다 — 전량으로 재면 정상 차량이 시야각 때문에 실패한다.)
+  const frontFitResid = frontFitResidPx(fit, axes, px[0], px[1], g);
+
+  // ⚠️ 참고 전용 IoU(성공 기준 아님 — AABB 뭉개기로 배치 오류에 둔감). 응답에만 싣는다.
+  const reprojIou = v.bboxPx ? cuboidBboxIou(px, v.bboxPx, g) : null;
+
+  const source: CuboidSource = {
+    position: 'observed',
+    yaw: 'slot-prior',
+    L: 'prior',
+    W: fp.wSource,
+    H: 'prior', // 관측 불가(차 ≠ 직육면체) — 타입이 리터럴로 못 박는다.
+  };
+  return {
+    cuboid: {
+      boxIdx: i,
+      vpdIdx: v.vpdIdx,
+      cls: v.cls,
+      confidence: v.confidence,
+      floorQuad,
+      floorGround: fp.corners,
+      frontGround: fp.front,
+      centerGround: fp.center,
+      heightM,
+      widthM: fp.widthM,
+      lengthM: opts.priorL,
+      source,
+      cleanRatio,
+      contactCols: valid.length,
+      frontCount: fit.frontCount,
+      frontMadM: fit.frontMadM,
+      frontFitResidPx: frontFitResid,
+      reprojIou,
+      issues: vIssues,
+    },
+  };
+}
+
 /** 프리셋 1개분 차량 육면체 산출. 실패는 전부 rejected/issues 로 드러난다(조용한 실패 금지). */
 export function buildVehicleCuboids(input: CuboidBuildInput): CuboidBuildResult {
   const { vehicles, slotPolysPx, ground: g, opts } = input;
@@ -495,125 +633,9 @@ export function buildVehicleCuboids(input: CuboidBuildInput): CuboidBuildResult 
   const occluders = (input.occluderMasks ?? vehicles.map((v) => v.mask)).map(toOtherMask);
 
   for (let i = 0; i < vehicles.length; i++) {
-    const v = vehicles[i];
-    const vIssues: string[] = [];
-
-    // #4 마스크 퇴화.
-    if (v.mask.length < 3 || polygonArea(v.mask) < opts.minMaskAreaPx) {
-      rejected.push({ boxIdx: i, vpdIdx: v.vpdIdx, issues: [`마스크 퇴화(점 ${v.mask.length}개/면적 부족) — 육면체 미산출`] });
-      continue;
-    }
-
-    // [1] 하단 윤곽 → [2] 가림 배제. 자기 자신은 **참조 동일성**으로 제외한다
-    //     (occluderMasks 는 vehicles[i].mask 와 **같은 배열 참조**를 담아야 한다 — 라우트가 보장).
-    const cols = bottomContour(v.mask, opts.colStepPx);
-    const { valid, cleanRatio } = rejectOccluded(
-      cols,
-      occluders.filter((o) => o.poly !== v.mask),
-      opts.belowPx,
-      g.imgH,
-    );
-    // #5 유효 접지열 부족.
-    if (valid.length < opts.minContactCols) {
-      rejected.push({
-        boxIdx: i,
-        vpdIdx: v.vpdIdx,
-        issues: [`유효 접지열 ${valid.length}개(< ${opts.minContactCols}) — 가림 과다, 육면체 미산출`],
-      });
-      continue;
-    }
-    // #6 cleanRatio 낮음 → 산출은 하되 advisory(실측 하한 23%).
-    if (cleanRatio < opts.cleanRatioWarn) {
-      vIssues.push(`접지선 유효비율 ${(cleanRatio * 100).toFixed(0)}% — 가림 많음(육면체 정확도 낮을 수 있음)`);
-    }
-
-    // [3] 지면 역투영.
-    const groundPts: Array<{ a: number; b: number }> = [];
-    for (const c of valid) {
-      const X = backprojectToGround(c, g);
-      if (X) groundPts.push(toAxisCoords(X, axes));
-    }
-    // #7 전부 지평선 위.
-    if (groundPts.length === 0) {
-      rejected.push({ boxIdx: i, vpdIdx: v.vpdIdx, issues: ['접지점 지면 역투영 전량 실패(지평선 위) — 육면체 미산출'] });
-      continue;
-    }
-
-    // [5] ★ 앞선 적합 v2(near-edge). 실패 사유는 전부 issues 문자열로 드러난다.
-    const fitRes = fitContactLine(groundPts, opts);
-    if ('reject' in fitRes) {
-      const r = fitRes.reject;
-      const why =
-        r.kind === 'front-span'
-          ? `앞범퍼 접지선 미검출(앞선 폭 스팬 ${r.frontSpanM.toFixed(2)}m < ${opts.minFrontSpanM}m, 앞선열 ${r.frontCount}개) — ` +
-            `flank 만 보임 / 원경 / 가림 과다 → 육면체 미산출`
-          : r.kind === 'front-cols'
-            ? `앞선 밴드 열 ${r.frontCount}개(< ${opts.minFrontCols}) — 육면체 미산출`
-            : r.kind === 'front-mad'
-              ? `앞선 잔차(MAD) ${r.frontMadM.toFixed(2)}m > ${opts.frontMadMaxM}m — 마스크 파편화(bridge) 의심 → 육면체 미산출`
-              : '접지점 없음 — 육면체 미산출';
-      rejected.push({ boxIdx: i, vpdIdx: v.vpdIdx, issues: [why] });
-      continue;
-    }
-    const fit = fitRes.fit;
-
-    // [6] footprint.
-    const fp = buildFootprint(fit, axes, opts);
-    // #10 폭 관측 실패(부족) 또는 F-1 클램프 발동 → W 출처 'prior' 강등. 원 스팬을 사유에 그대로 남긴다.
-    if (fp.wSource === 'prior') {
-      vIssues.push(
-        `폭 관측 스팬 ${fp.rawSpanM.toFixed(2)}m 가 허용대역 ` +
-          `[${(opts.priorW * opts.widthClampLoFactor).toFixed(2)}, ${(opts.priorW * opts.widthClampHiFactor).toFixed(2)}]m ` +
-          `밖 — 차폭 ${fp.widthM.toFixed(2)}m 로 강등(W:'prior'). 실루엣 현(chord) 오염 의심`,
-      );
-    }
-
-    // [7] 높이 = **차종 prior 고정**(관측 불가 — 위 [7] 블록의 논증). 강등이 아니라 **설계**다.
-    const heightM = opts.priorH;
-
-    // [8] 바닥 4점 재투영 → 정규화(뷰어 projectCuboid 입력). 하나라도 퇴화하면 미산출.
-    const px = projectCuboidPixels(fp.corners, heightM, g);
-    if (!px) {
-      rejected.push({ boxIdx: i, vpdIdx: v.vpdIdx, issues: ['육면체 재투영 퇴화(지평선 위/카메라 뒤) — 육면체 미산출'] });
-      continue;
-    }
-    const floorQuad = px.slice(0, 4).map((p) => ({ x: p.x / g.imgW, y: p.y / g.imgH })) as NormalizedQuad;
-
-    // ★ G2b — 재투영 앞선(FL–FR) ↔ **앞선 밴드 접지열**의 수직 픽셀거리 중앙값. 관측과 모델을 같은 좌표계에서 비교.
-    //   (앞선 밴드로 재는 이유: flank 열은 정의상 앞선에서 멀다 — 전량으로 재면 정상 차량이 시야각 때문에 실패한다.)
-    const frontFitResid = frontFitResidPx(fit, axes, px[0], px[1], g);
-
-    // ⚠️ 참고 전용 IoU(성공 기준 아님 — AABB 뭉개기로 배치 오류에 둔감). 응답에만 싣는다.
-    const reprojIou = v.bboxPx ? cuboidBboxIou(px, v.bboxPx, g) : null;
-
-    const source: CuboidSource = {
-      position: 'observed',
-      yaw: 'slot-prior',
-      L: 'prior',
-      W: fp.wSource,
-      H: 'prior', // 관측 불가(차 ≠ 직육면체) — 타입이 리터럴로 못 박는다.
-    };
-    cuboids.push({
-      boxIdx: i,
-      vpdIdx: v.vpdIdx,
-      cls: v.cls,
-      confidence: v.confidence,
-      floorQuad,
-      floorGround: fp.corners,
-      frontGround: fp.front,
-      centerGround: fp.center,
-      heightM,
-      widthM: fp.widthM,
-      lengthM: opts.priorL,
-      source,
-      cleanRatio,
-      contactCols: valid.length,
-      frontCount: fit.frontCount,
-      frontMadM: fit.frontMadM,
-      frontFitResidPx: frontFitResid,
-      reprojIou,
-      issues: vIssues,
-    });
+    const res = buildOneCuboid(i, vehicles[i], occluders, axes, g, opts);
+    if ('cuboid' in res) cuboids.push(res.cuboid);
+    else rejected.push(res.rejected);
   }
 
   return { cuboids, rejected, axes, issues };

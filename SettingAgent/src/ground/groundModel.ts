@@ -17,6 +17,7 @@ import type {
   GroundCameraInput,
   GroundModel,
   GroundOptions,
+  GroundPresetInput,
   Hom2,
   PixelQuad,
 } from './types.js';
@@ -443,6 +444,151 @@ function circDevMod90(b: number, mean: number): number {
   return d > 45 ? d - 90 : d;
 }
 
+/** 프리셋 1개의 1차 산출물(단독 f 로 깊이변 확정까지). estimateGroundModels 가 조립해 buildPresetModel 에 넘긴다. */
+export interface PresetStage {
+  preset: GroundPresetInput;
+  vps: ReturnType<typeof estimateGroundVPs>;
+  fSolo: number | null;
+  depthEdgePx: number;
+}
+
+/**
+ * 프리셋 1개 → 지면모델(또는 null). 공동추정 fovBaseV+zoom 으로 f 유도 → 평면 (n,d) → 정합 경보(가로/세로).
+ * 추정 실패(주차면 0·f²≤0·지평선 위 등)는 **null**(육면체 미표시). advisory 는 모델의 issues 에 담는다.
+ * @internal 테스트 노출(공개 API 아님).
+ */
+export function buildPresetModel(
+  s: PresetStage,
+  pooled: { fovBaseV: number; conf: number; issues: string[] } | null,
+  camIdx: number,
+  imgW: number,
+  imgH: number,
+  cx: number,
+  cy: number,
+  opts: GroundOptions,
+): GroundModel | null {
+  const { preset, vps, fSolo } = s;
+  const mIssues: string[] = [];
+  if (!vps) return null; // 쓸 수 있는 주차면 0 → 모델 없음(육면체 미표시).
+
+  // f: 공동추정 fovBaseV + zoom 으로 유도(원칙). 불가 시에만 프리셋 단독 f 로 강등.
+  let f: number | null = null;
+  if (pooled && preset.zoom != null && preset.zoom > 0) {
+    f = focalFromZoom(preset.zoom, pooled.fovBaseV, imgW, imgH);
+  }
+  if (f == null) {
+    f = fSolo;
+    if (f != null) mIssues.push('zoom/공동추정 불가 — 프리셋 단독 f 채택(얕은 tilt 에서 최대 35% 오차 위험)');
+  }
+  if (f == null || !(f > 0)) return null; // f²≤0 / 무한원 소실점 → 모델 없음.
+
+  const plane = buildGroundPlane(preset.quads, f, vps.v1, vps.v2, cx, cy, opts);
+  if (!plane) return null; // 지평선 위/법선 퇴화/스케일 불가 → 모델 없음.
+  const depthEdgePx = plane.depthFamily === 'a' ? vps.edgePxA : vps.edgePxB;
+
+  if (depthEdgePx < opts.minDepthEdgePx) {
+    mIssues.push(
+      `깊이변 ${depthEdgePx.toFixed(0)}px < ${opts.minDepthEdgePx}px — 조건수 낮음(f 는 프리셋 공동추정으로 보정)`,
+    );
+  }
+  // ★ 가로 정합 경보(metricErr). f/tilt 가 만점이어도 ROI 가 가로로 밀려 있으면 여기서만 잡힌다.
+  if (plane.metricErr > 0.05) {
+    mIssues.push(`주차면 metric 잔차 ${(plane.metricErr * 100).toFixed(1)}% — 경사/비평면 의심`);
+  } else if (plane.metricErr > ROI_MISALIGN_ERR) {
+    mIssues.push(
+      `주차면 metric 잔차 ${(plane.metricErr * 100).toFixed(2)}% — ROI 가로 정합 의심(실제 주차면 대비 평행이동/왜곡). ` +
+        `f·tilt 는 평행이동에 둔감하므로 이 지표로만 판별된다`,
+    );
+  }
+
+  // ★ 세로 정합 경보(tiltErrDeg). 세로 어긋남은 tilt 로 흡수돼 metricErr 가 못 잡는다 → PTZ tilt 와 대조.
+  const tiltDeg = Math.asin(Math.min(1, Math.max(-1, plane.n[2]))) / DEG;
+  const ptzTiltDeg = preset.tilt ?? null;
+  const tiltErrDeg = ptzTiltDeg == null ? null : tiltDeg - ptzTiltDeg;
+  if (ptzTiltDeg != null && tiltErrDeg != null && Math.abs(tiltErrDeg) > TILT_MISALIGN_DEG) {
+    mIssues.push(
+      `추정 tilt ${tiltDeg.toFixed(2)}° vs 카메라 PTZ tilt ${ptzTiltDeg.toFixed(2)}° (${tiltErrDeg.toFixed(2)}°) — ` +
+        `ROI 세로 정합 의심(세로 어긋남은 tilt 로 흡수되어 metric 잔차로는 안 잡힌다)`,
+    );
+  }
+
+  const condPart = clamp01(depthEdgePx / opts.minDepthEdgePx);
+  const fitPart = clamp01(1 - plane.metricErr / METRIC_ERR_MAX);
+  return {
+    camIdx,
+    presetIdx: preset.presetIdx,
+    imgW,
+    imgH,
+    zoom: preset.zoom ?? 0,
+    f,
+    n: plane.n,
+    d: plane.d,
+    tiltDeg,
+    ptzTiltDeg,
+    tiltErrDeg,
+    slotBearingDeg: preset.pan == null ? null : slotBearingDeg(plane.n, plane.dirA, preset.pan),
+    bearingDevDeg: null, // 프리셋 간 합의가 필요 → 아래 카메라 단위 검사에서 채운다.
+    dDevRel: null,
+    depthEdgePx,
+    metricErr: plane.metricErr,
+    conf: clamp01(condPart * fitPart),
+    source: 'file',
+    issues: mIssues,
+  };
+}
+
+/**
+ * §GROUND-SIMILARITY — 지면 위 닮음변환 검출(프리셋 간 불변량 대조). 모델의 issues·dDevRel·bearingDevDeg 를 채운다.
+ *
+ * metricErr(이미지 평행이동) 과 tiltErrDeg(세로) 만으로는 **지면 위 닮음변환을 전혀 못 잡는다.**
+ * ROI 를 지면에서 평행이동/회전/스케일해도 그것은 여전히 '어떤 카메라로 본 2.5×5.0m 직사각형 스트립의 상'
+ * 이기 때문이다(실측: 지면 3m/3m 이동 = 이미지 360px 인데 metricErr·tiltErr 둘 다 불변).
+ *
+ * 그중 2 자유도는 **카메라가 프리셋 사이에 움직이지 않는다**는 사실로 닫힌다(신규 입력 0):
+ *   · 균일스케일 → 카메라고 d 는 프리셋 불변량이어야 한다.
+ *   · 수직축회전 → 슬롯 방위(pan 보정)는 프리셋 불변량이어야 한다.
+ * 남는 2 자유도(지면 평행이동)는 **이미지 증거(노면 도색) 없이는 원리적으로 검출 불가** — 한계로 명시한다.
+ *
+ * ⚠️ 이 검사들은 **상대(프리셋 간) 불일치**만 잡는다. 전 프리셋이 똑같이 틀리면(예: 전역 균일스케일)
+ *    불변량이 여전히 일치하므로 침묵한다.  ⚠️ 프리셋이 1개면 대조 불가.
+ * @internal 테스트 노출(공개 API 아님).
+ */
+export function crossPresetSimilarityChecks(models: GroundModel[], issues: string[]): void {
+  if (models.length >= 2) {
+    // (1) 균일스케일: 카메라고 d 의 프리셋 간 일관성.
+    const dMed = median(models.map((m) => m.d));
+    if (dMed > 0) {
+      for (const m of models) {
+        m.dDevRel = (m.d - dMed) / dMed;
+        if (Math.abs(m.dDevRel) > D_DEV_REL) {
+          m.issues.push(
+            `카메라고 ${m.d.toFixed(2)}m 가 프리셋 합의 ${dMed.toFixed(2)}m 대비 ${(m.dDevRel * 100).toFixed(0)}% 벗어남 — ` +
+              `지면 균일스케일 오류 의심(ROI 가 실제보다 크거나 작다). metric 잔차·tilt 로는 안 잡힌다`,
+          );
+        }
+      }
+    }
+    // (2) 수직축회전: 슬롯 방위(mod 90)의 프리셋 간 일관성.
+    const withBearing = models.filter((m) => m.slotBearingDeg != null);
+    if (withBearing.length >= 2) {
+      const mean = circMeanMod90(withBearing.map((m) => m.slotBearingDeg as number));
+      for (const m of withBearing) {
+        m.bearingDevDeg = circDevMod90(m.slotBearingDeg as number, mean);
+        if (Math.abs(m.bearingDevDeg) > BEARING_DEV_DEG) {
+          m.issues.push(
+            `슬롯 방위 ${(m.slotBearingDeg as number).toFixed(1)}° 가 프리셋 합의 ${mean.toFixed(1)}° 대비 ` +
+              `${m.bearingDevDeg.toFixed(1)}° 벗어남 — ROI 수직축 회전 의심. metric 잔차·tilt 로는 안 잡힌다`,
+          );
+        }
+      }
+    } else {
+      issues.push('PTZ pan 미상 — 수직축 회전 검출 불가(camerapos 확인 필요)');
+    }
+  } else if (models.length === 1) {
+    issues.push('프리셋 1개 — 지면 닮음변환(균일스케일·수직축회전) 교차검증 불가');
+  }
+}
+
 /**
  * 카메라 1대의 전 프리셋 지면모델 산출(순수). fovBaseV 공동추정 → 프리셋별 f 유도 → 평면 (n,d).
  * 추정 실패 프리셋은 **모델을 내지 않는다**(육면체 미표시 — 조용히 틀린 육면체보다 안 그리는 게 낫다).
@@ -480,124 +626,11 @@ export function estimateGroundModels(
 
   const models: GroundModel[] = [];
   for (const s of stage) {
-    const { preset, vps, fSolo } = s;
-    const mIssues: string[] = [];
-    if (!vps) continue; // 쓸 수 있는 주차면 0 → 모델 없음(육면체 미표시).
-
-    // f: 공동추정 fovBaseV + zoom 으로 유도(원칙). 불가 시에만 프리셋 단독 f 로 강등.
-    let f: number | null = null;
-    if (pooled && preset.zoom != null && preset.zoom > 0) {
-      f = focalFromZoom(preset.zoom, pooled.fovBaseV, imgW, imgH);
-    }
-    if (f == null) {
-      f = fSolo;
-      if (f != null) mIssues.push('zoom/공동추정 불가 — 프리셋 단독 f 채택(얕은 tilt 에서 최대 35% 오차 위험)');
-    }
-    if (f == null || !(f > 0)) continue; // f²≤0 / 무한원 소실점 → 모델 없음.
-
-    const plane = buildGroundPlane(preset.quads, f, vps.v1, vps.v2, cx, cy, opts);
-    if (!plane) continue; // 지평선 위/법선 퇴화/스케일 불가 → 모델 없음.
-    const depthEdgePx = plane.depthFamily === 'a' ? vps.edgePxA : vps.edgePxB;
-
-    if (depthEdgePx < opts.minDepthEdgePx) {
-      mIssues.push(
-        `깊이변 ${depthEdgePx.toFixed(0)}px < ${opts.minDepthEdgePx}px — 조건수 낮음(f 는 프리셋 공동추정으로 보정)`,
-      );
-    }
-    // ★ 가로 정합 경보(metricErr). f/tilt 가 만점이어도 ROI 가 가로로 밀려 있으면 여기서만 잡힌다.
-    if (plane.metricErr > 0.05) {
-      mIssues.push(`주차면 metric 잔차 ${(plane.metricErr * 100).toFixed(1)}% — 경사/비평면 의심`);
-    } else if (plane.metricErr > ROI_MISALIGN_ERR) {
-      mIssues.push(
-        `주차면 metric 잔차 ${(plane.metricErr * 100).toFixed(2)}% — ROI 가로 정합 의심(실제 주차면 대비 평행이동/왜곡). ` +
-          `f·tilt 는 평행이동에 둔감하므로 이 지표로만 판별된다`,
-      );
-    }
-
-    // ★ 세로 정합 경보(tiltErrDeg). 세로 어긋남은 tilt 로 흡수돼 metricErr 가 못 잡는다 → PTZ tilt 와 대조.
-    const tiltDeg = Math.asin(Math.min(1, Math.max(-1, plane.n[2]))) / DEG;
-    const ptzTiltDeg = preset.tilt ?? null;
-    const tiltErrDeg = ptzTiltDeg == null ? null : tiltDeg - ptzTiltDeg;
-    if (ptzTiltDeg != null && tiltErrDeg != null && Math.abs(tiltErrDeg) > TILT_MISALIGN_DEG) {
-      mIssues.push(
-        `추정 tilt ${tiltDeg.toFixed(2)}° vs 카메라 PTZ tilt ${ptzTiltDeg.toFixed(2)}° (${tiltErrDeg.toFixed(2)}°) — ` +
-          `ROI 세로 정합 의심(세로 어긋남은 tilt 로 흡수되어 metric 잔차로는 안 잡힌다)`,
-      );
-    }
-
-    const condPart = clamp01(depthEdgePx / opts.minDepthEdgePx);
-    const fitPart = clamp01(1 - plane.metricErr / METRIC_ERR_MAX);
-    models.push({
-      camIdx: cam.camIdx,
-      presetIdx: preset.presetIdx,
-      imgW,
-      imgH,
-      zoom: preset.zoom ?? 0,
-      f,
-      n: plane.n,
-      d: plane.d,
-      tiltDeg,
-      ptzTiltDeg,
-      tiltErrDeg,
-      slotBearingDeg: preset.pan == null ? null : slotBearingDeg(plane.n, plane.dirA, preset.pan),
-      bearingDevDeg: null, // 프리셋 간 합의가 필요 → 아래 카메라 단위 검사에서 채운다.
-      dDevRel: null,
-      depthEdgePx,
-      metricErr: plane.metricErr,
-      conf: clamp01(condPart * fitPart),
-      source: 'file',
-      issues: mIssues,
-    });
+    const model = buildPresetModel(s, pooled, cam.camIdx, imgW, imgH, cx, cy, opts);
+    if (model) models.push(model);
   }
 
-  // ─────────────────────────────────────────────────────────────────────────────
-  // §GROUND-SIMILARITY — 지면 위 닮음변환 검출(프리셋 간 불변량 대조).
-  //
-  // metricErr(이미지 평행이동) 과 tiltErrDeg(세로) 만으로는 **지면 위 닮음변환을 전혀 못 잡는다.**
-  // ROI 를 지면에서 평행이동/회전/스케일해도 그것은 여전히 '어떤 카메라로 본 2.5×5.0m 직사각형 스트립의 상'
-  // 이기 때문이다(실측: 지면 3m/3m 이동 = 이미지 360px 인데 metricErr·tiltErr 둘 다 불변).
-  //
-  // 그중 2 자유도는 **카메라가 프리셋 사이에 움직이지 않는다**는 사실로 닫힌다(신규 입력 0):
-  //   · 균일스케일 → 카메라고 d 는 프리셋 불변량이어야 한다.
-  //   · 수직축회전 → 슬롯 방위(pan 보정)는 프리셋 불변량이어야 한다.
-  // 남는 2 자유도(지면 평행이동)는 **이미지 증거(노면 도색) 없이는 원리적으로 검출 불가** — 한계로 명시한다.
-  //
-  // ⚠️ 이 검사들은 **상대(프리셋 간) 불일치**만 잡는다. 전 프리셋이 똑같이 틀리면(예: 전역 균일스케일)
-  //    불변량이 여전히 일치하므로 침묵한다.  ⚠️ 프리셋이 1개면 대조 불가.
-  // ─────────────────────────────────────────────────────────────────────────────
-  if (models.length >= 2) {
-    // (1) 균일스케일: 카메라고 d 의 프리셋 간 일관성.
-    const dMed = median(models.map((m) => m.d));
-    if (dMed > 0) {
-      for (const m of models) {
-        m.dDevRel = (m.d - dMed) / dMed;
-        if (Math.abs(m.dDevRel) > D_DEV_REL) {
-          m.issues.push(
-            `카메라고 ${m.d.toFixed(2)}m 가 프리셋 합의 ${dMed.toFixed(2)}m 대비 ${(m.dDevRel * 100).toFixed(0)}% 벗어남 — ` +
-              `지면 균일스케일 오류 의심(ROI 가 실제보다 크거나 작다). metric 잔차·tilt 로는 안 잡힌다`,
-          );
-        }
-      }
-    }
-    // (2) 수직축회전: 슬롯 방위(mod 90)의 프리셋 간 일관성.
-    const withBearing = models.filter((m) => m.slotBearingDeg != null);
-    if (withBearing.length >= 2) {
-      const mean = circMeanMod90(withBearing.map((m) => m.slotBearingDeg as number));
-      for (const m of withBearing) {
-        m.bearingDevDeg = circDevMod90(m.slotBearingDeg as number, mean);
-        if (Math.abs(m.bearingDevDeg) > BEARING_DEV_DEG) {
-          m.issues.push(
-            `슬롯 방위 ${(m.slotBearingDeg as number).toFixed(1)}° 가 프리셋 합의 ${mean.toFixed(1)}° 대비 ` +
-              `${m.bearingDevDeg.toFixed(1)}° 벗어남 — ROI 수직축 회전 의심. metric 잔차·tilt 로는 안 잡힌다`,
-          );
-        }
-      }
-    } else {
-      issues.push('PTZ pan 미상 — 수직축 회전 검출 불가(camerapos 확인 필요)');
-    }
-  } else if (models.length === 1) {
-    issues.push('프리셋 1개 — 지면 닮음변환(균일스케일·수직축회전) 교차검증 불가');
-  }
+  crossPresetSimilarityChecks(models, issues);
 
   return { models, fovBaseV: pooled?.fovBaseV ?? null, issues };
 }
