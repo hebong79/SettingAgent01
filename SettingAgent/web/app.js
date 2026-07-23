@@ -2395,7 +2395,11 @@ async function pollPipeline() {
       $('cap-msg').textContent = msg;
       // 완료 팝업 — 수집 경로의 결과 모달(cap-result-modal)을 그대로 재사용한다. 진행바·메시지만으로는
       // 다른 패널을 보고 있던 사용자가 종료를 놓친다(수집은 이미 showCaptureResult 로 팝업을 띄운다).
-      if (prevPipelineStage !== 'done') showPreciseResult(pl, msg);
+      if (prevPipelineStage !== 'done') {
+        showPreciseResult(pl, msg);
+        // 정밀수집 종료 → DB 조립 매핑을 분석 탭이 즉시 반영(그 탭을 보고 있을 때만 1회).
+        if (!$('analyze-view').hidden) await renderAnalysis();
+      }
     } else {
       const c = pl.coverage;
       let msg = c ? `자동 셋업 완료 — 센터링 대상 ${c.targets} / 전체 ${c.totalSlots} · 미대상 ${c.uncovered}` : '자동 셋업 완료';
@@ -3296,26 +3300,29 @@ function autoNumberManual() {
   validateManualTable();
 }
 
-/** #7 저장: 전역ID 매핑 적용 → PUT(공유 saveMapping 경로). */
+/** #7 저장: 전역ID 매핑 적용 → POST /mapping/renumber(DB slot_id 재번호 + json 전파). */
 async function saveManualIndex() {
   if (!lastArtifact) return;
   const msg = $('an-manual-msg');
-  const res = applyManualGlobalIds(lastArtifact, collectManualIds());
+  const res = applyManualGlobalIds(lastArtifact, collectManualIds()); // 클라 검증 게이트 유지(빠른 피드백)
   if (!res.ok) {
     if (msg) msg.textContent = `저장 불가: ${res.error}`;
     return;
   }
+  // 현재 slotId=old, 입력 전역ID=new 순열을 매핑 배열로 파생(백엔드가 재검증).
+  const mapping = res.artifact.globalIndex.map((g) => ({ oldSlotId: Number(g.slotId), newSlotId: g.globalIdx }));
   try {
-    const r = await fetch(api('/mapping'), {
-      method: 'PUT',
+    const r = await fetch(api('/mapping/renumber'), {
+      method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(res.artifact),
+      body: JSON.stringify({ mapping }),
     });
     const data = await r.json().catch(() => ({}));
     if (r.ok) {
-      if (msg) msg.textContent = `저장됨: 전역 ${data.globalCount}`;
-      await loadMapping(); // 검수 탭 동기화.
-      await renderAnalysis(); // 분석 탭 재렌더(저장값 반영).
+      if (msg) msg.textContent = `재번호 저장됨: ${data.renumbered}면 (slot_ptz:${data.slotPtz})`;
+      await loadMapping(); // 검수 탭·state.mapping 재동기화.
+      await renderAnalysis(); // 분석 탭 재렌더(재번호 반영).
+      renderSlotList(); // 주차면 목록 재렌더.
     } else {
       if (msg) msg.textContent = `저장 실패: ${data.error ?? r.status}`;
     }

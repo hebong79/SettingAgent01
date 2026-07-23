@@ -227,6 +227,62 @@ export class SqliteStore {
     tx(rows);
   }
 
+  /**
+   * slot_id 라벨만 순열 재부여(전역번호 재번호). 전 컬럼 보존 — slot_id 외 어떤 값도 변형 금지.
+   * idMap 은 현 slot_id 전량을 정확히 커버하는 순열(라우트가 validateRenumberMapping 로 사전 검증).
+   * DELETE 후 re-INSERT 를 단일 트랜잭션 → 예외 시 자동 롤백(이전 상태 보존).
+   * 방어: (a) 모든 행의 slot_id 가 idMap 에 있어야 함(없으면 throw), (b) new id 고유(PK 충돌 throw),
+   *       (c) parking_evnt/parking_slot 비었음 확인(참조행 있으면 FK 위반 전에 throw — 데이터 보호).
+   * ★ 원시 SELECT 값 그대로 재삽입 — round5/updated_at 재적용 금지(재저장 드리프트 0).
+   * 반환: { changed } = 재삽입 행수.
+   */
+  renumberSlotIds(idMap: Map<number, number>): { changed: number } {
+    // 1) FK 방어: 참조 테이블이 비어 있어야 안전하게 전량 DELETE 가능(현행 writer 미작성 → 비어 있음 전제).
+    const evnt = (this.db.prepare(`SELECT COUNT(*) c FROM parking_evnt`).get() as { c: number }).c;
+    const pslot = (this.db.prepare(`SELECT COUNT(*) c FROM parking_slot`).get() as { c: number }).c;
+    if (evnt > 0 || pslot > 0) {
+      throw new Error('renumber blocked: parking_evnt/parking_slot not empty (FK refs)');
+    }
+
+    // 2) 원시 행 전량 SELECT(파싱 안 함 — TEXT/REAL 그대로 재삽입해 바이트 보존, round5 재적용 금지).
+    const rows = this.db
+      .prepare(
+        `SELECT slot_id, cam_id, preset_id, preset_slotidx, slot_roi, vpd_bbox, lpd_obb, occupy_range,
+                pan, tilt, zoom, centered, img1, slot3d_front_center, updated_at FROM slot_setup`,
+      )
+      .all() as Array<Record<string, unknown> & { slot_id: number }>;
+
+    // 3) 순열 방어(라우트 검증과 이중화 — 스토어 단독 호출/테스트 안전).
+    const seen = new Set<number>();
+    for (const r of rows) {
+      if (!idMap.has(r.slot_id)) throw new Error(`renumber: slot_id ${r.slot_id} not in idMap`);
+      const nid = idMap.get(r.slot_id)!;
+      if (seen.has(nid)) throw new Error(`renumber: duplicate new id ${nid}`); // PK 충돌 예방
+      seen.add(nid);
+    }
+
+    // 4) DELETE 전량 → re-INSERT(slot_id 만 new, 나머지 원시값 그대로) 단일 트랜잭션.
+    const del = this.db.prepare(`DELETE FROM slot_setup`);
+    const ins = this.db.prepare(
+      `INSERT INTO slot_setup
+         (slot_id, cam_id, preset_id, preset_slotidx, slot_roi, vpd_bbox, lpd_obb, occupy_range,
+          pan, tilt, zoom, centered, img1, slot3d_front_center, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const tx = this.db.transaction((list: typeof rows) => {
+      del.run();
+      for (const r of list) {
+        ins.run(
+          idMap.get(r.slot_id), r.cam_id, r.preset_id, r.preset_slotidx, r.slot_roi,
+          r.vpd_bbox, r.lpd_obb, r.occupy_range, r.pan, r.tilt, r.zoom,
+          r.centered, r.img1, r.slot3d_front_center, r.updated_at,
+        );
+      }
+      return list.length;
+    });
+    return { changed: tx(rows) };
+  }
+
   /** 전체 조회(뷰어/`/capture/slots` 소스). *_json 파싱 + presetKey 파생. */
   getSlotSetup(): SlotSetupView[] {
     const rows = this.db

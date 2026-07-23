@@ -26,8 +26,14 @@ import type { SetupPipeline } from '../pipeline/SetupPipeline.js';
 import { registerViewerRoutes } from '../viewer/routes.js';
 import type { CameraSource } from '../viewer/CameraSource.js';
 import { validateArtifactBody } from './artifactSchema.js';
+import { buildArtifactFromSlotSetup } from '../setup/artifactFromSlotSetup.js';
+import type { SetupArtifact } from '../domain/types.js';
 import type { SaveStore } from '../store/SaveStore.js';
 import type { CRpcClient } from '../clients/CRpcClient.js';
+import { validateRenumberMapping } from '../setup/renumberMapping.js';
+import { renumberSlotPtzFile } from '../calibrate/slotPtzRenumber.js';
+import { writeSetupResultFiles } from '../store/setupResult.js';
+import { logger } from '../util/logger.js';
 
 const TargetSchema = z.object({
   camIdx: z.number().int().positive(),
@@ -37,6 +43,17 @@ const TargetSchema = z.object({
 });
 
 const RunBodySchema = z.object({ targets: z.array(TargetSchema).min(1) });
+
+const RenumberBodySchema = z.object({
+  mapping: z
+    .array(
+      z.object({
+        oldSlotId: z.number().int().positive(),
+        newSlotId: z.number().int().positive(),
+      }),
+    )
+    .min(1),
+});
 
 /**
  * PUT /mapping 공유 핸들러(헤드리스·뷰어 동일 로직).
@@ -113,6 +130,19 @@ export interface ApiDeps {
  */
 export function buildServer(deps: ApiDeps): FastifyInstance {
   const app = Fastify({ logger: false });
+
+  /**
+   * 매핑 소스 결정: 파일에 slots 가 있으면 파일 우선(수동 PUT /mapping 편집 보존),
+   * 없거나 비면 slot_setup(DB) 즉석 조립. 파일·DB 모두 비면 null(→404).
+   * ★ 순수 읽기(getSlotSetup)만 — replaceSlotSetup/finalize 미호출(파괴 금지).
+   */
+  function resolveMapping(): SetupArtifact | null {
+    const file = deps.repo.loadArtifact();
+    if (file && Array.isArray(file.slots) && file.slots.length > 0) return file; // 파일 우선
+    const views = deps.sqlite ? deps.sqlite.getSlotSetup() : [];
+    if (views.length > 0) return buildArtifactFromSlotSetup(views); // DB 폴백
+    return null; // 404
+  }
 
   app.get('/health', async () => {
     const [cam, vpd] = await Promise.all([deps.camera.health(), deps.vpd.health()]);
@@ -232,7 +262,7 @@ export function buildServer(deps: ApiDeps): FastifyInstance {
   });
 
   app.get('/mapping', async (_req, reply) => {
-    const artifact = deps.repo.loadArtifact();
+    const artifact = resolveMapping();
     if (!artifact) {
       reply.code(404);
       return { error: 'no setup artifact' };
@@ -242,6 +272,67 @@ export function buildServer(deps: ApiDeps): FastifyInstance {
 
   // 편집된 SetupArtifact 영속화(주차면 ROI 편집·전역 인덱스 수동 매핑). GET /mapping 은 불변.
   app.put('/mapping', async (req, reply) => saveMappingHandler(deps.repo, req.body, reply));
+
+  /**
+   * 전역번호 재번호(A안): 수동매핑 → DB slot_id 재번호 + json 전파.
+   * 처리 순서(원자성): 검증(실패→400·DB무변경) → DB 재번호(트랜잭션·all-or-nothing) →
+   * slot_ptz → setup_result → setup_artifact. DB 커밋이 진실의 기준; 파일 3종은 순차 best-effort.
+   * 헤드리스 POST /mapping/renumber + 뷰어 /viewer/api/mapping/renumber 가 이 핸들러를 공유한다.
+   */
+  function renumberHandler(body: unknown, reply: { code: (c: number) => void }): unknown {
+    if (!deps.sqlite) {
+      reply.code(501);
+      return { error: 'sqlite not configured' };
+    }
+    const parsed = RenumberBodySchema.safeParse(body);
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: 'invalid body', detail: parsed.error.flatten() };
+    }
+
+    // 1) 검증(순수). currentIds = DB 현재 slot_id 전량.
+    const currentIds = deps.sqlite.getSlotSetup().map((s) => s.slotId);
+    const v = validateRenumberMapping(currentIds, parsed.data.mapping);
+    if (!v.ok) {
+      reply.code(400);
+      return { error: v.error }; // ★ DB 무변경(원자성)
+    }
+
+    // 2) DB 재번호(트랜잭션·전 컬럼 보존). throw 시 롤백.
+    let changed: number;
+    try {
+      changed = deps.sqlite.renumberSlotIds(v.idMap!).changed;
+    } catch (e) {
+      reply.code(500);
+      return { error: 'renumber failed', detail: String(e) };
+    }
+
+    // 3) 파일 전파(각 격리·best-effort — DB 커밋 후엔 파일 실패가 요청을 실패시키지 않음).
+    let slotPtz: 'written' | 'skipped' = 'skipped';
+    if (deps.calibrate?.outFile) slotPtz = renumberSlotPtzFile(deps.calibrate.outFile, v.idMap!);
+
+    let setupResult: { archive: string | null; fixed: string | null } | null = null;
+    if (deps.saveStore) {
+      try {
+        const w = writeSetupResultFiles(deps.sqlite.getSlotSetup(), deps.saveStore);
+        setupResult = { archive: w.archive, fixed: w.fixed };
+      } catch (e) {
+        logger.warn({ err: e }, 'setup_result 재생성 실패(격리 — DB 정본은 무관)');
+      }
+    }
+
+    let artifactSaved = false;
+    try {
+      deps.repo.saveArtifact(buildArtifactFromSlotSetup(deps.sqlite.getSlotSetup()));
+      artifactSaved = true;
+    } catch (e) {
+      logger.warn({ err: e }, 'setup_artifact 재빌드 저장 실패(격리 — DB 정본은 무관)');
+    }
+
+    return { ok: true, renumbered: changed, slotPtz, setupResult, artifactSaved };
+  }
+
+  app.post('/mapping/renumber', async (req, reply) => renumberHandler(req.body, reply));
 
   // 장기 관측·반복 수집(/capture/*). 의존성 주입 시에만 등록(가산, 기존 라우트 불변).
   if (deps.captureJob && deps.finalizer && deps.sqlite && deps.capture) {
@@ -295,9 +386,9 @@ export function buildServer(deps: ApiDeps): FastifyInstance {
     const viewer = deps.viewer;
     const sources = deps.sources;
     app.register(async (instance) => {
-      // /viewer/api/mapping 직접 읽기(프록시 폐기) — repo.loadArtifact() 그대로 반환, 404 보존.
+      // /viewer/api/mapping 직접 읽기(프록시 폐기) — 파일 우선, 없으면 DB 즉석 조립(resolveMapping), 404 보존.
       instance.get('/viewer/api/mapping', async (_req, reply) => {
-        const artifact = deps.repo.loadArtifact();
+        const artifact = resolveMapping();
         if (!artifact) {
           reply.code(404);
           return { error: 'no setup artifact' };
@@ -306,6 +397,8 @@ export function buildServer(deps: ApiDeps): FastifyInstance {
       });
       // 편집된 SetupArtifact 영속화(뷰어 컨텍스트). 헤드리스 PUT /mapping 과 동일 로직.
       instance.put('/viewer/api/mapping', async (req, reply) => saveMappingHandler(deps.repo, req.body, reply));
+      // 전역번호 재번호(뷰어 컨텍스트). 헤드리스 POST /mapping/renumber 와 동일 closure 핸들러 공유.
+      instance.post('/viewer/api/mapping/renumber', async (req, reply) => renumberHandler(req.body, reply));
       // 카메라 라우트 + 정적 SPA(와일드카드는 내부에서 API 라우트 뒤에 register).
       // rpc(Unity 프록시)·llm(모델 선택기=brain)은 주입 시에만 해당 라우트 등록(가산).
       await registerViewerRoutes(instance, {
