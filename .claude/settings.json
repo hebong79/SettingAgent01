@@ -1,4 +1,7 @@
 {
+  "worktree": {
+    "baseRef": "head"
+  },
   "permissions": {
     "allow": [
       "Bash(node -e 'const c=require\\(\"./config/tools.config.json\"\\);console.log\\(\"camera.baseUrl:\",c.camera?.baseUrl\\);console.log\\(\"unityRpc:\",JSON.stringify\\(c.unityRpc\\)\\);console.log\\(\"viewer.controlToken:\",JSON.stringify\\(c.viewer?.controlToken\\)\\)')",
@@ -63,7 +66,15 @@
       "Bash(curl -s -m 30 \"http://127.0.0.1:13020/calibrate/frame\" -o frame_plate.jpg -w \"http:%{http_code} bytes:%{size_download}\\\\n\")",
       "Bash(curl -s -m 40 \"http://127.0.0.1:13020/viewer/api/snapshot?cam=1&preset=1&mode=manual&pan=24.565325216166368&tilt=9.890687792751235&zoom=12.454915916313587\" -o verify_zoom.jpg -w \"http:%{http_code} bytes:%{size_download}\\\\n\")",
       "Bash(git reset *)",
-      "Bash(git merge --no-ff fix/revert-point-aim -m 'merge: 클릭 개별 센터라이징\\(번호판 기준\\) 확정 — 클릭지점 조준 폐기 *)"
+      "Bash(git merge --no-ff fix/revert-point-aim -m 'merge: 클릭 개별 센터라이징\\(번호판 기준\\) 확정 — 클릭지점 조준 폐기 *)",
+      "Bash(git push *)",
+      "Bash(curl -s -m 3 -X POST http://localhost:13110/rpc -H 'content-type: application/json' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"cam.getPTZ\",\"params\":{\"camId\":1}}')",
+      "Bash(curl -s -m 3 \"http://localhost:13020/viewer/api/cameras\")",
+      "Bash(curl -s -m 15 \"http://localhost:13020/viewer/api/snapshot?cam=1&preset=1&mode=preset\" -o A.jpg -D -)",
+      "Bash(curl -s -m 5 -X POST http://localhost:13110/rpc -H 'content-type: application/json' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"cam.getPTZ\",\"params\":{\"camId\":1}}')",
+      "Bash(grep -n \"fetch\\('/capture\\\\|fetch\\(\\\\`/capture\\\\|api\\('/capture\\\\|/capture/saves\" web/app.js)",
+      "Bash(node --input-type=module -e ' *)",
+      "Bash(echo \"---exit:$?\")"
     ],
     "additionalDirectories": [
       "C:\\Users\\hdw-goback\\AppData\\Local\\Temp\\claude\\d--Work-Parking3D-AgentVLA-ParkAgent\\a858760a-43a9-44f5-b047-dfd3b047b\\scratchpad"
