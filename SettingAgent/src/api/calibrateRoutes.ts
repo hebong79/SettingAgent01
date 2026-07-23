@@ -2,10 +2,9 @@ import { existsSync, readFileSync } from 'node:fs';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { PtzCalibrator } from '../calibrate/PtzCalibrator.js';
-import type { ICameraClient } from '../clients/CameraClient.js';
-import { CameraSourceClient } from '../clients/CameraSourceClient.js';
 import type { CameraSource } from '../viewer/CameraSource.js';
 import type { ToolsConfig } from '../config/toolsConfig.js';
+import { sendJpeg, resolveSourceCamera } from './routeHelpers.js';
 
 const StartBodySchema = z.object({ slotIds: z.array(z.string()).optional() }).default({});
 
@@ -63,15 +62,9 @@ export function registerCalibrateRoutes(app: FastifyInstance, deps: CalibrateRou
     }
     // source 지정 시 그 소스로만 명령한다(뷰어에서 보고 있는 카메라 = 명령 대상).
     // 요청마다 얇은 어댑터를 새로 만든다(상태 없음). 미지정이면 기존 파이프라인 카메라 그대로.
-    let camera: ICameraClient | undefined;
-    if (p.data.source) {
-      const src = deps.cameraCfg ? deps.sources?.get(p.data.source) : undefined;
-      if (!src) {
-        reply.code(400);
-        return { error: 'source not found' };
-      }
-      camera = new CameraSourceClient(src, deps.cameraCfg!);
-    }
+    const resolved = resolveSourceCamera(deps, p.data.source, reply);
+    if (!resolved) return;
+    const camera = resolved.camera;
     try {
       if (p.data.mode === 'point') {
         // 클릭 지점 조준: 검출·저장 없이 그 지점을 화면중앙으로(zoom 불변).
@@ -98,12 +91,11 @@ export function registerCalibrateRoutes(app: FastifyInstance, deps: CalibrateRou
       reply.code(404);
       return { error: 'no frame' };
     }
-    reply
-      .header('Content-Type', 'image/jpeg')
-      .header('Cache-Control', 'no-store')
-      .header('X-Cal-Cam', String(latest.camIdx))
-      .header('X-Cal-Preset', String(latest.presetIdx));
-    return reply.send(latest.jpeg);
+    sendJpeg(reply, latest.jpeg, {
+      'X-Cal-Cam': String(latest.camIdx),
+      'X-Cal-Preset': String(latest.presetIdx),
+    });
+    return reply;
   });
 
   app.get('/calibrate/result', async (_req, reply) => {
