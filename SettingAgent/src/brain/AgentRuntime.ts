@@ -117,6 +117,19 @@ export class AgentRuntime implements SetupBrain, LlmModelSelector {
     }
   }
 
+  /** Ollama 네이티브 엔드포인트: active.baseUrl 의 /v1 을 벗겨 /api/chat 유도. */
+  private ollamaEndpoint(): string {
+    return this.active.baseUrl.replace(/\/v1\/?$/, '') + '/api/chat';
+  }
+
+  /** 공통 요청 헤더: content-type + (apiKeyEnv 설정 시) Bearer authorization. */
+  private authHeaders(): Record<string, string> {
+    const apiKey = this.active.apiKeyEnv ? process.env[this.active.apiKeyEnv] : undefined;
+    const headers: Record<string, string> = { 'content-type': 'application/json' };
+    if (apiKey) headers['authorization'] = `Bearer ${apiKey}`;
+    return headers;
+  }
+
   /**
    * LLM 강제 구동(warm-up/preload). Ollama 네이티브 `/api/chat` 에 keep_alive 를 실어 모델을 미리 로드/유지한다.
    * 콜드 로드(수십 초)로 인한 실호출 타임아웃·폴백을 방지한다. best-effort — 성공 true, 비활성/실패 false(throw 안 함).
@@ -130,14 +143,11 @@ export class AgentRuntime implements SetupBrain, LlmModelSelector {
       return false;
     }
     // 엔드포인트: warmup.url 우선, 없으면 baseUrl 의 /v1 을 벗겨 /api/chat 유도.
-    const baseChat = this.active.baseUrl.replace(/\/v1\/?$/, '') + '/api/chat';
-    const endpoint = w?.url ?? baseChat;
+    const endpoint = w?.url ?? this.ollamaEndpoint();
     const model = w?.model ?? this.active.model;
     const keepAlive = w?.keepAlive ?? '24h';
     const timeoutMs = w?.timeoutMs ?? 120000;
-    const apiKey = this.active.apiKeyEnv ? process.env[this.active.apiKeyEnv] : undefined;
-    const headers: Record<string, string> = { 'content-type': 'application/json' };
-    if (apiKey) headers['authorization'] = `Bearer ${apiKey}`;
+    const headers = this.authHeaders();
     const body = JSON.stringify({
       model,
       messages: [{ role: 'user', content: '.' }],
@@ -402,10 +412,8 @@ export class AgentRuntime implements SetupBrain, LlmModelSelector {
 
   /** Ollama 네이티브 `/api/chat` 전송(think:false 지원). 이미지는 messages[user].images=[b64]. */
   private async chatNative(system: string, user: string, imageBase64?: string, json = false, timeoutMs?: number): Promise<string | null> {
-    const endpoint = this.active.baseUrl.replace(/\/v1\/?$/, '') + '/api/chat';
-    const apiKey = this.active.apiKeyEnv ? process.env[this.active.apiKeyEnv] : undefined;
-    const headers: Record<string, string> = { 'content-type': 'application/json' };
-    if (apiKey) headers['authorization'] = `Bearer ${apiKey}`;
+    const endpoint = this.ollamaEndpoint();
+    const headers = this.authHeaders();
     const userMsg: Record<string, unknown> = { role: 'user', content: user };
     if (imageBase64) userMsg.images = [imageBase64];
     const body = JSON.stringify({

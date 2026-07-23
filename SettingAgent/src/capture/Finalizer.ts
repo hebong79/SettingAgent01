@@ -71,6 +71,41 @@ export interface LogicOccupancyPreset {
 }
 
 /**
+ * (best-effort, R4) 로직 점유(바디 전달분) vs LLM 점유(캡처 중 인메모리 occByPreset) 1회 비교.
+ * 새 LLM 호출 없음 — 스냅샷의 축소 occupancy 재사용(구 getLatestOccupancy DB 대체, 설계서 §2.3).
+ * graceful skip: 로직 점유 미전달, 비교 가능한 면 0개 → undefined.
+ * @internal 테스트 노출용(공개 API 아님).
+ */
+export function compareOccupancyAgreement(
+  snapshot: CaptureSnapshot,
+  logicOccupancy: LogicOccupancyPreset[] | undefined,
+): FinalizeResult['occupancyAgreement'] {
+  if (!logicOccupancy?.length) return undefined;
+  const llmSpacesByKey = new Map<string, Array<{ id: number; occupied: boolean }>>();
+  for (const [key, j] of snapshot.occByPreset) {
+    llmSpacesByKey.set(key, j.spaces.map((s) => ({ id: s.id, occupied: s.occupied })));
+  }
+  let comparedPresets = 0;
+  let comparedSpaces = 0;
+  let agreedSpaces = 0;
+  for (const preset of logicOccupancy) {
+    const llmSpaces = llmSpacesByKey.get(preset.key);
+    if (!llmSpaces) continue;
+    comparedPresets += 1;
+    for (const sp of preset.spaces) {
+      const match = llmSpaces.find((s) => s.id === sp.idx);
+      if (!match) continue;
+      comparedSpaces += 1;
+      if (match.occupied === sp.occupied) agreedSpaces += 1;
+    }
+  }
+  if (comparedSpaces > 0) {
+    return { comparedPresets, comparedSpaces, agreedSpaces, agreementRate: agreedSpaces / comparedSpaces };
+  }
+  return undefined;
+}
+
+/**
  * 전체 집계 + (LLM 활성 시) 최종 보조 판정 → SetupArtifact 조립 → Repository.saveArtifact + artifact_snapshot 기록.
  * 좌표 불변식: ParkingSlot.roi = 집계 대표 bbox(+패딩). LLM 은 중복/라벨/거부 메타만(좌표 생성·수정 금지).
  * LLM 비활성/실패 시 결정형 강등(rejected 제외, zone=cam{N}, report 없음). 설계서 §4.4.
@@ -124,32 +159,11 @@ export class Finalizer {
       }
     }
 
-    // 2b) (best-effort, R4) 로직 점유(바디 전달분) vs LLM 점유(캡처 중 인메모리 occByPreset) 1회 비교.
-    // 새 LLM 호출 없음 — 스냅샷의 축소 occupancy 재사용(구 getLatestOccupancy DB 대체, 설계서 §2.3).
-    // graceful skip 조건: LLM 전면 비활성, 로직 점유 바디 미전달, 저장분 없음, 비교 가능한 면 0개.
+    // 2b) (best-effort, R4) 로직 점유(바디 전달분) vs LLM 점유 1회 비교.
+    // graceful skip 조건: LLM 전면 비활성 → 미비교. 나머지 조건은 compareOccupancyAgreement 내부.
     let occupancyAgreement: FinalizeResult['occupancyAgreement'];
-    if (this.deps.brain?.enabled && opts?.logicOccupancy?.length) {
-      const llmSpacesByKey = new Map<string, Array<{ id: number; occupied: boolean }>>();
-      for (const [key, j] of snapshot.occByPreset) {
-        llmSpacesByKey.set(key, j.spaces.map((s) => ({ id: s.id, occupied: s.occupied })));
-      }
-      let comparedPresets = 0;
-      let comparedSpaces = 0;
-      let agreedSpaces = 0;
-      for (const preset of opts.logicOccupancy) {
-        const llmSpaces = llmSpacesByKey.get(preset.key);
-        if (!llmSpaces) continue;
-        comparedPresets += 1;
-        for (const sp of preset.spaces) {
-          const match = llmSpaces.find((s) => s.id === sp.idx);
-          if (!match) continue;
-          comparedSpaces += 1;
-          if (match.occupied === sp.occupied) agreedSpaces += 1;
-        }
-      }
-      if (comparedSpaces > 0) {
-        occupancyAgreement = { comparedPresets, comparedSpaces, agreedSpaces, agreementRate: agreedSpaces / comparedSpaces };
-      }
+    if (this.deps.brain?.enabled) {
+      occupancyAgreement = compareOccupancyAgreement(snapshot, opts?.logicOccupancy);
     }
 
     // 3) LLM rejects/duplicates 반영(좌표 불변 — 채택 여부 메타만).
@@ -191,64 +205,14 @@ export class Finalizer {
     // 구 insertArtifactSnapshot(artifact_snapshot 테이블) 폐기(설계서 §2.3) — 정본은 repo.saveArtifact(setup_artifact.json).
 
     // 파일 바닥ROI(PtzCamRoi.json) 기준 슬롯 셋업(slot_setup) 전량 교체(§06 · best-effort — 파일 없음/검출 없음 시 graceful skip,
-    // artifact 흐름 불변). VPD/LPD/점유영역은 accepted(집계 대표) 재사용(D1) + pointInPolygon 공간배정(D2/D3).
-    // ★ 단일 트랜잭션 교체(실패 자동 롤백 → 이전 확정본 보존, 설계서 배경 A.3).
-    // pan/tilt/zoom/centered/img1 은 센터라이징(PtzCalibrator) 산출 — finalize 시점엔 미보유 → null/0(이후 upsertSlotCentering 채움).
+    // artifact 흐름 불변). ★ 단일 트랜잭션 교체(실패 자동 롤백 → 이전 확정본 보존, 설계서 배경 A.3).
     try {
       const place = await loadNormalizedPlaceRoi(this.deps.placeRoiFile);
       if (place) {
-        // 검출 hit 없는 슬롯이 직전 정상 vpd/lpd/occupy 를 null 로 파괴하지 않도록 기존 slot_setup 보존용 조회(slotId 키).
-        const existingBySlot = new Map<number, SlotSetupView>();
-        for (const v of this.deps.store.getSlotSetup()) existingBySlot.set(v.slotId, v);
         // 프리셋별 지면모델 1회 산출(ground-model 라우트와 동일 조합). 3D 앞면 중심 저장의 유일 근거.
         // ground 미주입/disabled·파일 부재·추정 실패 → 빈 맵/키 부재 → 해당 슬롯 front_center=null 강등(finalize 불변).
         const modelByKey = await this.buildGroundModelMap();
-        const byPresetAcc = new Map<string, AggregatedSlot[]>();
-        for (const s of accepted) {
-          let arr = byPresetAcc.get(s.presetKey);
-          if (!arr) byPresetAcc.set(s.presetKey, (arr = []));
-          arr.push(s);
-        }
-        const rows: SlotSetupRow[] = [];
-        // slot_id 는 **전역번호(1..N)** — 뷰어(web/core.js normalizeGlobalIdx)와 동일 규칙으로
-        // 정규화(Unity 생성 0-based 파일도 재부여). 파일이 이미 1..N 이면 무변경(멱등). setup_artifact.globalIndex 와 정합(§2-5).
-        const byPresetPlace = normalizeGlobalIdx(place.byPreset);
-        const updatedAt = this.now();
-        for (const [key, spaces] of byPresetPlace) {
-          const [camIdx, presetIdx] = key.split(':').map(Number);
-          const clusters = byPresetAcc.get(key) ?? [];
-          const model = modelByKey.get(key) ?? null; // 지면모델 부재/퇴화 → 이 프리셋 front_center 전부 null.
-          // 프리셋 단위 상호배타 전역-그리디 1:1 배정(설계서 §2/§3). 선착순 find() 대신 사전 배정.
-          const assigned = assignClustersToSpaces(spaces, clusters, { centroidGate: this.deps.cfg.slotAssignGate });
-          spaces.forEach((sp, i) => {
-            const hit = assigned.get(i) ?? null;
-            const prev = existingBySlot.get(sp.idx); // hit 없을 때 기존 검출값 보존(빈 finalize 파괴 방지).
-            // 3D 앞면 중심 = 슬롯 quad + 지면모델 + 캐노니컬 높이(기하 소스 — 검출 무관, 매 finalize 재계산).
-            const front = model ? slotFrontCenter(sp.points, model, H_CONST) : null;
-            // 점유영역(발자국) = 배정 차량 rect + 번호판 quad 로 결정형 사변형(부재 시 null).
-            const occupyRange = hit
-              ? buildPlateAnchoredQuad({ x: hit.x, y: hit.y, w: hit.w, h: hit.h }, hit.plateQuad ?? undefined)
-              : null;
-            rows.push({
-              slotId: sp.idx,
-              camId: camIdx,
-              presetId: presetIdx,
-              presetSlotIdx: i + 1, // 프리셋 내 배열순 1-based.
-              slotRoi: stringify5(sp.points),
-              vpdBbox: hit ? stringify5({ x: hit.x, y: hit.y, w: hit.w, h: hit.h }) : (prev?.vpd ? stringify5(prev.vpd) : null),
-              lpdObb: hit?.plateQuad ? stringify5(hit.plateQuad) : (prev?.lpd ? stringify5(prev.lpd) : null),
-              occupyRange: occupyRange ? stringify5(occupyRange) : (prev?.occupyRange ? stringify5(prev.occupyRange) : null),
-              pan: null,
-              tilt: null,
-              zoom: null,
-              centered: 0,
-              img1: null,
-              slot3dFrontCenter: front ? stringify5(front) : null,
-              updatedAt,
-            });
-          });
-        }
-        this.deps.store.replaceSlotSetup(rows);
+        this.persistSlotSetupFromPlace(place, accepted, modelByKey);
       }
     } catch (err) {
       logger.warn({ err }, '슬롯 셋업(slot_setup) 저장 실패'); // 격리 — 정본 artifact 는 이미 저장됨.
@@ -269,6 +233,71 @@ export class Finalizer {
       globalCount: globalIndex.length,
       ...(occupancyAgreement ? { occupancyAgreement } : {}),
     };
+  }
+
+  /**
+   * 파일 바닥ROI(place) 기준 slot_setup 전량 교체 행 조립 + replaceSlotSetup(단일 트랜잭션).
+   * VPD/LPD/점유영역은 accepted(집계 대표) 재사용(D1) + 프리셋 단위 상호배타 1:1 배정(D2/D3).
+   * pan/tilt/zoom/centered/img1 은 센터라이징(PtzCalibrator) 산출 — finalize 시점엔 미보유 → null/0(이후 upsertSlotCentering 채움).
+   *
+   * ⚠️ 취약성(메모리 반영·미해결, 가드 보강은 별도 작업): replaceSlotSetup 의 DELETE+INSERT 전량 교체는
+   *    검출 없는 finalize 시 직전 확정본을 파괴할 수 있다. 검출컬럼(vpd/lpd/occupyRange)은 existingBySlot 보존으로
+   *    가드되나, 센터링컬럼(pan/tilt/zoom/centered/img1)은 매 교체마다 null/0 으로 리셋된다(가드 없음).
+   */
+  private persistSlotSetupFromPlace(
+    place: NonNullable<Awaited<ReturnType<typeof loadNormalizedPlaceRoi>>>,
+    accepted: AggregatedSlot[],
+    modelByKey: Map<string, GroundModel>,
+  ): void {
+    // 검출 hit 없는 슬롯이 직전 정상 vpd/lpd/occupy 를 null 로 파괴하지 않도록 기존 slot_setup 보존용 조회(slotId 키).
+    const existingBySlot = new Map<number, SlotSetupView>();
+    for (const v of this.deps.store.getSlotSetup()) existingBySlot.set(v.slotId, v);
+    const byPresetAcc = new Map<string, AggregatedSlot[]>();
+    for (const s of accepted) {
+      let arr = byPresetAcc.get(s.presetKey);
+      if (!arr) byPresetAcc.set(s.presetKey, (arr = []));
+      arr.push(s);
+    }
+    const rows: SlotSetupRow[] = [];
+    // slot_id 는 **전역번호(1..N)** — 뷰어(web/core.js normalizeGlobalIdx)와 동일 규칙으로
+    // 정규화(Unity 생성 0-based 파일도 재부여). 파일이 이미 1..N 이면 무변경(멱등). setup_artifact.globalIndex 와 정합(§2-5).
+    const byPresetPlace = normalizeGlobalIdx(place.byPreset);
+    const updatedAt = this.now();
+    for (const [key, spaces] of byPresetPlace) {
+      const [camIdx, presetIdx] = key.split(':').map(Number);
+      const clusters = byPresetAcc.get(key) ?? [];
+      const model = modelByKey.get(key) ?? null; // 지면모델 부재/퇴화 → 이 프리셋 front_center 전부 null.
+      // 프리셋 단위 상호배타 전역-그리디 1:1 배정(설계서 §2/§3). 선착순 find() 대신 사전 배정.
+      const assigned = assignClustersToSpaces(spaces, clusters, { centroidGate: this.deps.cfg.slotAssignGate });
+      spaces.forEach((sp, i) => {
+        const hit = assigned.get(i) ?? null;
+        const prev = existingBySlot.get(sp.idx); // hit 없을 때 기존 검출값 보존(빈 finalize 파괴 방지).
+        // 3D 앞면 중심 = 슬롯 quad + 지면모델 + 캐노니컬 높이(기하 소스 — 검출 무관, 매 finalize 재계산).
+        const front = model ? slotFrontCenter(sp.points, model, H_CONST) : null;
+        // 점유영역(발자국) = 배정 차량 rect + 번호판 quad 로 결정형 사변형(부재 시 null).
+        const occupyRange = hit
+          ? buildPlateAnchoredQuad({ x: hit.x, y: hit.y, w: hit.w, h: hit.h }, hit.plateQuad ?? undefined)
+          : null;
+        rows.push({
+          slotId: sp.idx,
+          camId: camIdx,
+          presetId: presetIdx,
+          presetSlotIdx: i + 1, // 프리셋 내 배열순 1-based.
+          slotRoi: stringify5(sp.points),
+          vpdBbox: hit ? stringify5({ x: hit.x, y: hit.y, w: hit.w, h: hit.h }) : (prev?.vpd ? stringify5(prev.vpd) : null),
+          lpdObb: hit?.plateQuad ? stringify5(hit.plateQuad) : (prev?.lpd ? stringify5(prev.lpd) : null),
+          occupyRange: occupyRange ? stringify5(occupyRange) : (prev?.occupyRange ? stringify5(prev.occupyRange) : null),
+          pan: null,
+          tilt: null,
+          zoom: null,
+          centered: 0,
+          img1: null,
+          slot3dFrontCenter: front ? stringify5(front) : null,
+          updatedAt,
+        });
+      });
+    }
+    this.deps.store.replaceSlotSetup(rows);
   }
 
   /**
