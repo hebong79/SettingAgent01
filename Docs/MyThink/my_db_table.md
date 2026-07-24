@@ -13,12 +13,6 @@
  - slot_roi			: ROI영역 4점 배열
  - pos				: 번호판 중심 센터라이징된 ptz값
 
-* 프리셋 위치 정보 
-2. preset_pos ( 카메라의 각 프리셋 위치 ptz 값  - 즉  P1 존 ) 
- - cam_id	   		: 카메라 id	 
- - preset_id   		: 프리셋 id
- - pos				: 프리셋 위치 ptz 값
-
 * 카메라 정보
 3. camera_info
  - cam_id			: 카메라 idx	 
