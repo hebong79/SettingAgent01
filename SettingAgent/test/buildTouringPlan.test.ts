@@ -305,3 +305,20 @@ describe('buildTouringPlan — 스텝 shape 계약', () => {
     });
   });
 });
+
+describe('Touring Test 버튼 위치 — 센터라이징 영역(.centering-inline)', () => {
+  const html = readFileSync('web/index.html', 'utf8');
+  const appJs = readFileSync('web/app.js', 'utf8');
+
+  it('#cap-touring 은 .centering-inline 안(#cal-start 뒤)에 있고, 정밀수집 툴바에는 없다', () => {
+    const inline = html.slice(html.indexOf('<div class="centering-inline">'));
+    const block = inline.slice(0, inline.indexOf('id="cal-summary"')); // centering-inline 마지막 요소까지.
+    expect(block.indexOf('id="cap-touring"')).toBeGreaterThan(block.indexOf('id="cal-start"'));
+    const toolbar = html.slice(html.indexOf('class="cap-actions toolbar capture-actions"'));
+    expect(toolbar.slice(0, toolbar.indexOf('</div>'))).not.toContain('cap-touring');
+  });
+
+  it('클릭 결선(runTouringTest)은 그대로 유지된다', () => {
+    expect(appJs).toContain("$('cap-touring').addEventListener('click', runTouringTest)");
+  });
+});

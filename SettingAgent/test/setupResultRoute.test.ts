@@ -20,8 +20,9 @@ import type { CameraInfoRow, PlaceInfoRow, PresetPosRow, SlotSetupRow, SlotSetup
 import type { ToolsConfig } from '../src/config/toolsConfig.js';
 
 /**
- * 검증자(qa-tester): 캘리브레이션 패널 'result 파일 생성' — DB(slot_setup) → 최종 결과물 파일 2벌.
- * 대상: `writeSetupResultFiles`(공통 진입점) + `POST /capture/setup-result` + 뷰어 결선(#cal-result-file).
+ * 검증자(qa-tester): 최종 결과물 생성 — DB(slot_setup) → 최종 결과물 파일 2벌.
+ * 대상: `writeSetupResultFiles`(공통 진입점) + `POST /capture/setup-result`.
+ * 뷰어의 'result 파일 생성' 버튼은 2026-07-24 제거(센터라이징 완료 시 자동 생성이 유일 경로) — 재추가 방지 가드만 남긴다.
  *
  * 불변식: 이력본(Setup_*)과 고정본(setup_result)의 **내용이 동일**하고, 둘 다 DB 정본을 그대로 반영한다.
  * 센터라이징 잡 done 경로도 같은 함수를 쓰므로 수동/자동 산출이 갈리지 않는다.
@@ -177,19 +178,12 @@ describe('writeSetupResultFiles (공통 진입점 — 잡 done 경로와 공유)
   });
 });
 
-describe('뷰어 결선(#cal-result-file)', () => {
+describe('뷰어 — result 파일 생성 버튼 제거(자동 저장이 유일 경로)', () => {
   const appJs = readFileSync(fileURLToPath(new URL('../web/app.js', import.meta.url)), 'utf-8');
   const html = readFileSync(fileURLToPath(new URL('../web/index.html', import.meta.url)), 'utf-8');
 
-  it('캘리브레이션 패널에 "result 파일 생성" 버튼이 있고 핸들러가 결선돼 있다', () => {
-    expect(html).toMatch(/<button id="cal-result-file"[^>]*>result 파일 생성<\/button>/);
-    expect(appJs).toContain("$('cal-result-file').addEventListener('click', makeSetupResultFile)");
-  });
-
-  it('핸들러는 /capture/setup-result 를 POST 하고 결과를 #cal-msg 에 표시한다', () => {
-    const fn = appJs.slice(appJs.indexOf('async function makeSetupResultFile('));
-    const body = fn.slice(0, fn.indexOf('\n}\n'));
-    expect(body).toContain("'/capture/setup-result'");
-    expect(body).toContain("$('cal-msg').textContent");
+  it('버튼과 핸들러가 존재하지 않는다', () => {
+    expect(html).not.toContain('cal-result-file');
+    expect(appJs).not.toContain('makeSetupResultFile');
   });
 });

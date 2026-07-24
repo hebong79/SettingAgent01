@@ -2737,18 +2737,6 @@ function stopCalFramePolling() {
   }
 }
 
-// 최종 결과물(save/setup_result.json + Setup_* 이력본)을 DB(slot_setup) 정본으로 지금 생성.
-// 센터라이징 완료 시 자동 생성되는 것과 같은 진입점 — 잡을 다시 돌리지 않고 현재 DB 상태로 파일만 만든다.
-async function makeSetupResultFile() {
-  $('cal-msg').textContent = '결과 파일 생성 중…';
-  const res = await fetch('/capture/setup-result', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok || !data.ok) { $('cal-msg').textContent = `결과 파일 생성 실패: ${data.error ?? res.status}`; return; }
-  // 두 파일은 각자 best-effort — 한쪽만 성공했으면 성공한 쪽만 알린다(위장 금지).
-  const files = [data.fixed && `${data.fixed}.json`, data.archive && `${data.archive}.json`].filter(Boolean).join(', ');
-  $('cal-msg').textContent = `결과 파일 생성: ${data.slots}개 슬롯 → save/${files}`;
-}
-
 async function calStart() {
   preciseActive = false; // 수동 센터라이징 — 상단 진행바 소유권 반납(discStart 미러).
   $('cal-msg').textContent = '';
@@ -3901,7 +3889,6 @@ function wire() {
   }
   $('cap-finalize').addEventListener('click', capFinalize);
   $('cal-start').addEventListener('click', calStart);
-  $('cal-result-file').addEventListener('click', makeSetupResultFile); // DB → 최종 결과물 파일 수동 생성.
   // 개별 센터라이징 콤보: 활성(off 아님) 시 오버레이 커서를 crosshair 로 전환(클릭 조준 피드백).
   $('cal-click-mode').addEventListener('change', (e) => {
     overlay.classList.toggle('click-centering', e.target.value !== 'off');
