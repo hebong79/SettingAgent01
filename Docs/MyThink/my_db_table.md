@@ -32,6 +32,14 @@
  - cam_company		: 제조회사 ( 휴컴스, 아이디스 등 )
  - place_id			: 장소id - 현재는 무조건 1
 
+* 프리셋 정보
+4. preset_info
+ - preset_id        : 프리셋 id
+ - preset_name      : 프리셋 이름
+ - cam_id           : 카메라 id
+ - pos              : 프리셋 위치 P,t,z
+ - place_id         : 장소 id- 현재는 무조건 1
+
 * 주차장 정보 
 4. place_info
  - place_id			: 장소(주차장) id
