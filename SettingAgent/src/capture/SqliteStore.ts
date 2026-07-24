@@ -71,6 +71,8 @@ export class SqliteStore {
       );
 
       -- 3) 프리셋 위치 PTZ = P1 존. PTZ 는 REAL 3컬럼
+      --    id = 프리셋 순서값(1부터, cam_id → preset_id 오름차순). 파생값이라 writer 가 주지 않고
+      --    renumberPresetInfo() 가 upsert 직후 재계산한다(구 DB ALTER 와 컬럼 순서를 맞추려 끝에 선언).
       CREATE TABLE IF NOT EXISTS preset_info (
         cam_id      INTEGER NOT NULL
                       REFERENCES camera_info(cam_id),
@@ -82,6 +84,7 @@ export class SqliteStore {
         place_id    INTEGER NOT NULL DEFAULT 1
                       REFERENCES place_info(place_id),
         updated_at  TEXT,
+        id          INTEGER,
         PRIMARY KEY (cam_id, preset_id)
       );
 
@@ -163,7 +166,26 @@ export class SqliteStore {
         // ★ foreign_keys=ON 에서 REFERENCES 절 있는 컬럼은 기본값이 NULL 이어야 하므로 REFERENCES 생략.
         this.db.exec(`ALTER TABLE preset_info ADD COLUMN place_id INTEGER NOT NULL DEFAULT 1`);
       }
+      if (!cols.includes('id')) {
+        this.db.exec(`ALTER TABLE preset_info ADD COLUMN id INTEGER`);
+        this.renumberPresetInfo(); // 기존 행의 NULL 채움(신규 DB 는 이 경로에 오지 않음 — 행 0건).
+      }
     }
+  }
+
+  /**
+   * preset_info.id 재계산 — (cam_id, preset_id) 오름차순 1-based 순서값.
+   * PK 가 (cam_id,preset_id) 라 id 는 파생 표시값이다. 행 추가/변경 시마다 전체를 다시 매겨
+   * "1부터 빈틈없이" 를 보장한다(행 수가 프리셋 개수라 비용 무시 가능).
+   */
+  private renumberPresetInfo(): void {
+    this.db.exec(`
+      UPDATE preset_info SET id = (
+        SELECT COUNT(*) FROM preset_info AS p2
+        WHERE p2.cam_id < preset_info.cam_id
+           OR (p2.cam_id = preset_info.cam_id AND p2.preset_id <= preset_info.preset_id)
+      )
+    `);
   }
 
   // ── place_info ──────────────────────────────────────────
@@ -221,6 +243,7 @@ export class SqliteStore {
       }
     });
     tx(rows);
+    this.renumberPresetInfo(); // id(순서값)는 파생 — 행 집합이 바뀔 때마다 다시 매긴다.
   }
 
   /** 등록된 프리셋 키 집합(`${camId}:${presetId}`). slot_setup INSERT 전 FK 부모 판정용. */

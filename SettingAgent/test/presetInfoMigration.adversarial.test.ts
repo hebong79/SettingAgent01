@@ -193,7 +193,7 @@ describe('적대적 1: 3회 연속 재오픈 멱등', () => {
     expect(tables).toContain('preset_info');
     expect(tables).not.toContain('preset_pos');
     const cols = (db.prepare(`PRAGMA table_info(preset_info)`).all() as { name: string }[]).map((c) => c.name);
-    expect(cols).toEqual(['cam_id', 'preset_id', 'preset_name', 'pan', 'tilt', 'zoom', 'place_id', 'updated_at']);
+    expect(cols).toEqual(['cam_id', 'preset_id', 'preset_name', 'pan', 'tilt', 'zoom', 'place_id', 'updated_at', 'id']);
   });
 });
 
@@ -350,8 +350,8 @@ describe('적대적 4: place_id 기본값·제약', () => {
     const dbPath = seedLegacy();
     const migrated = (rawDb(open(dbPath)).prepare(`PRAGMA table_info(preset_info)`).all() as { name: string }[]).map((c) => c.name);
     const fresh = (rawDb(open(':memory:')).prepare(`PRAGMA table_info(preset_info)`).all() as { name: string }[]).map((c) => c.name);
-    expect(migrated).toEqual(['cam_id', 'preset_id', 'preset_name', 'pan', 'tilt', 'zoom', 'updated_at', 'place_id']);
-    expect(fresh).toEqual(['cam_id', 'preset_id', 'preset_name', 'pan', 'tilt', 'zoom', 'place_id', 'updated_at']);
+    expect(migrated).toEqual(['cam_id', 'preset_id', 'preset_name', 'pan', 'tilt', 'zoom', 'updated_at', 'place_id', 'id']);
+    expect(fresh).toEqual(['cam_id', 'preset_id', 'preset_name', 'pan', 'tilt', 'zoom', 'place_id', 'updated_at', 'id']);
     expect(migrated).not.toEqual(fresh); // 순서는 다르지만 집합은 같다
     expect([...migrated].sort()).toEqual([...fresh].sort());
   });

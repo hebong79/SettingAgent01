@@ -3117,10 +3117,11 @@ async function renderAnalysis() {
   $('an-presets').innerHTML = '';
   $('an-presets').appendChild(
     buildTable(
-      ['프리셋 키', '카메라', '프리셋', '라벨', '주차면 수', 'PTZ (pan, tilt, zoom)'],
+      ['순서', '카메라', '프리셋', '라벨', '주차면 수', 'PTZ (pan, tilt, zoom)'],
+      // 순서 = 표 행 번호(1부터). 산출물 presets[] 순서(카메라·프리셋 오름차순)를 그대로 따른다.
       // PTZ 는 산출물 보관값 우선, 없으면 라이브 카메라 목록(GET /cameras — '프리셋 이동' 과 같은 정본)으로 폴백.
-      a.perPreset.map((p) => [
-        p.key, p.camIdx, p.presetIdx, p.label, p.slotCount,
+      a.perPreset.map((p, i) => [
+        i + 1, p.camIdx, p.presetIdx, p.label, p.slotCount,
         fmtPtz(p.ptz ?? findPresetPtz(state.cameras, p.camIdx, p.presetIdx)),
       ]),
     ),
