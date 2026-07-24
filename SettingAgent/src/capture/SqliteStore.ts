@@ -14,6 +14,26 @@ import type {
 import type { NormalizedPoint, NormalizedQuad } from '../domain/types.js';
 import { round5 } from '../util/round.js';
 
+/** preset_info 정본 컬럼 순서(표시 순서 = PRAGMA table_info 순서). id 가 맨 앞. */
+const PRESET_INFO_COLS = ['id', 'cam_id', 'preset_id', 'preset_name', 'pan', 'tilt', 'zoom', 'place_id', 'updated_at'] as const;
+
+/** preset_info 정본 DDL(테이블명만 치환) — CREATE 와 컬럼 재배치 재작성이 같은 정의를 공유한다. */
+const PRESET_INFO_DDL = (table: string) => `
+      CREATE TABLE IF NOT EXISTS ${table} (
+        id          INTEGER,
+        cam_id      INTEGER NOT NULL
+                      REFERENCES camera_info(cam_id),
+        preset_id   INTEGER NOT NULL,
+        preset_name TEXT,
+        pan         REAL NOT NULL,
+        tilt        REAL NOT NULL,
+        zoom        REAL NOT NULL,
+        place_id    INTEGER NOT NULL DEFAULT 1
+                      REFERENCES place_info(place_id),
+        updated_at  TEXT,
+        PRIMARY KEY (cam_id, preset_id)
+      );`;
+
 /**
  * SettingAgent 셋업 정본 SQLite DAO (설계서 §1 신 6테이블).
  * better-sqlite3(동기·프리빌트). dbPath 주입(':memory:' 또는 파일경로) — 테스트 가능.
@@ -71,22 +91,9 @@ export class SqliteStore {
       );
 
       -- 3) 프리셋 위치 PTZ = P1 존. PTZ 는 REAL 3컬럼
-      --    id = 프리셋 순서값(1부터, cam_id → preset_id 오름차순). 파생값이라 writer 가 주지 않고
-      --    renumberPresetInfo() 가 upsert 직후 재계산한다(구 DB ALTER 와 컬럼 순서를 맞추려 끝에 선언).
-      CREATE TABLE IF NOT EXISTS preset_info (
-        cam_id      INTEGER NOT NULL
-                      REFERENCES camera_info(cam_id),
-        preset_id   INTEGER NOT NULL,
-        preset_name TEXT,
-        pan         REAL NOT NULL,
-        tilt        REAL NOT NULL,
-        zoom        REAL NOT NULL,
-        place_id    INTEGER NOT NULL DEFAULT 1
-                      REFERENCES place_info(place_id),
-        updated_at  TEXT,
-        id          INTEGER,
-        PRIMARY KEY (cam_id, preset_id)
-      );
+      --    id = 프리셋 순서값(1부터, cam_id → preset_id 오름차순) — 표시 첫 컬럼.
+      --    파생값이라 writer 가 주지 않고 renumberPresetInfo() 가 upsert 직후 재계산한다.
+      ${PRESET_INFO_DDL('preset_info')}
 
       -- 4) 슬롯 셋업 = floor_ROI + centering 병합. 슬롯당 1행(run_id 없음)
       --    가변정점 컬럼은 정규화 0~1 JSON TEXT, pan/tilt/zoom REAL, img1 상대경로
@@ -167,9 +174,44 @@ export class SqliteStore {
         this.db.exec(`ALTER TABLE preset_info ADD COLUMN place_id INTEGER NOT NULL DEFAULT 1`);
       }
       if (!cols.includes('id')) {
-        this.db.exec(`ALTER TABLE preset_info ADD COLUMN id INTEGER`);
+        this.db.exec(`ALTER TABLE preset_info ADD COLUMN id INTEGER`); // ADD COLUMN 은 항상 맨 뒤 — 순서는 아래에서 교정.
         this.renumberPresetInfo(); // 기존 행의 NULL 채움(신규 DB 는 이 경로에 오지 않음 — 행 0건).
       }
+      this.reorderPresetInfoColumns();
+    }
+  }
+
+  /**
+   * preset_info 컬럼 순서를 정본(id 우선)으로 교정. 이미 정본이면 no-op(멱등).
+   *
+   * SQLite 는 컬럼 위치 변경을 지원하지 않으므로(ADD COLUMN 은 늘 맨 뒤) 공식 절차대로 테이블을 재작성한다:
+   * 새 테이블 CREATE → 값 복사 → 구 테이블 DROP → RENAME. 재작성으로 마이그레이션 DB 도 정본 DDL
+   * (place_id FK 포함)로 수렴한다 — 신규 DB 와의 스키마 divergence 해소.
+   *
+   * ★ 재작성 중 두 PRAGMA 가 필요하다(둘 다 끝나면 원복):
+   *   - foreign_keys=OFF : slot_setup 이 부모(preset_info)를 참조한 채로 DROP 해야 한다.
+   *   - legacy_alter_table=ON : RENAME 이 다른 테이블의 참조를 다시 쓰지 않게 한다. 이 순간 slot_setup 은
+   *     '없는 preset_info' 를 참조하는 상태라, 끄면 RENAME 이 스키마 파싱 오류로 실패한다.
+   */
+  private reorderPresetInfoColumns(): void {
+    const cols = (this.db.prepare(`PRAGMA table_info(preset_info)`).all() as { name: string }[]).map((c) => c.name);
+    if (cols.length === PRESET_INFO_COLS.length && cols.every((c, i) => c === PRESET_INFO_COLS[i])) return;
+    if (!PRESET_INFO_COLS.every((c) => cols.includes(c))) return; // 예상 밖 형상 — 손대지 않는다(복사 SELECT 실패 방지).
+
+    const list = PRESET_INFO_COLS.join(', ');
+    this.db.pragma('foreign_keys = OFF');
+    this.db.pragma('legacy_alter_table = ON');
+    try {
+      this.db.transaction(() => {
+        this.db.exec(`DROP TABLE IF EXISTS preset_info__new`); // 중단된 재작성 잔해 방어.
+        this.db.exec(PRESET_INFO_DDL('preset_info__new'));
+        this.db.exec(`INSERT INTO preset_info__new (${list}) SELECT ${list} FROM preset_info`);
+        this.db.exec(`DROP TABLE preset_info`);
+        this.db.exec(`ALTER TABLE preset_info__new RENAME TO preset_info`);
+      })();
+    } finally {
+      this.db.pragma('legacy_alter_table = OFF');
+      this.db.pragma('foreign_keys = ON');
     }
   }
 

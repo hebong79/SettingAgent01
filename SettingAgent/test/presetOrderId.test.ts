@@ -93,6 +93,13 @@ describe('preset_info.id — (cam_id, preset_id) 오름차순 1-based 순서값'
     expect(row.preset_name).toBe('이름변경');
   });
 
+  it('id 는 표시 첫 컬럼이다(신규 DB — PRAGMA table_info 순서 = DB 뷰어 열 순서)', () => {
+    store = freshStore([1]);
+    const cols = (rawDb(store).prepare(`PRAGMA table_info(preset_info)`).all() as { name: string }[]).map((c) => c.name);
+    expect(cols[0]).toBe('id');
+    expect(cols).toEqual(['id', 'cam_id', 'preset_id', 'preset_name', 'pan', 'tilt', 'zoom', 'place_id', 'updated_at']);
+  });
+
   it('구 DB(id 컬럼 없음) 오픈 시 ALTER 후 기존 행에 순서값이 채워진다', () => {
     dir = mkdtempSync(join(tmpdir(), 'presetid-'));
     const dbPath = join(dir, 'legacy.sqlite');
@@ -118,12 +125,59 @@ describe('preset_info.id — (cam_id, preset_id) 오름차순 1-based 순서값'
 
     store = new SqliteStore(dbPath);
     expect(idsOf(store)).toEqual([['1:1', 1], ['1:2', 2], ['2:1', 3]]);
+    // 재작성으로 컬럼 순서도 정본(id 우선)이 된다 — ALTER 는 맨 뒤에 붙이므로 재배치가 필요했다.
+    const migratedCols = (rawDb(store).prepare(`PRAGMA table_info(preset_info)`).all() as { name: string }[]).map((c) => c.name);
+    expect(migratedCols[0]).toBe('id');
 
     // 멱등 — 재오픈해도 id 컬럼 1개·값 동일.
     store.close();
     store = new SqliteStore(dbPath);
     const cols = (rawDb(store).prepare(`PRAGMA table_info(preset_info)`).all() as { name: string }[]).map((c) => c.name);
     expect(cols.filter((c) => c === 'id')).toHaveLength(1);
+    expect(cols).toEqual(['id', 'cam_id', 'preset_id', 'preset_name', 'pan', 'tilt', 'zoom', 'place_id', 'updated_at']);
     expect(idsOf(store)).toEqual([['1:1', 1], ['1:2', 2], ['2:1', 3]]);
+  });
+
+  it('컬럼 재배치 재작성이 slot_setup 자식행·FK 를 보존한다', () => {
+    dir = mkdtempSync(join(tmpdir(), 'presetid-fk-'));
+    const dbPath = join(dir, 'legacy_fk.sqlite');
+    const raw = new Database(dbPath);
+    raw.exec(`
+      CREATE TABLE place_info (place_id INTEGER PRIMARY KEY, place_name TEXT NOT NULL);
+      CREATE TABLE camera_info (cam_id INTEGER PRIMARY KEY, cam_name TEXT, cam_uuid TEXT, url TEXT,
+        user_id TEXT, password TEXT, rtsp_url TEXT, cam_type TEXT NOT NULL DEFAULT 'ptz',
+        cam_company TEXT, place_id INTEGER NOT NULL DEFAULT 1 REFERENCES place_info(place_id),
+        img_w INTEGER, img_h INTEGER, updated_at TEXT);
+      CREATE TABLE preset_info (
+        cam_id INTEGER NOT NULL REFERENCES camera_info(cam_id), preset_id INTEGER NOT NULL,
+        preset_name TEXT, pan REAL NOT NULL, tilt REAL NOT NULL, zoom REAL NOT NULL,
+        place_id INTEGER NOT NULL DEFAULT 1, updated_at TEXT,
+        PRIMARY KEY (cam_id, preset_id));
+      CREATE TABLE slot_setup (
+        slot_id INTEGER PRIMARY KEY, cam_id INTEGER NOT NULL, preset_id INTEGER NOT NULL,
+        preset_slotidx INTEGER, slot_roi TEXT NOT NULL, vpd_bbox TEXT, lpd_obb TEXT,
+        occupy_range TEXT, pan REAL, tilt REAL, zoom REAL,
+        centered INTEGER NOT NULL DEFAULT 0 CHECK (centered IN (0,1)), img1 TEXT,
+        slot3d_front_center TEXT, updated_at TEXT,
+        FOREIGN KEY (cam_id, preset_id) REFERENCES preset_info(cam_id, preset_id),
+        UNIQUE (cam_id, preset_id, preset_slotidx));
+      INSERT INTO place_info VALUES (1,'Place01');
+      INSERT INTO camera_info (cam_id, place_id) VALUES (1,1);
+      INSERT INTO preset_info VALUES (1,1,'C1P1',0,0,1,1,'T0');
+      INSERT INTO slot_setup (slot_id,cam_id,preset_id,preset_slotidx,slot_roi,centered,updated_at)
+        VALUES (7,1,1,1,'[{"x":0.2,"y":0.2}]',0,'T0');
+    `);
+    raw.close();
+
+    store = new SqliteStore(dbPath);
+    // 자식행 보존 + 무결성 위반 0건.
+    expect(store.getSlotSetup()).toHaveLength(1);
+    expect(rawDb(store).pragma('foreign_key_check')).toEqual([]);
+    // 부모 참조가 살아 있다 — 부모 없는 (1,9) 는 여전히 거부.
+    expect(() => store!.replaceSlotSetup([{
+      slotId: 2, camId: 1, presetId: 9, presetSlotIdx: 1, slotRoi: '[{"x":0.1,"y":0.1}]',
+      vpdBbox: null, lpdObb: null, occupyRange: null, pan: null, tilt: null, zoom: null,
+      centered: 0, img1: null, slot3dFrontCenter: null, updatedAt: 'T1',
+    }])).toThrow();
   });
 });

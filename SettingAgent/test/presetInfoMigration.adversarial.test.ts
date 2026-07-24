@@ -193,7 +193,7 @@ describe('적대적 1: 3회 연속 재오픈 멱등', () => {
     expect(tables).toContain('preset_info');
     expect(tables).not.toContain('preset_pos');
     const cols = (db.prepare(`PRAGMA table_info(preset_info)`).all() as { name: string }[]).map((c) => c.name);
-    expect(cols).toEqual(['cam_id', 'preset_id', 'preset_name', 'pan', 'tilt', 'zoom', 'place_id', 'updated_at', 'id']);
+    expect(cols).toEqual(['id', 'cam_id', 'preset_id', 'preset_name', 'pan', 'tilt', 'zoom', 'place_id', 'updated_at']);
   });
 });
 
@@ -329,31 +329,35 @@ describe('적대적 4: place_id 기본값·제약', () => {
     expect(db.prepare(`SELECT place_id FROM preset_info`).get()).toEqual({ place_id: 1 });
   });
 
-  it('설계서가 수용한 divergence 를 실증 — 마이그레이션 DB 의 place_id 에는 FK 가 없다', () => {
+  // ★ 구 divergence("마이그레이션 DB 는 place_id FK 가 없다")는 id 우선 컬럼 재배치 재작성으로 해소됐다.
+  //   재작성이 정본 DDL 로 테이블을 다시 만들므로 마이그레이션 DB 도 FK 를 갖는다.
+  it('재작성 후 수렴 — 마이그레이션 DB 도 place_id FK 를 강제한다', () => {
     const dbPath = seedLegacy();
     const s = open(dbPath);
-    const db = rawDb(s);
-    const fks = db.prepare(`PRAGMA foreign_key_list(preset_info)`).all() as Array<{ table: string; from: string }>;
-    expect(fks.some((f) => f.from === 'place_id')).toBe(false); // 신규 DB 와 달리 place_id FK 없음
-    // 따라서 존재하지 않는 place_id 도 통과한다(수용된 divergence — 값은 항상 1이라 실무 무해).
+    const fks = rawDb(s).prepare(`PRAGMA foreign_key_list(preset_info)`).all() as Array<{ table: string; from: string }>;
+    expect(fks.some((f) => f.from === 'place_id')).toBe(true);
+    // 없는 place_id 는 이제 신규 DB 와 동일하게 거부된다.
     expect(() => s.upsertPresetInfo([{
       camId: 1, presetId: 1, presetName: 'x', placeId: 999, pan: 0, tilt: 0, zoom: 1, updatedAt: 'T',
+    }])).toThrow(/FOREIGN KEY/i);
+    // 존재하는 place_id(=1) 는 통과 — 실사용 경로 무해.
+    expect(() => s.upsertPresetInfo([{
+      camId: 1, presetId: 1, presetName: 'x', placeId: 1, pan: 0, tilt: 0, zoom: 1, updatedAt: 'T',
     }])).not.toThrow();
 
-    // 신규 DB 는 place_id FK 를 갖는다(대조군).
+    // 신규 DB 대조군.
     const fresh = open(':memory:');
     const freshFks = rawDb(fresh).prepare(`PRAGMA foreign_key_list(preset_info)`).all() as Array<{ from: string }>;
     expect(freshFks.some((f) => f.from === 'place_id')).toBe(true);
   });
 
-  it('컬럼 순서 divergence — 마이그레이션 DB 는 place_id 가 맨 뒤(신규는 zoom 다음)', () => {
+  it('컬럼 순서 수렴 — 마이그레이션 DB 와 신규 DB 가 동일한 정본 순서(id 우선)', () => {
     const dbPath = seedLegacy();
+    const canonical = ['id', 'cam_id', 'preset_id', 'preset_name', 'pan', 'tilt', 'zoom', 'place_id', 'updated_at'];
     const migrated = (rawDb(open(dbPath)).prepare(`PRAGMA table_info(preset_info)`).all() as { name: string }[]).map((c) => c.name);
     const fresh = (rawDb(open(':memory:')).prepare(`PRAGMA table_info(preset_info)`).all() as { name: string }[]).map((c) => c.name);
-    expect(migrated).toEqual(['cam_id', 'preset_id', 'preset_name', 'pan', 'tilt', 'zoom', 'updated_at', 'place_id', 'id']);
-    expect(fresh).toEqual(['cam_id', 'preset_id', 'preset_name', 'pan', 'tilt', 'zoom', 'place_id', 'updated_at', 'id']);
-    expect(migrated).not.toEqual(fresh); // 순서는 다르지만 집합은 같다
-    expect([...migrated].sort()).toEqual([...fresh].sort());
+    expect(migrated).toEqual(canonical);
+    expect(fresh).toEqual(canonical);
   });
 });
 
