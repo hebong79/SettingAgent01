@@ -28,6 +28,41 @@ memo.md에 새 항목을 추가하기 **전에** 파일 크기를 확인한다. 
 
 ---
 
+## 2026-07-24 프리셋 순서값(id) 도입 — 분석탭 첫 열 + DB preset_info.id 첫 컬럼 배치
+
+**세션 요약 (커밋 `1f044f1`, `1d7d3b2` · 워크트리 `preset-order-id` → main FF 머지, origin 푸시는 안 함)**
+
+- 마스터 요청 2단계: ① 분석탭 `프리셋별 요약` 표의 **`프리셋 키`(1:1) 열을 순서(1부터)로 교체** ② **DB `preset_info` 에 id(순서값) 추가** → 이후 ③ **그 id 를 표시 맨 왼쪽으로**.
+- ①: `app.js` 헤더 `['순서', …]` + `perPreset.map((p, i) => [i + 1, …])`. `core.js` `analyzeArtifact` 는 무변경(`perPreset[].key` 유지 — 다른 소비처 있음). 점유율 표의 `프리셋 키` 열은 **별개 표**라 안 건드림.
+- ②: `id` 를 **파생값**으로 설계 — PK 는 `(cam_id,preset_id)` 유지, `id` = `(cam_id,preset_id)` 오름차순 1-based. `PresetInfoRow` 타입/writer 무변경(`roiDbLoad`·`migrateToSettingDb` 영향 0). `renumberPresetInfo()` 가 upsert 직후·구 DB ALTER 직후 **전체 재번호**(상관 서브쿼리 COUNT 단일 UPDATE, 행수=프리셋수라 비용 무시).
+
+**③ 컬럼 재배치 — SQLite 제약과 정면충돌한 지점**
+
+- DB 뷰어(`dbRoutes`)는 `PRAGMA table_info` 순서 + `SELECT *` 를 그대로 쓴다. 그런데 `ALTER TABLE ADD COLUMN` 은 **항상 맨 뒤** → id 가 화면 오른쪽 끝. SQLite 엔 컬럼 위치 변경 구문이 없어 **테이블 재작성이 유일한 방법**.
+- `reorderPresetInfoColumns()`: 새 테이블 CREATE → `INSERT…SELECT` → `DROP` → `RENAME`. 순서가 이미 정본이면 no-op. 정본 순서/DDL 은 모듈 상수 `PRESET_INFO_COLS` / `PRESET_INFO_DDL(table)` 로 **CREATE 와 공유**(정의 이중화 방지).
+- **PRAGMA 2개가 반드시 필요**(finally 원복): `foreign_keys=OFF`(자식 `slot_setup` 이 참조 중인 부모 DROP), **`legacy_alter_table=ON`** — 이 순간 slot_setup 이 '없는 preset_info' 를 참조하는 상태라 끄면 RENAME 이 스키마 파싱 오류로 실패한다. **이거 모르면 재작성이 통째로 깨진다.**
+- **의도적 동작 변경**: 재작성이 정본 DDL 을 쓰므로 마이그레이션 DB 도 신규와 **스키마 수렴** → 컬럼 순서 동일 + `place_id` FK 강제. 기존 "수용된 divergence" 를 실증하던 적대적 테스트 2케이스를 **수렴 검증으로 갱신**. 실사용은 `PLACE_ID=1` 고정 + `roiDbLoad` 가 place_info(1) 선행 upsert 라 무해.
+
+**함정 — WAL 빼먹은 사본으로 오판했다**
+
+- 실가동 DB 검증 때 `data/setting.sqlite` **본체만** 복사해서 "실 DB 는 아직 구 preset_pos 단계" 라고 **틀리게 보고**했다. 이 DB 는 `journal_mode=WAL` 이라 최신 상태가 `-wal`(3.2MB)에 있다. 마스터 화면 스샷(5행 + id)이 반증.
+- **규칙: 사본 검증은 `.sqlite` + `-wal` + `-shm` 을 함께 복사할 것.** 다시 검증하니 id 맨 앞·값 1~5 유지·slot_setup 23행 보존·`foreign_key_check []`·재오픈 멱등.
+
+**검증**
+
+- `vitest run` **2723 green**(메인 체크아웃 기준), `tsc --noEmit` 0. 신규 `presetOrderId.test.ts` 8케이스(뷰어 소스가드 2 + DB 6: 삽입순서 무관 1..N / 중간삽입 재번호 / 충돌 upsert id 유지 / 첫 컬럼 id / 구 DB 채움·멱등 / **재작성이 slot_setup 자식행·FK 보존**).
+- 워크트리에선 `buildTouringPlan.test.ts` 1건 실패 — gitignore 대상 `save/setup_result.json` 픽스처가 워크트리에 없어서. **메인에선 통과**(내 변경 무관, 지난 세션 기록과 동일 현상).
+- 브라우저 DOM 자동화는 여전히 없음 → 뷰어는 소스 가드 테스트로 봉인(`cameraKindSelect.test.ts` 선례).
+
+**현재 상태 / 다음**
+
+- main FF 머지 완료(`a7d0c39 → 1d7d3b2`), **origin/main 푸시는 미실시**(요청 없었음, ahead 2).
+- **서버 재기동 필요** — 재기동 시 실 DB 에 재작성이 1회 적용되고, DB 탭·분석 탭 새로고침으로 눈으로 확인 가능(정적파일 `no-store`).
+- `Docs/MyThink/my_db_table.md` 의 `- id : 프리셋 key 값` 줄은 **마스터의 미커밋 편집**이라 손대지 않음. 정확히는 `프리셋 순서값 ( 1부터 시작 )`.
+- 작업 전부터 있던 미커밋 변경(`_workspace_*` 삭제분 등 50건)은 무접촉.
+
+---
+
 ## 2026-07-24 전역 인덱스 수동 매핑 행 편집 + zone 열 제거 + 센터라이징 설명 정정
 
 **세션 요약 (커밋 `2f4a98a`, 브랜치 `feat/manual-index-editable-rows` → main FF 머지·푸시)**
