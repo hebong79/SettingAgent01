@@ -14,7 +14,7 @@
  - pos				: 번호판 중심 센터라이징된 ptz값
 
 * 카메라 정보
-3. camera_info
+2. camera_info
  - cam_id			: 카메라 idx	 
  - cam_name			: 카메라 이름
  - cam_uuid 		: 카메라 UUID
@@ -27,7 +27,7 @@
  - place_id			: 장소id - 현재는 무조건 1
 
 * 프리셋 정보
-4. preset_info
+3. preset_info
  - preset_id        : 프리셋 id
  - preset_name      : 프리셋 이름
  - cam_id           : 카메라 id
