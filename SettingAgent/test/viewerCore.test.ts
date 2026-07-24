@@ -5,11 +5,10 @@ import {
   toPixelQuad,
   presetKey,
   slotLabel,
-  fpsToInterval,
   clampZoom,
   stepPtz,
   resolveAbsPtz,
-  createStreamLoop,
+  createSnapshotFetcher,
   capFrameKey,
   moveRenderDirective,
   pickSelected,
@@ -65,15 +64,6 @@ describe('slotLabel (G3-4 라벨 매핑)', () => {
   });
   it('globalIndex 부재 시 slotId 폴백', () => {
     expect(slotLabel('s-1', undefined)).toBe('s-1');
-  });
-});
-
-describe('fpsToInterval', () => {
-  it('fps=3 → 333ms', () => {
-    expect(fpsToInterval(3)).toBe(333);
-  });
-  it('fps=1 → 1000ms', () => {
-    expect(fpsToInterval(1)).toBe(1000);
   });
 });
 
@@ -182,14 +172,10 @@ describe('capFrameKey (라이브 Unity 동기화 — 최신 캡처 프레임 유
 
 describe('moveRenderDirective (루프3 — /stream pan/tilt/zoom override: 이동 시 렌더 경로 결정)', () => {
   // 루프3: Unity /stream 이 pan/tilt/zoom override 를 지원 → 스트림 모드면 새 PTZ 로 재연결('stream-reconnect').
-  // poll(폴백)·off 는 폴링 tick. origin 무관(스트림이 수동·프리셋 PTZ 를 모두 렌더). 인자: moveRenderDirective(liveMode).
+  // off 는 1회 스냅샷 tick. origin 무관(스트림이 수동·프리셋 PTZ 를 모두 렌더). 인자: moveRenderDirective(liveMode).
 
   it('(stream) → stream-reconnect (스트림 중 이동 → 새 PTZ 로 stream 재연결)', () => {
     expect(moveRenderDirective('stream')).toBe('stream-reconnect');
-  });
-
-  it('(poll) → tick (폴백 폴링 중 이동 → override 즉시 갱신)', () => {
-    expect(moveRenderDirective('poll')).toBe('tick');
   });
 
   it('(off) → tick (라이브 off → 이동은 1회 스냅샷 override)', () => {
@@ -448,7 +434,7 @@ describe('nextPresetId (해당 카메라 다음 presetIdx — 1-based)', () => {
   });
 });
 
-describe('createStreamLoop — 백프레셔/revoke/stop', () => {
+describe('createSnapshotFetcher — 백프레셔/revoke/abort', () => {
   /** 수동 해소형 Promise. */
   function deferred<T>() {
     let resolve!: (v: T) => void;
@@ -485,7 +471,7 @@ describe('createStreamLoop — 백프레셔/revoke/stop', () => {
 
   it('백프레셔: inflight 진행 중 tick 겹침은 스킵(fetch 1회)', async () => {
     const { deps, respond } = mkDeps();
-    const loop = createStreamLoop(deps);
+    const loop = createSnapshotFetcher(deps);
     const t1 = loop.tick();
     const t2 = loop.tick(); // inflight 가드로 즉시 반환
     await t2;
@@ -501,7 +487,7 @@ describe('createStreamLoop — 백프레셔/revoke/stop', () => {
 
   it('새 프레임 시 이전 Blob URL revoke(G3-4), 첫 프레임은 revoke 없음', async () => {
     const { deps, revoked, respond } = mkDeps();
-    const loop = createStreamLoop(deps);
+    const loop = createSnapshotFetcher(deps);
     const a = loop.tick();
     respond();
     await a;
@@ -515,60 +501,20 @@ describe('createStreamLoop — 백프레셔/revoke/stop', () => {
 
   it('onPtz 가 응답 헤더로 호출됨', async () => {
     const { deps, respond } = mkDeps();
-    const loop = createStreamLoop(deps);
+    const loop = createSnapshotFetcher(deps);
     const a = loop.tick();
     respond();
     await a;
     expect(deps.onPtz).toHaveBeenCalledTimes(1);
   });
 
-  it('start: 주입 setTimer 로 fpsToInterval(fps) 간격 등록, 중복 start 무시', () => {
-    const setTimer = vi.fn((_fn: () => void, _ms: number) => 'TIMER');
-    const clearTimer = vi.fn();
+  it('abort: inflight abort', async () => {
     const { deps } = mkDeps();
-    const loop = createStreamLoop({ ...deps, setTimer, clearTimer });
-    loop.start(3);
-    loop.start(3); // 이미 동작 중 → 무시
-    expect(setTimer).toHaveBeenCalledTimes(1);
-    expect(setTimer.mock.calls[0][1]).toBe(333);
-  });
-
-  it('stop: timer clear + inflight abort', async () => {
-    const setTimer = vi.fn(() => 'TIMER');
-    const clearTimer = vi.fn();
-    const { deps } = mkDeps();
-    const loop = createStreamLoop({ ...deps, setTimer, clearTimer });
-    loop.start(3);
+    const loop = createSnapshotFetcher(deps);
     loop.tick(); // inflight 생성(미해소)
-    loop.stop();
-    expect(clearTimer).toHaveBeenCalledWith('TIMER');
+    loop.abort();
     // fetch 에 전달된 signal 이 aborted 여야 함
     const signal = deps.fetchFn.mock.calls[0][1].signal as AbortSignal;
     expect(signal.aborted).toBe(true);
-  });
-
-  it('fake timers: start 후 간격마다 tick 발화(즉시 해소 fetch)', async () => {
-    vi.useFakeTimers();
-    try {
-      // fetch 가 즉시 해소되어 inflight 가 매 틱 비워지는 deps.
-      const fetchFn = vi.fn(async () => ({ blob: async () => ({}), headers: { get: () => '7' } }));
-      const deps = {
-        fetchFn,
-        makeUrl: (seq: number) => `/snap?t=${seq}`,
-        createObjectURL: () => 'blob:x',
-        revokeObjectURL: () => {},
-        setImage: async () => {},
-        onPtz: () => {},
-      };
-      const loop = createStreamLoop(deps); // 기본 setInterval 경로
-      loop.start(3); // 333ms
-      await vi.advanceTimersByTimeAsync(1000); // 3틱(333*3=999)
-      expect(fetchFn).toHaveBeenCalledTimes(3);
-      loop.stop();
-      await vi.advanceTimersByTimeAsync(1000);
-      expect(fetchFn).toHaveBeenCalledTimes(3); // 정지 후 추가 호출 없음
-    } finally {
-      vi.useRealTimers();
-    }
   });
 });

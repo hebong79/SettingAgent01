@@ -436,6 +436,12 @@ input[type="radio"] {
   min-height: 42px;
 }
 
+#live-status {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 .field {
   display: flex;
   gap: 6px;
