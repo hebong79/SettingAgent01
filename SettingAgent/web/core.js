@@ -296,6 +296,18 @@ export function findPresetPtz(cameras, camIdx, presetIdx) {
 }
 
 /**
+ * 산출물 프리셋(Preset)의 보관용 PTZ 추출. pan/tilt/zoom 이 모두 유한수일 때만 { pan, tilt, zoom }.
+ * 하나라도 없으면 null(산출물은 PTZ 를 영속화하지 않을 수 있다 → 호출측 라이브 폴백 신호).
+ */
+function presetPtzOf(p) {
+  const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  const pan = num(p?.pan);
+  const tilt = num(p?.tilt);
+  const zoom = num(p?.zoom);
+  return pan == null || tilt == null || zoom == null ? null : { pan, tilt, zoom };
+}
+
+/**
  * 최종 셋업 산출물(SetupArtifact) 분석 요약(순수). '분석' 탭 렌더용.
  * artifact: { presets, slots, globalIndex, createdAt?, warnings?, report? } | null.
  * slots 는 globalIdx 오름차순 정렬, presetKey/roi/번호판 보유 여부를 평탄화한다.
@@ -342,6 +354,8 @@ export function analyzeArtifact(artifact) {
     presetIdx: p.presetIdx,
     label: p.label ?? `${p.camIdx}:${p.presetIdx}`,
     slotCount: Array.isArray(p.coveredSlotIds) ? p.coveredSlotIds.length : 0,
+    // 산출물이 보관용 PTZ 를 가진 경우에만 값. 셋 중 하나라도 없으면 null → 호출측이 라이브 카메라 목록으로 폴백.
+    ptz: presetPtzOf(p),
   }));
 
   return {

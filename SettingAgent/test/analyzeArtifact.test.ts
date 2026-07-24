@@ -72,12 +72,36 @@ describe('analyzeArtifact (최종 셋업 산출물 분석)', () => {
     expect(last.globalIdx).toBeNull();
   });
 
-  it('perPreset 슬롯 수 = coveredSlotIds 길이', () => {
+  it('perPreset 슬롯 수 = coveredSlotIds 길이 (PTZ 미보유 산출물 → ptz=null)', () => {
     const a = analyzeArtifact(sample);
     expect(a.perPreset).toEqual([
-      { key: '1:1', camIdx: 1, presetIdx: 1, label: 'Preset 1', slotCount: 2 },
-      { key: '2:1', camIdx: 2, presetIdx: 1, label: 'Preset 1', slotCount: 1 },
+      { key: '1:1', camIdx: 1, presetIdx: 1, label: 'Preset 1', slotCount: 2, ptz: null },
+      { key: '2:1', camIdx: 2, presetIdx: 1, label: 'Preset 1', slotCount: 1, ptz: null },
     ]);
+  });
+
+  it('preset 의 pan/tilt/zoom 이 모두 있으면 perPreset.ptz 로 노출', () => {
+    const a = analyzeArtifact({
+      ...sample,
+      presets: [
+        { camIdx: 1, presetIdx: 1, label: 'Preset 1', coveredSlotIds: ['c1p1s1'], pan: 12.5, tilt: -7.25, zoom: 2 },
+        { camIdx: 2, presetIdx: 1, label: 'Preset 1', coveredSlotIds: ['c2p1s1'], pan: 0, tilt: 0, zoom: 1 },
+      ],
+    });
+    expect(a.perPreset[0].ptz).toEqual({ pan: 12.5, tilt: -7.25, zoom: 2 });
+    expect(a.perPreset[1].ptz).toEqual({ pan: 0, tilt: 0, zoom: 1 }); // 0 은 유효값(falsy 로 버리지 않음).
+  });
+
+  it('pan/tilt/zoom 일부 누락·비수치 → ptz=null (부분 표기 금지)', () => {
+    const a = analyzeArtifact({
+      ...sample,
+      presets: [
+        { camIdx: 1, presetIdx: 1, coveredSlotIds: [], pan: 10, tilt: 5 }, // zoom 누락
+        { camIdx: 2, presetIdx: 1, coveredSlotIds: [], pan: 10, tilt: 5, zoom: '2' }, // 문자열
+        { camIdx: 3, presetIdx: 1, coveredSlotIds: [], pan: Number.NaN, tilt: 5, zoom: 2 }, // NaN
+      ],
+    });
+    expect(a.perPreset.map((p) => p.ptz)).toEqual([null, null, null]);
   });
 
   it('floorRoiByPreset → slot.hasFloor + totals.withFloor 카운트', () => {

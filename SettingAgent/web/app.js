@@ -3046,6 +3046,12 @@ function fmtRoi(roi) {
   return `${f(roi.x)}, ${f(roi.y)}, ${f(roi.w)}, ${f(roi.h)}`;
 }
 
+function fmtPtz(ptz) {
+  if (!ptz) return '-';
+  const f = (n) => Number(n).toFixed(3);
+  return `${f(ptz.pan)}, ${f(ptz.tilt)}, ${f(ptz.zoom)}`;
+}
+
 function summaryCard(label, value) {
   const div = document.createElement('div');
   div.className = 'an-card';
@@ -3111,8 +3117,12 @@ async function renderAnalysis() {
   $('an-presets').innerHTML = '';
   $('an-presets').appendChild(
     buildTable(
-      ['프리셋 키', '카메라', '프리셋', '라벨', '주차면 수'],
-      a.perPreset.map((p) => [p.key, p.camIdx, p.presetIdx, p.label, p.slotCount]),
+      ['프리셋 키', '카메라', '프리셋', '라벨', '주차면 수', 'PTZ (pan, tilt, zoom)'],
+      // PTZ 는 산출물 보관값 우선, 없으면 라이브 카메라 목록(GET /cameras — '프리셋 이동' 과 같은 정본)으로 폴백.
+      a.perPreset.map((p) => [
+        p.key, p.camIdx, p.presetIdx, p.label, p.slotCount,
+        fmtPtz(p.ptz ?? findPresetPtz(state.cameras, p.camIdx, p.presetIdx)),
+      ]),
     ),
   );
 

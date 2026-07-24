@@ -140,7 +140,14 @@ export interface ArtifactAnalysis {
     warnings: number;
     zones: number;
   };
-  perPreset: Array<{ key: string; camIdx: number; presetIdx: number; label: string; slotCount: number }>;
+  perPreset: Array<{
+    key: string;
+    camIdx: number;
+    presetIdx: number;
+    label: string;
+    slotCount: number;
+    ptz: Ptz | null; // 산출물 보관용 PTZ(pan/tilt/zoom 전부 있을 때만). 없으면 null.
+  }>;
   slots: Array<{
     globalIdx: number | null;
     slotId: string;
@@ -271,6 +278,9 @@ export interface PresetLike {
   presetIdx: number;
   label?: string;
   coveredSlotIds?: string[];
+  pan?: number;
+  tilt?: number;
+  zoom?: number;
 }
 export interface GlobalSlotIndexEntry {
   globalIdx: number;
