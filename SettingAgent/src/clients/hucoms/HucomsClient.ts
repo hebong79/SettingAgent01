@@ -1,4 +1,4 @@
-import { logger } from '../../util/logger.js';
+import { logPacket } from '../../util/packetLog.js';
 import {
   HucomsHttpError,
   HucomsResponseError,
@@ -215,19 +215,27 @@ export class HucomsClient {
         headers: { ...this.headers, ...(options.accept ? { accept: options.accept } : {}) },
         signal: controller?.signal ?? options.signal,
       });
-      logger.info(
-        { cat: 'packet', method: 'GET', url: this.safeUrl(url), status: response.status, ms: Date.now() - started },
-        'Hucoms 통신 패킷',
-      );
+      logPacket({
+        method: 'GET',
+        url: this.safeUrl(url),
+        op: typeof params.action === 'string' ? params.action : undefined,
+        status: response.status,
+        ms: Date.now() - started,
+        msgBase: 'Hucoms 통신 패킷',
+      });
       if (!response.ok) throw new HucomsHttpError(response.status, response.statusText);
       return response;
     } catch (error) {
       if (error instanceof HucomsHttpError) throw error;
       const message = this.safeMessage(error);
-      logger.warn(
-        { cat: 'packet', method: 'GET', url: this.safeUrl(url), err: message, ms: Date.now() - started },
-        'Hucoms 통신 패킷 실패',
-      );
+      logPacket({
+        method: 'GET',
+        url: this.safeUrl(url),
+        op: typeof params.action === 'string' ? params.action : undefined,
+        err: message,
+        ms: Date.now() - started,
+        msgBase: 'Hucoms 통신 패킷',
+      });
       throw new HucomsTransportError(message, error);
     } finally {
       if (timer) clearTimeout(timer);

@@ -52,6 +52,7 @@ export class CRpcClient {
         `${this.baseUrl}/rpc`,
         { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) },
         timeoutMs ?? this.cfg.timeoutMs,
+        method,
       );
     } catch (err) {
       throw new RpcClientError(
@@ -90,6 +91,7 @@ export class CRpcClient {
         `${this.baseUrl}/rpc/catalog`,
         { method: 'GET' },
         this.cfg.timeoutMs,
+        'catalog',
       );
     } catch (err) {
       throw new RpcClientError(
