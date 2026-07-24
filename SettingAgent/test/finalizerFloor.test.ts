@@ -137,13 +137,13 @@ describe('Finalizer floor ROI(결정형 발자국) 가산', () => {
 describe('Finalizer slot_setup(§06) occupyRange — 결정형 발자국 영속화', () => {
   it('placeRoiFile 배정 슬롯 → getSlotSetup().occupyRange = buildPlateAnchoredQuad(vpd bbox, lpd quad)', async () => {
     const store = mem();
-    // FK 부모(place_info/camera_info/preset_pos) 시드 — slot_setup FK(cam_id,preset_id)→preset_pos 전제.
+    // FK 부모(place_info/camera_info/preset_info) 시드 — slot_setup FK(cam_id,preset_id)→preset_info 전제.
     store.upsertPlaceInfo([{ placeId: 1, placeName: 'P' }]);
     store.upsertCameraInfo([{
       camId: 1, camName: null, camUuid: null, url: null, userId: null, password: null, rtspUrl: null,
       camType: 'ptz', camCompany: null, placeId: 1, imgW: 1000, imgH: 1000, updatedAt: 'T',
     }]);
-    store.upsertPresetPos([{ camId: 1, presetId: 1, sname: null, pan: 0, tilt: 0, zoom: 1, updatedAt: 'T' }]);
+    store.upsertPresetInfo([{ camId: 1, presetId: 1, presetName: null, placeId: 1, pan: 0, tilt: 0, zoom: 1, updatedAt: 'T' }]);
 
     const rot: NormalizedQuad = [
       { x: 0.33, y: 0.34 }, { x: 0.36, y: 0.35 }, { x: 0.34, y: 0.36 }, { x: 0.32, y: 0.35 },

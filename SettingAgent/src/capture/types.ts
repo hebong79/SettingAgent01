@@ -3,7 +3,7 @@
 // 좌표는 모두 정규화(0~1), cam/preset/round 인덱스는 1-based.
 //
 // ★ DB 스키마 전면 개편(설계서 §1): 구 10테이블 → 신 6테이블(place_info/camera_info/
-//   preset_pos/slot_setup/parking_evnt/parking_slot). 아래 Row/View 는 신 스키마 표면.
+//   preset_info/slot_setup/parking_evnt/parking_slot). 아래 Row/View 는 신 스키마 표면.
 //   컬럼명은 md 기준 cam_id/preset_id(camIdx/presetIdx 아님).
 
 import type { NormalizedPoint, NormalizedQuad } from '../domain/types.js';
@@ -80,11 +80,13 @@ export interface CameraInfoRow {
   updatedAt: string | null;
 }
 
-/** preset_pos 행(프리셋 위치 PTZ = P1 존, camerapos.json datas). PTZ 는 REAL 3필드. */
-export interface PresetPosRow {
+/** preset_info 행(프리셋 위치 PTZ = P1 존, camerapos.json datas). PTZ 는 REAL 3필드. */
+export interface PresetInfoRow {
   camId: number;
   presetId: number;
-  sname: string | null;
+  /** 프리셋 라벨(DB 컬럼 preset_name). camerapos.json 의 JSON 키 `sname` 값을 옮긴 것. */
+  presetName: string | null;
+  placeId: number;
   pan: number;
   tilt: number;
   zoom: number;

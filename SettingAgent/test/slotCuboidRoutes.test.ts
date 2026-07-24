@@ -110,8 +110,8 @@ function seedSlots(s: SqliteStore): { orphanSlotId: number; total: number } {
     camId: 1, camName: null, camUuid: null, url: null, userId: null, password: null, rtspUrl: null,
     camType: 'ptz', camCompany: null, placeId: 1, imgW: 1920, imgH: 1080, updatedAt: 'T',
   }]);
-  s.upsertPresetPos([1, 2, 3, PRESET_ORPHAN].map((presetId) => ({
-    camId: 1, presetId, sname: `Preset ${presetId}`, pan: 0, tilt: 0, zoom: 1, updatedAt: 'T',
+  s.upsertPresetInfo([1, 2, 3, PRESET_ORPHAN].map((presetId) => ({
+    camId: 1, presetId, presetName: `Preset ${presetId}`, placeId: 1, pan: 0, tilt: 0, zoom: 1, updatedAt: 'T',
   })));
 
   const { byPreset } = normalizePtzCamRoi(JSON.parse(REAL_PLACE_ROI));

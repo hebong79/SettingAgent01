@@ -3,7 +3,7 @@ import { SqliteStore } from '../src/capture/SqliteStore.js';
 import type {
   CameraInfoRow,
   PlaceInfoRow,
-  PresetPosRow,
+  PresetInfoRow,
   SlotSetupRow,
 } from '../src/capture/types.js';
 import type { NormalizedPoint, NormalizedQuad } from '../src/domain/types.js';
@@ -25,8 +25,8 @@ const cameraRow = (over: Partial<CameraInfoRow> = {}): CameraInfoRow => ({
   camId: 1, camName: null, camUuid: null, url: null, userId: null, password: null, rtspUrl: null,
   camType: 'ptz', camCompany: null, placeId: 1, imgW: 1920, imgH: 1080, updatedAt: 'T', ...over,
 });
-const presetRow = (over: Partial<PresetPosRow> = {}): PresetPosRow => ({
-  camId: 1, presetId: 1, sname: 'Preset 1', pan: 10, tilt: 5, zoom: 2, updatedAt: 'T', ...over,
+const presetRow = (over: Partial<PresetInfoRow> = {}): PresetInfoRow => ({
+  camId: 1, presetId: 1, presetName: 'Preset 1', placeId: 1, pan: 10, tilt: 5, zoom: 2, updatedAt: 'T', ...over,
 });
 
 const roi: NormalizedPoint[] = [
@@ -50,11 +50,11 @@ const enrichedSlot = (over: Partial<SlotSetupRow> = {}): SlotSetupRow => ({
 });
 
 /** place/camera/preset(FK 부모) 시드 :memory: 스토어. */
-function seededStore(presets: PresetPosRow[] = [presetRow()]): SqliteStore {
+function seededStore(presets: PresetInfoRow[] = [presetRow()]): SqliteStore {
   const s = new SqliteStore(':memory:');
   s.upsertPlaceInfo([placeRow()]);
   s.upsertCameraInfo([cameraRow()]);
-  s.upsertPresetPos(presets);
+  s.upsertPresetInfo(presets);
   return s;
 }
 

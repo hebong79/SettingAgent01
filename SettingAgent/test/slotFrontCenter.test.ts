@@ -23,7 +23,7 @@ import type { GroundModel } from '../src/ground/types.js';
 import type { Vec3 } from '../src/ground/contactTypes.js';
 import type { NormalizedPoint } from '../src/domain/types.js';
 import type { CameraView } from '../src/setup/mapTargets.js';
-import type { CameraInfoRow, PlaceInfoRow, PresetPosRow, SlotSetupRow } from '../src/capture/types.js';
+import type { CameraInfoRow, PlaceInfoRow, PresetInfoRow, SlotSetupRow } from '../src/capture/types.js';
 
 let store: SqliteStore | undefined;
 afterEach(() => {
@@ -37,8 +37,8 @@ const cameraRow = (): CameraInfoRow => ({
   camId: 1, camName: null, camUuid: null, url: null, userId: null, password: null, rtspUrl: null,
   camType: 'ptz', camCompany: null, placeId: 1, imgW: 1920, imgH: 1080, updatedAt: 'T',
 });
-const presetRow = (presetId: number): PresetPosRow => ({
-  camId: 1, presetId, sname: `Preset ${presetId}`, pan: 10, tilt: 5, zoom: 2, updatedAt: 'T',
+const presetRow = (presetId: number): PresetInfoRow => ({
+  camId: 1, presetId, presetName: `Preset ${presetId}`, placeId: 1, pan: 10, tilt: 5, zoom: 2, updatedAt: 'T',
 });
 
 const roi: NormalizedPoint[] = [
@@ -60,7 +60,7 @@ function seededStore(presetIds: number[] = [1]): SqliteStore {
   const s = new SqliteStore(':memory:');
   s.upsertPlaceInfo([placeRow()]);
   s.upsertCameraInfo([cameraRow()]);
-  s.upsertPresetPos(presetIds.map(presetRow));
+  s.upsertPresetInfo(presetIds.map(presetRow));
   return s;
 }
 

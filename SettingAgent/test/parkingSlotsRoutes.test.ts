@@ -17,7 +17,7 @@ import type { ToolsConfig } from '../src/config/toolsConfig.js';
  * ★ 구 `/capture/runs/:id/slots`(run_id 기반 parking_slots) 는 폐기되었다 — 신 스키마는
  *   run_id 없는 slot_setup(전 슬롯 1행) 정본을 `store.getSlotSetup()` 으로 직접 조회한다.
  *   captureRoutes.test.ts 는 store.getSlotSetup 을 **모킹**해 라우트 위임 자체만 봉인하고,
- *   이 파일은 **실제 SqliteStore 왕복**(upsertCameraInfo/upsertPresetPos/replaceSlotSetup → GET)
+ *   이 파일은 **실제 SqliteStore 왕복**(upsertCameraInfo/upsertPresetInfo/replaceSlotSetup → GET)
  *   으로 FK·컬럼 매핑·presetKey 파생·null 처리·centered boolean 변환을 검증한다(비redundant).
  */
 
@@ -55,14 +55,14 @@ function makeServer() {
   return { app, store };
 }
 
-/** slot_setup FK 부모(camera_info/preset_pos, 그리고 그 부모 place_info) 시딩. foreign_keys=ON 전제. */
+/** slot_setup FK 부모(camera_info/preset_info, 그리고 그 부모 place_info) 시딩. foreign_keys=ON 전제. */
 function seedFkParents(store: SqliteStore, camId: number, presetId: number): void {
   store.upsertPlaceInfo([{ placeId: 1, placeName: 'P1' }]);
   store.upsertCameraInfo([{
     camId, camName: null, camUuid: null, url: null, userId: null, password: null, rtspUrl: null,
     camType: 'ptz', camCompany: null, placeId: 1, imgW: null, imgH: null, updatedAt: null,
   }]);
-  store.upsertPresetPos([{ camId, presetId, sname: null, pan: 0, tilt: 0, zoom: 1, updatedAt: null }]);
+  store.upsertPresetInfo([{ camId, presetId, presetName: null, placeId: 1, pan: 0, tilt: 0, zoom: 1, updatedAt: null }]);
 }
 
 const slotRow = (over: Partial<SlotSetupRow> = {}): SlotSetupRow => ({

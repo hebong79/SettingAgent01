@@ -4,7 +4,7 @@ import { dirname } from 'node:path';
 import type {
   CameraInfoRow,
   PlaceInfoRow,
-  PresetPosRow,
+  PresetInfoRow,
   SlotCenteringRow,
   SlotLpdRow,
   SlotSetupRow,
@@ -40,6 +40,9 @@ export class SqliteStore {
 
   /** 신 6테이블 + 인덱스 보장(IF NOT EXISTS — 재생성 무해). DDL 순서 = FK 부모 우선. */
   private ensureSchema(): void {
+    // ★ 리네임 마이그레이션은 CREATE 보다 **먼저** — CREATE 가 빈 preset_info 를 만들면 RENAME TO 가 실패한다.
+    this.migratePresetPosToInfo();
+
     this.db.exec(`
       -- 1) 주차장(장소) — 현재 place_id=1 고정
       CREATE TABLE IF NOT EXISTS place_info (
@@ -67,14 +70,16 @@ export class SqliteStore {
       );
 
       -- 3) 프리셋 위치 PTZ = P1 존. PTZ 는 REAL 3컬럼
-      CREATE TABLE IF NOT EXISTS preset_pos (
+      CREATE TABLE IF NOT EXISTS preset_info (
         cam_id      INTEGER NOT NULL
                       REFERENCES camera_info(cam_id),
         preset_id   INTEGER NOT NULL,
-        sname       TEXT,
+        preset_name TEXT,
         pan         REAL NOT NULL,
         tilt        REAL NOT NULL,
         zoom        REAL NOT NULL,
+        place_id    INTEGER NOT NULL DEFAULT 1
+                      REFERENCES place_info(place_id),
         updated_at  TEXT,
         PRIMARY KEY (cam_id, preset_id)
       );
@@ -99,7 +104,7 @@ export class SqliteStore {
         slot3d_front_center TEXT,
         updated_at     TEXT,
         FOREIGN KEY (cam_id, preset_id)
-          REFERENCES preset_pos(cam_id, preset_id),
+          REFERENCES preset_info(cam_id, preset_id),
         UNIQUE (cam_id, preset_id, preset_slotidx)
       );
       CREATE INDEX IF NOT EXISTS idx_slot_setup_campreset
@@ -133,6 +138,30 @@ export class SqliteStore {
     const slotSetupCols = this.db.prepare(`PRAGMA table_info(slot_setup)`).all() as { name: string }[];
     if (!slotSetupCols.some((c) => c.name === 'slot3d_front_center')) {
       this.db.exec(`ALTER TABLE slot_setup ADD COLUMN slot3d_front_center TEXT`);
+    }
+  }
+
+  /** 멱등 마이그레이션: 구 preset_pos → preset_info(테이블/컬럼 리네임 + place_id 추가). 신규 DB 는 no-op. */
+  private migratePresetPosToInfo(): void {
+    const tableNames = () =>
+      (this.db.prepare(`SELECT name FROM sqlite_master WHERE type='table'`).all() as { name: string }[])
+        .map((t) => t.name);
+    let names = tableNames();
+    // 1) 테이블 리네임(구 preset_pos 만 있고 preset_info 부재). RENAME TO 가 slot_setup FK 참조를 자동 추종.
+    if (names.includes('preset_pos') && !names.includes('preset_info')) {
+      this.db.exec(`ALTER TABLE preset_pos RENAME TO preset_info`);
+      names = tableNames();
+    }
+    // 2) 컬럼 마이그레이션(preset_info 존재 시에만 — 신규 DB 는 이 블록 진입 전이라 CREATE 가 완비한다).
+    if (names.includes('preset_info')) {
+      const cols = (this.db.prepare(`PRAGMA table_info(preset_info)`).all() as { name: string }[]).map((c) => c.name);
+      if (cols.includes('sname') && !cols.includes('preset_name')) {
+        this.db.exec(`ALTER TABLE preset_info RENAME COLUMN sname TO preset_name`);
+      }
+      if (!cols.includes('place_id')) {
+        // ★ foreign_keys=ON 에서 REFERENCES 절 있는 컬럼은 기본값이 NULL 이어야 하므로 REFERENCES 생략.
+        this.db.exec(`ALTER TABLE preset_info ADD COLUMN place_id INTEGER NOT NULL DEFAULT 1`);
+      }
     }
   }
 
@@ -174,25 +203,28 @@ export class SqliteStore {
     tx(rows);
   }
 
-  // ── preset_pos ──────────────────────────────────────────
+  // ── preset_info ─────────────────────────────────────────
   /** 프리셋 PTZ upsert(마이그레이션·export 역경로). PK (cam_id,preset_id) 충돌 시 갱신. */
-  upsertPresetPos(rows: PresetPosRow[]): void {
+  upsertPresetInfo(rows: PresetInfoRow[]): void {
     const stmt = this.db.prepare(
-      `INSERT INTO preset_pos (cam_id, preset_id, sname, pan, tilt, zoom, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO preset_info (cam_id, preset_id, preset_name, place_id, pan, tilt, zoom, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(cam_id, preset_id) DO UPDATE SET
-         sname=excluded.sname, pan=excluded.pan, tilt=excluded.tilt, zoom=excluded.zoom,
+         preset_name=excluded.preset_name, place_id=excluded.place_id,
+         pan=excluded.pan, tilt=excluded.tilt, zoom=excluded.zoom,
          updated_at=excluded.updated_at`,
     );
-    const tx = this.db.transaction((list: PresetPosRow[]) => {
-      for (const r of list) stmt.run(r.camId, r.presetId, r.sname, round5(r.pan), round5(r.tilt), round5(r.zoom), r.updatedAt);
+    const tx = this.db.transaction((list: PresetInfoRow[]) => {
+      for (const r of list) {
+        stmt.run(r.camId, r.presetId, r.presetName, r.placeId, round5(r.pan), round5(r.tilt), round5(r.zoom), r.updatedAt);
+      }
     });
     tx(rows);
   }
 
   /** 등록된 프리셋 키 집합(`${camId}:${presetId}`). slot_setup INSERT 전 FK 부모 판정용. */
   getPresetKeys(): Set<string> {
-    const rows = this.db.prepare(`SELECT cam_id AS camId, preset_id AS presetId FROM preset_pos`).all() as Array<{
+    const rows = this.db.prepare(`SELECT cam_id AS camId, preset_id AS presetId FROM preset_info`).all() as Array<{
       camId: number;
       presetId: number;
     }>;

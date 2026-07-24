@@ -83,7 +83,7 @@ function seededStore(slots: SlotSetupRow[]): SqliteStore {
   const s = new SqliteStore(':memory:');
   s.upsertPlaceInfo([{ placeId: 1, placeName: 'P' }]);
   s.upsertCameraInfo([{ camId: 1, camName: null, camUuid: null, url: null, userId: null, password: null, rtspUrl: null, camType: 'ptz', camCompany: null, placeId: 1, imgW: 1000, imgH: 1000, updatedAt: 'T' }]);
-  s.upsertPresetPos([{ camId: 1, presetId: 1, sname: null, pan: 0, tilt: 0, zoom: 1, updatedAt: 'T' }]);
+  s.upsertPresetInfo([{ camId: 1, presetId: 1, presetName: null, placeId: 1, pan: 0, tilt: 0, zoom: 1, updatedAt: 'T' }]);
   s.replaceSlotSetup(slots);
   return s;
 }

@@ -15,7 +15,7 @@ import type { VpdClient } from '../src/clients/VpdClient.js';
 import type { Repository } from '../src/store/Repository.js';
 import type { CapturedImage, SetupArtifact } from '../src/domain/types.js';
 import type { ToolsConfig } from '../src/config/toolsConfig.js';
-import type { CameraInfoRow, PlaceInfoRow, PresetPosRow, SlotSetupRow } from '../src/capture/types.js';
+import type { CameraInfoRow, PlaceInfoRow, PresetInfoRow, SlotSetupRow } from '../src/capture/types.js';
 
 /**
  * 검증자(qa-tester): POST /capture/slots/load-roi (신규 라우트) — 설계서 "검증(qa)" 5번.
@@ -73,7 +73,7 @@ const cameraRow: CameraInfoRow = {
   camId: 1, camName: null, camUuid: null, url: null, userId: null, password: null, rtspUrl: null,
   camType: 'ptz', camCompany: null, placeId: 1, imgW: 1000, imgH: 1000, updatedAt: 'T',
 };
-const presetRow: PresetPosRow = { camId: 1, presetId: 1, sname: 'Preset 1', pan: 10, tilt: 5, zoom: 2, updatedAt: 'T' };
+const presetRow: PresetInfoRow = { camId: 1, presetId: 1, presetName: 'Preset 1', placeId: 1, pan: 10, tilt: 5, zoom: 2, updatedAt: 'T' };
 const existingSlot = (slotId: number): SlotSetupRow => ({
   slotId, camId: 1, presetId: 1, presetSlotIdx: slotId,
   slotRoi: JSON.stringify([{ x: 0.2, y: 0.2 }, { x: 0.5, y: 0.2 }, { x: 0.5, y: 0.5 }, { x: 0.2, y: 0.5 }]),
@@ -83,7 +83,7 @@ const existingSlot = (slotId: number): SlotSetupRow => ({
 function seed(store: SqliteStore, n: number): void {
   store.upsertPlaceInfo([placeRow]);
   store.upsertCameraInfo([cameraRow]);
-  store.upsertPresetPos([presetRow]);
+  store.upsertPresetInfo([presetRow]);
   store.replaceSlotSetup(Array.from({ length: n }, (_, i) => existingSlot(i + 1)));
 }
 
@@ -188,7 +188,7 @@ describe('POST /capture/slots/load-roi', () => {
   });
 
   // 프리셋 라이브 선갱신: camerapos.json 이 옛 프리셋(cam1)만 담고 있어도, 공급자가 알려준 신규
-  // 카메라(cam2) 프리셋이 preset_pos 로 upsert 되어 cam2 주차면이 skipped 되지 않아야 한다.
+  // 카메라(cam2) 프리셋이 preset_info 로 upsert 되어 cam2 주차면이 skipped 되지 않아야 한다.
   it('presetProvider 있으면 프리셋 선갱신 → 신규 카메라 주차면이 skipped 되지 않음', async () => {
     const dir = newTmp();
     const camerapos = join(dir, 'camerapos.json');

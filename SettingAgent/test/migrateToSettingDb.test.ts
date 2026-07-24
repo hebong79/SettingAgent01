@@ -103,7 +103,7 @@ describe('migrateToSettingDb 종단(소형 fixture)', () => {
       const count = (t: string) => (db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get() as { n: number }).n;
       expect(count('place_info')).toBe(1);
       expect(count('camera_info')).toBe(1);
-      expect(count('preset_pos')).toBe(2);
+      expect(count('preset_info')).toBe(2);
       expect(count('slot_setup')).toBe(3); // preset1:2 + preset2:1
       expect(count('parking_evnt')).toBe(0);
       expect(count('parking_slot')).toBe(0);

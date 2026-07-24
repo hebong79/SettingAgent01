@@ -4,7 +4,7 @@
 // 검증 대상:
 //   1) round5 단위        — 반올림·뒤0제거·정수/비유한/null passthrough·경계(0.000005)·음수·불변
 //   2) stringify5         — 중첩 재귀 반올림·문자열/불리언/null/정수 보존·Date→ISO·6자리+ 0건 정규식
-//   3) DB 왕복 5자리       — replaceSlotSetup/upsertPresetPos/upsertSlotCentering → getSlotSetup 값 ≤5자리
+//   3) DB 왕복 5자리       — replaceSlotSetup/upsertPresetInfo/upsertSlotCentering → getSlotSetup 값 ≤5자리
 //   4) JSON 파일 라이터    — slotPtzWriter/cameraposWriter 가 stringify5 로 5자리 파일 기록(정규식 검사)
 //
 // 경계 규약: 영속화 경계(DB REAL 바인딩 + JSON TEXT/파일 생산지)에서만 5자리. 전송/설정은 제외(본 파일 범위 밖).
@@ -144,12 +144,12 @@ describe('DB 왕복 — replaceSlotSetup/upsert* → getSlotSetup 값 ≤5자리
     return s;
   }
 
-  it('preset_pos REAL pan/tilt/zoom 이 round5 로 저장(upsertPresetPos)', () => {
+  it('preset_info REAL pan/tilt/zoom 이 round5 로 저장(upsertPresetInfo)', () => {
     const s = seeded();
-    s.upsertPresetPos([{ camId: 1, presetId: 1, sname: null, pan: 9.999999999999995, tilt: 15.123456789, zoom: 3.722419436408399, updatedAt: 'T' }]);
-    // getSlotSetup 은 preset_pos 를 직접 노출하지 않으므로 slot_setup FK 후 raw 조회로 확인.
+    s.upsertPresetInfo([{ camId: 1, presetId: 1, presetName: null, placeId: 1, pan: 9.999999999999995, tilt: 15.123456789, zoom: 3.722419436408399, updatedAt: 'T' }]);
+    // getSlotSetup 은 preset_info 를 직접 노출하지 않으므로 slot_setup FK 후 raw 조회로 확인.
     const raw = (s as unknown as { db: import('better-sqlite3').Database }).db
-      .prepare(`SELECT pan, tilt, zoom FROM preset_pos WHERE cam_id=1 AND preset_id=1`).get() as { pan: number; tilt: number; zoom: number };
+      .prepare(`SELECT pan, tilt, zoom FROM preset_info WHERE cam_id=1 AND preset_id=1`).get() as { pan: number; tilt: number; zoom: number };
     expect(raw.pan).toBe(10);
     expect(raw.tilt).toBe(15.12346);
     expect(raw.zoom).toBe(3.72242);
@@ -160,7 +160,7 @@ describe('DB 왕복 — replaceSlotSetup/upsert* → getSlotSetup 값 ≤5자리
 
   it('replaceSlotSetup REAL pan/tilt/zoom round5 + stringify5 생산 TEXT 왕복 ≤5자리', () => {
     const s = seeded();
-    s.upsertPresetPos([{ camId: 1, presetId: 1, sname: null, pan: 0, tilt: 0, zoom: 1, updatedAt: 'T' }]);
+    s.upsertPresetInfo([{ camId: 1, presetId: 1, presetName: null, placeId: 1, pan: 0, tilt: 0, zoom: 1, updatedAt: 'T' }]);
     // 생산지(Finalizer)가 stringify5 로 TEXT 를 만든다는 규약을 그대로 재현.
     const roiQuad = [{ x: 0.37534470992048313, y: 0.3900173453771547 }, { x: 0.2824970408319572, y: 0.3528782777417442 }];
     const front = { x: 0.6572774299064489, y: 0.4900173453771547 };
@@ -186,7 +186,7 @@ describe('DB 왕복 — replaceSlotSetup/upsert* → getSlotSetup 값 ≤5자리
 
   it('upsertSlotCentering REAL pan/tilt/zoom round5(부분 UPDATE)', () => {
     const s = seeded();
-    s.upsertPresetPos([{ camId: 1, presetId: 1, sname: null, pan: 0, tilt: 0, zoom: 1, updatedAt: 'T' }]);
+    s.upsertPresetInfo([{ camId: 1, presetId: 1, presetName: null, placeId: 1, pan: 0, tilt: 0, zoom: 1, updatedAt: 'T' }]);
     s.replaceSlotSetup([{
       slotId: 1, camId: 1, presetId: 1, presetSlotIdx: 1, slotRoi: '[]',
       vpdBbox: null, lpdObb: null, occupyRange: null, pan: null, tilt: null, zoom: null,

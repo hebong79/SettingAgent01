@@ -39,7 +39,7 @@ afterEach(() => {
 });
 function mem(): SqliteStore { const s = new SqliteStore(':memory:'); stores.push(s); return s; }
 
-/** FK 부모(place_info/camera_info/preset_pos) 시드 — slot_setup FK(cam_id,preset_id)→preset_pos 전제. */
+/** FK 부모(place_info/camera_info/preset_info) 시드 — slot_setup FK(cam_id,preset_id)→preset_info 전제. */
 function seedFkParents(store: SqliteStore, presets: Array<{ camId: number; presetId: number }>): void {
   store.upsertPlaceInfo([{ placeId: 1, placeName: 'P' }]);
   const camIds = [...new Set(presets.map((p) => p.camId))];
@@ -47,7 +47,7 @@ function seedFkParents(store: SqliteStore, presets: Array<{ camId: number; prese
     camId, camName: null, camUuid: null, url: null, userId: null, password: null, rtspUrl: null,
     camType: 'ptz', camCompany: null, placeId: 1, imgW: 1000, imgH: 1000, updatedAt: 'T',
   })));
-  store.upsertPresetPos(presets.map((p) => ({ camId: p.camId, presetId: p.presetId, sname: null, pan: 0, tilt: 0, zoom: 1, updatedAt: 'T' })));
+  store.upsertPresetInfo(presets.map((p) => ({ camId: p.camId, presetId: p.presetId, presetName: null, placeId: 1, pan: 0, tilt: 0, zoom: 1, updatedAt: 'T' })));
 }
 
 /** dets/presetRounds → CaptureSnapshot(finalize 가 fresh 재집계). */

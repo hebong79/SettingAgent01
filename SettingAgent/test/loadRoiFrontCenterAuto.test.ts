@@ -247,7 +247,7 @@ describe('U13. W6 부작용 격리 — slot3d_front_center 외 전 컬럼 불변
     const rows = s.store.getSlotSetup();
     const orphanId = Math.max(...rows.map((v) => v.slotId)) + 1;
     const camId = rows[0].camId;
-    s.store.upsertPresetPos([{ camId, presetId: 99, sname: 'orphan', pan: 0, tilt: 0, zoom: 1, updatedAt: 'T' }]);
+    s.store.upsertPresetInfo([{ camId, presetId: 99, presetName: 'orphan', placeId: 1, pan: 0, tilt: 0, zoom: 1, updatedAt: 'T' }]);
     const keep: SlotSetupRow[] = rows.map((v) => ({
       slotId: v.slotId, camId: v.camId, presetId: v.presetId, presetSlotIdx: v.presetSlotIdx,
       slotRoi: JSON.stringify(v.roi), vpdBbox: null, lpdObb: null, occupyRange: null,

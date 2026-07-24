@@ -13,7 +13,7 @@ import type { ToolsConfig } from '../src/config/toolsConfig.js';
 import type {
   CameraInfoRow,
   PlaceInfoRow,
-  PresetPosRow,
+  PresetInfoRow,
   SlotSetupRow,
 } from '../src/capture/types.js';
 import type { NormalizedPoint, NormalizedQuad } from '../src/domain/types.js';
@@ -69,7 +69,7 @@ const cameraRow: CameraInfoRow = {
   camId: 1, camName: null, camUuid: null, url: null, userId: null, password: null, rtspUrl: null,
   camType: 'ptz', camCompany: null, placeId: 1, imgW: 1920, imgH: 1080, updatedAt: 'T',
 };
-const presetRow: PresetPosRow = { camId: 1, presetId: 1, sname: 'Preset 1', pan: 10, tilt: 5, zoom: 2, updatedAt: 'T' };
+const presetRow: PresetInfoRow = { camId: 1, presetId: 1, presetName: 'Preset 1', placeId: 1, pan: 10, tilt: 5, zoom: 2, updatedAt: 'T' };
 const roi: NormalizedPoint[] = [{ x: 0.2, y: 0.2 }, { x: 0.5, y: 0.2 }, { x: 0.5, y: 0.5 }, { x: 0.2, y: 0.5 }];
 const lpdQuad: NormalizedQuad = [{ x: 0.33, y: 0.34 }, { x: 0.36, y: 0.35 }, { x: 0.34, y: 0.36 }, { x: 0.32, y: 0.35 }];
 const enrichedSlot = (over: Partial<SlotSetupRow> = {}): SlotSetupRow => ({
@@ -84,7 +84,7 @@ const enrichedSlot = (over: Partial<SlotSetupRow> = {}): SlotSetupRow => ({
 function seed(store: SqliteStore, slots: SlotSetupRow[]): void {
   store.upsertPlaceInfo([placeRow]);
   store.upsertCameraInfo([cameraRow]);
-  store.upsertPresetPos([presetRow]);
+  store.upsertPresetInfo([presetRow]);
   store.replaceSlotSetup(slots);
 }
 

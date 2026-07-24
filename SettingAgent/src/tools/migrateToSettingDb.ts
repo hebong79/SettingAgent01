@@ -8,7 +8,7 @@
  * 매핑(§5.1):
  *   place_info   ← 상수 {place_id:1, place_name:'Place01'}
  *   camera_info  ← PtzCamRoi cameras[].camera(cam_id/imageWidth/imageHeight, 나머지 NULL, cam_type='ptz')
- *   preset_pos   ← camerapos datas[].datas[](cam_id/preset_id/sname/pan/tilt/zoom)
+ *   preset_info  ← camerapos datas[].datas[](cam_id/preset_id/preset_name(=json sname)/pan/tilt/zoom)
  *   slot_setup   ← PtzCamRoi parking_spaces(slot_id=normalizeGlobalIdx, preset_slotidx=배열순 1-based, slot_roi=정규화 4점)
  *   센터라이징    ← slot_ptz.json items(있으면 slot_id=globalIdx 로 pan/tilt/zoom/centered=1 UPDATE)
  */
@@ -92,7 +92,7 @@ function main(): void {
     // FK 부모 우선: place → camera → preset → slot.
     store.upsertPlaceInfo(place);
     store.upsertCameraInfo(cameras);
-    store.upsertPresetPos(presets);
+    store.upsertPresetInfo(presets);
     store.replaceSlotSetup(slots);
 
     // 센터라이징 이관(파일 우선, 없으면 스킵 — 구 DB centering_slot 1행은 선택적).

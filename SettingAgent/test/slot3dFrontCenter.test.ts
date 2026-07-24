@@ -241,7 +241,7 @@ describe('SqliteStore — slot3d_front_center 마이그레이션 + 왕복', () =
       camId: 1, camName: null, camUuid: null, url: null, userId: null, password: null, rtspUrl: null,
       camType: 'ptz', camCompany: null, placeId: 1, imgW: 1000, imgH: 1000, updatedAt: 'T',
     }]);
-    store.upsertPresetPos([{ camId: 1, presetId: 1, sname: null, pan: 0, tilt: 0, zoom: 1, updatedAt: 'T' }]);
+    store.upsertPresetInfo([{ camId: 1, presetId: 1, presetName: null, placeId: 1, pan: 0, tilt: 0, zoom: 1, updatedAt: 'T' }]);
 
     const roi = JSON.stringify([{ x: 0.2, y: 0.2 }, { x: 0.5, y: 0.2 }, { x: 0.5, y: 0.5 }, { x: 0.2, y: 0.5 }]);
     const base = {
@@ -289,7 +289,7 @@ describe('Finalizer — slot3d_front_center 채움/강등', () => {
       camId: 1, camName: null, camUuid: null, url: null, userId: null, password: null, rtspUrl: null,
       camType: 'ptz', camCompany: null, placeId: 1, imgW: 1000, imgH: 1000, updatedAt: 'T',
     }]);
-    store.upsertPresetPos([{ camId: 1, presetId: 1, sname: null, pan: 0, tilt: 0, zoom: 1, updatedAt: 'T' }]);
+    store.upsertPresetInfo([{ camId: 1, presetId: 1, presetName: null, placeId: 1, pan: 0, tilt: 0, zoom: 1, updatedAt: 'T' }]);
   }
   /** 슬롯 폴리곤(픽셀, imageWidth/Height=1000 → /1000 정규화). 지면 유효 영역(하단). */
   const POLY: number[][] = [[400, 720], [420, 600], [580, 600], [600, 720]];

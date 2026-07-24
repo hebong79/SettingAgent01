@@ -19,7 +19,7 @@ import type {
   SlotSetupView,
   CameraInfoRow,
   PlaceInfoRow,
-  PresetPosRow,
+  PresetInfoRow,
   SlotSetupRow,
 } from '../src/capture/types.js';
 import type { SetupArtifact } from '../src/domain/types.js';
@@ -344,8 +344,8 @@ const cameraRow = (): CameraInfoRow => ({
   camId: 1, camName: null, camUuid: null, url: null, userId: null, password: null, rtspUrl: null,
   camType: 'ptz', camCompany: null, placeId: 1, imgW: 1920, imgH: 1080, updatedAt: 'T',
 });
-const presetRow = (presetId = 1): PresetPosRow => ({
-  camId: 1, presetId, sname: `Preset ${presetId}`, pan: 10, tilt: 5, zoom: 2, updatedAt: 'T',
+const presetRow = (presetId = 1): PresetInfoRow => ({
+  camId: 1, presetId, presetName: `Preset ${presetId}`, placeId: 1, pan: 10, tilt: 5, zoom: 2, updatedAt: 'T',
 });
 const slotRow = (slotId: number, roi: NormalizedPoint[], over: Partial<SlotSetupRow> = {}): SlotSetupRow => ({
   slotId, camId: 1, presetId: 1, presetSlotIdx: slotId,
@@ -358,7 +358,7 @@ describe('실DB 왕복 (경계면 실증 — 시드→POST→getSlotSetup 재조
     const s = makeServer(); app = s.app; store = s.store;
     s.store.upsertPlaceInfo([placeRow()]);
     s.store.upsertCameraInfo([cameraRow()]);
-    s.store.upsertPresetPos([presetRow(1)]);
+    s.store.upsertPresetInfo([presetRow(1)]);
     const roi1 = rectPoly(0.10, 0.30, 0.15, 0.15);
     const fc1 = { x: 0.175, y: 0.40 };
     s.store.replaceSlotSetup([
@@ -394,7 +394,7 @@ describe('실DB 왕복 (경계면 실증 — 시드→POST→getSlotSetup 재조
     const s = makeServer(); app = s.app; store = s.store;
     s.store.upsertPlaceInfo([placeRow()]);
     s.store.upsertCameraInfo([cameraRow()]);
-    s.store.upsertPresetPos([presetRow(1)]);
+    s.store.upsertPresetInfo([presetRow(1)]);
     s.store.replaceSlotSetup([
       slotRow(1, rectPoly(0.10, 0.30, 0.15, 0.15), { slot3dFrontCenter: JSON.stringify({ x: 0.175, y: 0.40 }) }),
     ]);

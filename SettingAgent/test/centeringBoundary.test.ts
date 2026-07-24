@@ -102,7 +102,7 @@ function makeServer() {
   // upsertSlotCentering 은 기존 slot_setup 행만 UPDATE → globalIdx(1,2) 에 대응하는 slot_setup 을 사전 시드.
   store.upsertPlaceInfo([{ placeId: 1, placeName: 'P' }]);
   store.upsertCameraInfo([{ camId: 1, camName: null, camUuid: null, url: null, userId: null, password: null, rtspUrl: null, camType: 'ptz', camCompany: null, placeId: 1, imgW: 1000, imgH: 1000, updatedAt: 'seed' }]);
-  store.upsertPresetPos([{ camId: 1, presetId: 1, sname: null, pan: 0, tilt: 0, zoom: 1, updatedAt: 'seed' }]);
+  store.upsertPresetInfo([{ camId: 1, presetId: 1, presetName: null, placeId: 1, pan: 0, tilt: 0, zoom: 1, updatedAt: 'seed' }]);
   const roi = JSON.stringify([{ x: 0.6, y: 0.6 }, { x: 0.7, y: 0.6 }, { x: 0.7, y: 0.65 }, { x: 0.6, y: 0.65 }]);
   store.replaceSlotSetup([
     { slotId: 1, camId: 1, presetId: 1, presetSlotIdx: 1, slotRoi: roi, vpdBbox: null, lpdObb: JSON.stringify(rectToQuad({ x: 0.62, y: 0.62, w: 0.05, h: 0.03 })), occupyRange: null, pan: null, tilt: null, zoom: null, centered: 0, img1: null, slot3dFrontCenter: null, updatedAt: 'seed' },

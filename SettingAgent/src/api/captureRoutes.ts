@@ -449,7 +449,7 @@ async function handleSlotsLoadRoi(deps: CaptureRouteDeps, _req: FastifyRequest, 
       reply.code(404);
       return { ok: false, error: 'placeRoiFile 미설정' };
     }
-    // 프리셋 라이브 선갱신(/capture/start 와 동일 패턴). slot_setup 은 preset_pos 를 FK 부모로 요구하므로,
+    // 프리셋 라이브 선갱신(/capture/start 와 동일 패턴). slot_setup 은 preset_info 를 FK 부모로 요구하므로,
     // camerapos.json 이 옛 프리셋만 담고 있으면 신규 카메라 주차면이 통째로 skipped 된다. 공급자가 있으면
     // 먼저 최신 프리셋을 받아 camerapos.json 을 갱신해 FK 부모를 확보한다. 실패는 강등(기존 파일로 진행).
     let presetRefresh: string | undefined;

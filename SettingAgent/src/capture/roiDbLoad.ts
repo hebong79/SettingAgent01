@@ -13,7 +13,7 @@ import { normalizePtzCamRoi, normalizeGlobalIdx } from './placeRoi.js';
 import type { SqliteStore } from './SqliteStore.js';
 import type { SetupTarget } from '../setup/SetupOrchestrator.js';
 import type { CameraView } from '../setup/mapTargets.js';
-import type { CameraInfoRow, PresetPosRow, SlotSetupRow } from './types.js';
+import type { CameraInfoRow, PresetInfoRow, SlotSetupRow } from './types.js';
 import { stringify5 } from '../util/round.js';
 
 export const PLACE_ID = 1;
@@ -49,7 +49,7 @@ export function buildCameras(ptzRaw: unknown, now: string): CameraInfoRow[] {
 }
 
 /**
- * PtzCamRoi cameras[].presets[] 에 **프리셋 PTZ 가 들어있으면** 그것을 preset_pos 로 만든다(선택 필드).
+ * PtzCamRoi cameras[].presets[] 에 **프리셋 PTZ 가 들어있으면** 그것을 preset_info 로 만든다(선택 필드).
  * 시뮬레이터가 ROI 파일 하나로 카메라·프리셋·주차면을 모두 내보내면 camerapos.json 없이도 FK 부모가 선다.
  *
  * 허용 형태(둘 다 지원, 없으면 그 프리셋은 건너뜀 → 하위호환):
@@ -57,11 +57,11 @@ export function buildCameras(ptzRaw: unknown, now: string): CameraInfoRow[] {
  *   { "preset_idx":1, "pan":22, "tilt":6.8, "zoom":1.69, ... }
  * pan/tilt/zoom 3개가 모두 유한수일 때만 채택한다(부분 입력은 무시 — 자리표시자로 강등).
  */
-export function buildPresetsFromRoi(ptzRaw: unknown, now: string): PresetPosRow[] {
+export function buildPresetsFromRoi(ptzRaw: unknown, now: string): PresetInfoRow[] {
   const cameras = Array.isArray((ptzRaw as { cameras?: unknown })?.cameras)
     ? (ptzRaw as { cameras: unknown[] }).cameras
     : [];
-  const out: PresetPosRow[] = [];
+  const out: PresetInfoRow[] = [];
   for (const entry of cameras) {
     const e = entry as { camera?: { cam_id?: unknown }; presets?: unknown };
     const camId = Number(e?.camera?.cam_id);
@@ -81,7 +81,7 @@ export function buildPresetsFromRoi(ptzRaw: unknown, now: string): PresetPosRow[
       const zoom = Number(src?.zoom);
       if (!Number.isFinite(pan) || !Number.isFinite(tilt) || !Number.isFinite(zoom)) continue;
       const label = typeof p?.sname === 'string' ? p.sname : typeof p?.name === 'string' ? p.name : null;
-      out.push({ camId, presetId, sname: label, pan, tilt, zoom, updatedAt: now });
+      out.push({ camId, presetId, presetName: label, placeId: PLACE_ID, pan, tilt, zoom, updatedAt: now });
     }
   }
   return out;
@@ -105,7 +105,7 @@ export function loadSetupTargetsFromRoi(placeRoiFile: string): SetupTarget[] {
     .map((p) => ({
       camIdx: p.camId,
       presetIdx: p.presetId,
-      label: p.sname ?? `C${p.camId}-P${p.presetId}`,
+      label: p.presetName ?? `C${p.camId}-P${p.presetId}`,
       ptz: { pan: p.pan, tilt: p.tilt, zoom: p.zoom },
     }));
 }
@@ -120,19 +120,19 @@ export function roiToCameraViews(ptzRaw: unknown): CameraView[] {
     .map((p) => ({
       camIdx: p.camId,
       presetIdx: p.presetId,
-      label: p.sname ?? `Preset ${p.presetId}`,
+      label: p.presetName ?? `Preset ${p.presetId}`,
       pan: p.pan,
       tilt: p.tilt,
       zoom: p.zoom,
     }));
 }
 
-/** camerapos datas[].datas[] → preset_pos. */
-export function buildPresets(cameraposRaw: unknown, now: string): PresetPosRow[] {
+/** camerapos datas[].datas[] → preset_info. */
+export function buildPresets(cameraposRaw: unknown, now: string): PresetInfoRow[] {
   const groups = Array.isArray((cameraposRaw as { datas?: unknown })?.datas)
     ? (cameraposRaw as { datas: unknown[] }).datas
     : [];
-  const out: PresetPosRow[] = [];
+  const out: PresetInfoRow[] = [];
   for (const g of groups) {
     const inner = Array.isArray((g as { datas?: unknown })?.datas) ? (g as { datas: unknown[] }).datas : [];
     for (const d of inner) {
@@ -143,7 +143,8 @@ export function buildPresets(cameraposRaw: unknown, now: string): PresetPosRow[]
       out.push({
         camId,
         presetId,
-        sname: typeof p?.sname === 'string' ? p.sname : null,
+        presetName: typeof p?.sname === 'string' ? p.sname : null, // JSON 키 sname → DB 컬럼 preset_name
+        placeId: PLACE_ID,
         pan: Number(p?.pan),
         tilt: Number(p?.tilt),
         zoom: Number(p?.zoom),
@@ -207,7 +208,7 @@ export interface RoiDbLoadResult {
 
 export interface RoiDbLoadOptions {
   placeRoiFile: string;
-  /** camerapos.json 경로(옵셔널). 없으면 preset upsert 를 건너뛰고 기존 preset_pos 로만 FK 판정. */
+  /** camerapos.json 경로(옵셔널). 없으면 preset upsert 를 건너뛰고 기존 preset_info 로만 FK 판정. */
   cameraposFile?: string;
   now: string;
 }
@@ -218,7 +219,7 @@ function fail(error: string, issues: string[], skipped: RoiDbLoadResult['skipped
 
 /**
  * PtzCamRoi(+camerapos) → place/camera/preset upsert → slot_setup 전량 교체.
- * 부모 upsert 순서 고정: place_info → camera_info → preset_pos → replaceSlotSetup.
+ * 부모 upsert 순서 고정: place_info → camera_info → preset_info → replaceSlotSetup.
  */
 export function loadRoiIntoDb(store: SqliteStore, opts: RoiDbLoadOptions): RoiDbLoadResult {
   const issues: string[] = [];
@@ -248,8 +249,8 @@ export function loadRoiIntoDb(store: SqliteStore, opts: RoiDbLoadOptions): RoiDb
   }
   const cameras = buildCameras(ptzRaw, opts.now);
 
-  // preset_pos 는 camerapos.json 이 정본. 없으면 upsert 생략(기존 행으로만 FK 판정).
-  let presets: PresetPosRow[] = [];
+  // preset_info 는 camerapos.json 이 정본. 없으면 upsert 생략(기존 행으로만 FK 판정).
+  let presets: PresetInfoRow[] = [];
   if (opts.cameraposFile && existsSync(opts.cameraposFile)) {
     try {
       presets = buildPresets(JSON.parse(readFileSync(opts.cameraposFile, 'utf-8')), opts.now);
@@ -257,48 +258,48 @@ export function loadRoiIntoDb(store: SqliteStore, opts: RoiDbLoadOptions): RoiDb
       issues.push(`camerapos.json 파싱 실패 — preset upsert 생략: ${err instanceof Error ? err.message : String(err)}`);
     }
   } else {
-    issues.push('camerapos.json 없음 — preset upsert 생략(기존 preset_pos 로 FK 판정)');
+    issues.push('camerapos.json 없음 — preset upsert 생략(기존 preset_info 로 FK 판정)');
   }
 
   try {
     // FK 부모 우선: place → camera → preset.
     store.upsertPlaceInfo([{ placeId: PLACE_ID, placeName: PLACE_NAME }]);
     store.upsertCameraInfo(cameras);
-    if (presets.length > 0) store.upsertPresetPos(presets);
+    if (presets.length > 0) store.upsertPresetInfo(presets);
 
     // ROI 파일이 프리셋 PTZ 를 직접 담고 있으면 그것이 정본 — camerapos 뒤에 upsert 해 우선한다.
     const roiPresets = buildPresetsFromRoi(ptzRaw, opts.now);
     if (roiPresets.length > 0) {
-      store.upsertPresetPos(roiPresets);
+      store.upsertPresetInfo(roiPresets);
       issues.push(`ROI 파일의 프리셋 PTZ ${roiPresets.length}건 채택(camerapos.json 보다 우선)`);
     }
 
-    // ROI 파일이 가진 (cam,preset) 중 preset_pos 에 없는 것은 **ROI 파일 기준으로 부모 행을 만든다**.
+    // ROI 파일이 가진 (cam,preset) 중 preset_info 에 없는 것은 **ROI 파일 기준으로 부모 행을 만든다**.
     // ROI 정본이 주차면의 소속 프리셋을 정의하므로, camerapos.json 이 뒤처졌다는 이유로 주차면을
     // 통째로 버리지 않는다(마스터 요청: 파일의 전 주차면 적재).
-    // PTZ 는 실측이 아니므로 0/0/1 자리표시자 + sname 에 'PTZ 미상' 을 남기고 issues 로 보고한다.
-    // ★ 안전 근거: preset_pos 의 pan/tilt/zoom 을 읽는 코드는 없다(카메라 이동은 camerapos.json/
+    // PTZ 는 실측이 아니므로 0/0/1 자리표시자 + preset_name 에 'PTZ 미상' 을 남기고 issues 로 보고한다.
+    // ★ 안전 근거: preset_info 의 pan/tilt/zoom 을 읽는 코드는 없다(카메라 이동은 camerapos.json/
     //   presetProvider 가 담당). 자리표시자가 카메라를 잘못 움직일 수 없다.
     // ★ camerapos 실측을 먼저 upsert 한 뒤 '아직 없는 키'에만 채우므로 실측값을 덮어쓰지 않는다.
     const havePresets = store.getPresetKeys();
-    const placeholders: PresetPosRow[] = [];
+    const placeholders: PresetInfoRow[] = [];
     for (const key of byPreset.keys()) {
       if (havePresets.has(key)) continue;
       const [camId, presetId] = key.split(':').map(Number);
       placeholders.push({
-        camId, presetId, sname: `C${camId}-P${presetId} (PTZ 미상)`,
+        camId, presetId, presetName: `C${camId}-P${presetId} (PTZ 미상)`, placeId: PLACE_ID,
         pan: 0, tilt: 0, zoom: 1, updatedAt: opts.now,
       });
     }
     if (placeholders.length > 0) {
-      store.upsertPresetPos(placeholders);
+      store.upsertPresetInfo(placeholders);
       issues.push(
-        `preset_pos 자리표시자 ${placeholders.length}건 생성(PTZ 미상 — camerapos.json 갱신 필요): ` +
+        `preset_info 자리표시자 ${placeholders.length}건 생성(PTZ 미상 — camerapos.json 갱신 필요): ` +
           placeholders.map((p) => `cam${p.camId}:preset${p.presetId}`).join(', '),
       );
     }
 
-    // FK 부모(preset_pos)가 없는 (cam,preset) 슬롯은 제외 — 전량 INSERT 실패 방지(방어적 잔존 경로).
+    // FK 부모(preset_info)가 없는 (cam,preset) 슬롯은 제외 — 전량 INSERT 실패 방지(방어적 잔존 경로).
     const parentKeys = store.getPresetKeys();
     const keep: SlotSetupRow[] = [];
     const dropped = new Map<string, number>();
@@ -309,10 +310,10 @@ export function loadRoiIntoDb(store: SqliteStore, opts: RoiDbLoadOptions): RoiDb
     }
     for (const [key, count] of dropped) {
       const [camId, presetId] = key.split(':').map(Number);
-      skipped.push({ camId, presetId, count, reason: 'preset_pos 부모 없음(FK)' });
+      skipped.push({ camId, presetId, count, reason: 'preset_info 부모 없음(FK)' });
     }
     if (keep.length === 0) {
-      return fail('FK 부모(preset_pos) 있는 슬롯 0건 — slot_setup 무변경', issues, skipped);
+      return fail('FK 부모(preset_info) 있는 슬롯 0건 — slot_setup 무변경', issues, skipped);
     }
 
     store.replaceSlotSetup(keep);

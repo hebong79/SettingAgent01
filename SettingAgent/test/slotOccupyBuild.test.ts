@@ -14,7 +14,7 @@ import type { CameraClient } from '../src/clients/CameraClient.js';
 import type { VpdClient } from '../src/clients/VpdClient.js';
 import type { CapturedImage, NormalizedPoint, NormalizedQuad, SetupArtifact } from '../src/domain/types.js';
 import type { Repository } from '../src/store/Repository.js';
-import type { CameraInfoRow, PlaceInfoRow, PresetPosRow, SlotSetupRow } from '../src/capture/types.js';
+import type { CameraInfoRow, PlaceInfoRow, PresetInfoRow, SlotSetupRow } from '../src/capture/types.js';
 import type { ToolsConfig } from '../src/config/toolsConfig.js';
 
 /**
@@ -84,7 +84,7 @@ const cameraRow = (): CameraInfoRow => ({
   camId: 1, camName: null, camUuid: null, url: null, userId: null, password: null, rtspUrl: null,
   camType: 'ptz', camCompany: null, placeId: 1, imgW: 1920, imgH: 1080, updatedAt: 'T',
 });
-const presetRow = (presetId = 1): PresetPosRow => ({ camId: 1, presetId, sname: null, pan: 0, tilt: 0, zoom: 1, updatedAt: 'T' });
+const presetRow = (presetId = 1): PresetInfoRow => ({ camId: 1, presetId, presetName: null, placeId: 1, pan: 0, tilt: 0, zoom: 1, updatedAt: 'T' });
 const slotRow = (slotId: number, presetId: number, over: Partial<SlotSetupRow> = {}): SlotSetupRow => ({
   slotId, camId: 1, presetId, presetSlotIdx: slotId,
   slotRoi: JSON.stringify(rectPoly(0.1 * slotId, 0.3, 0.15, 0.15)),
@@ -97,8 +97,8 @@ const OLD_OCCUPY = JSON.stringify(rectPoly(0.8, 0.8, 0.05, 0.05));
 function seed(s: SqliteStore) {
   s.upsertPlaceInfo([placeRow()]);
   s.upsertCameraInfo([cameraRow()]);
-  s.upsertPresetPos([presetRow(1)]);
-  s.upsertPresetPos([presetRow(2)]);
+  s.upsertPresetInfo([presetRow(1)]);
+  s.upsertPresetInfo([presetRow(2)]);
   s.replaceSlotSetup([
     slotRow(1, 1, { lpdObb: stringify5(plateAt(0.20, 0.50)) }),
     slotRow(2, 1, { lpdObb: stringify5(plateAt(0.40, 0.52)), occupyRange: OLD_OCCUPY, vpdBbox: JSON.stringify({ x: 0.3, y: 0.3, w: 0.1, h: 0.1 }) }),
@@ -169,7 +169,7 @@ describe('POST /capture/slots/occupy (점유영역 생성 — 실DB 왕복)', ()
     const s = makeServer(); app = s.app; store = s.store;
     s.store.upsertPlaceInfo([placeRow()]);
     s.store.upsertCameraInfo([cameraRow()]);
-    s.store.upsertPresetPos([presetRow(1)]);
+    s.store.upsertPresetInfo([presetRow(1)]);
     s.store.replaceSlotSetup([slotRow(1, 1, { occupyRange: OLD_OCCUPY })]);
     const r = await app.inject({ method: 'POST', url: '/capture/slots/occupy', payload: { cam: 1, preset: 1 } });
     expect(JSON.parse(r.body)).toMatchObject({ ok: true, updated: 0, skipped: 1 });

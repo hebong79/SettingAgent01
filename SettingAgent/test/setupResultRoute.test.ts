@@ -16,7 +16,7 @@ import type { CameraClient } from '../src/clients/CameraClient.js';
 import type { VpdClient } from '../src/clients/VpdClient.js';
 import type { CapturedImage, NormalizedPoint, SetupArtifact } from '../src/domain/types.js';
 import type { Repository } from '../src/store/Repository.js';
-import type { CameraInfoRow, PlaceInfoRow, PresetPosRow, SlotSetupRow, SlotSetupView } from '../src/capture/types.js';
+import type { CameraInfoRow, PlaceInfoRow, PresetInfoRow, SlotSetupRow, SlotSetupView } from '../src/capture/types.js';
 import type { ToolsConfig } from '../src/config/toolsConfig.js';
 
 /**
@@ -56,7 +56,7 @@ const cameraRow = (): CameraInfoRow => ({
   camId: 1, camName: null, camUuid: null, url: null, userId: null, password: null, rtspUrl: null,
   camType: 'ptz', camCompany: null, placeId: 1, imgW: 1920, imgH: 1080, updatedAt: 'T',
 });
-const presetRow = (): PresetPosRow => ({ camId: 1, presetId: 1, sname: null, pan: 0, tilt: 0, zoom: 1, updatedAt: 'T' });
+const presetRow = (): PresetInfoRow => ({ camId: 1, presetId: 1, presetName: null, placeId: 1, pan: 0, tilt: 0, zoom: 1, updatedAt: 'T' });
 const slotRow = (slotId: number, over: Partial<SlotSetupRow> = {}): SlotSetupRow => ({
   slotId, camId: 1, presetId: 1, presetSlotIdx: slotId,
   slotRoi: JSON.stringify(rectPoly(0.1 * slotId, 0.3, 0.15, 0.15)),
@@ -96,7 +96,7 @@ function makeServer() {
   // 2슬롯 시드: 1번은 점유·PTZ 완비, 2번은 미센터라이징(centering=null 기대).
   s.upsertPlaceInfo([placeRow()]);
   s.upsertCameraInfo([cameraRow()]);
-  s.upsertPresetPos([presetRow()]);
+  s.upsertPresetInfo([presetRow()]);
   s.replaceSlotSetup([
     slotRow(1, {
       occupyRange: JSON.stringify(rectPoly(0.12, 0.34, 0.1, 0.08)),

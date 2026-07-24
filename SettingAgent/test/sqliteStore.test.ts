@@ -7,7 +7,7 @@ import { SqliteStore } from '../src/capture/SqliteStore.js';
 import type {
   CameraInfoRow,
   PlaceInfoRow,
-  PresetPosRow,
+  PresetInfoRow,
   SlotCenteringRow,
   SlotLpdRow,
   SlotSetupRow,
@@ -35,8 +35,8 @@ const cameraRow = (over: Partial<CameraInfoRow> = {}): CameraInfoRow => ({
   camType: 'ptz', camCompany: null, placeId: 1, imgW: 1920, imgH: 1080, updatedAt: 'T', ...over,
 });
 
-const presetRow = (over: Partial<PresetPosRow> = {}): PresetPosRow => ({
-  camId: 1, presetId: 1, sname: 'Preset 1', pan: 10, tilt: 5, zoom: 2, updatedAt: 'T', ...over,
+const presetRow = (over: Partial<PresetInfoRow> = {}): PresetInfoRow => ({
+  camId: 1, presetId: 1, presetName: 'Preset 1', placeId: 1, pan: 10, tilt: 5, zoom: 2, updatedAt: 'T', ...over,
 });
 
 const roi: NormalizedPoint[] = [
@@ -52,12 +52,12 @@ const slotRow = (over: Partial<SlotSetupRow> = {}): SlotSetupRow => ({
   pan: null, tilt: null, zoom: null, centered: 0, img1: null, slot3dFrontCenter: null, updatedAt: 'T', ...over,
 });
 
-/** place/camera/preset(FK 부모) 를 시드한 :memory: 스토어. slot_setup FK(→preset_pos) 충족용. */
-function seededStore(presets: PresetPosRow[] = [presetRow()]): SqliteStore {
+/** place/camera/preset(FK 부모) 를 시드한 :memory: 스토어. slot_setup FK(→preset_info) 충족용. */
+function seededStore(presets: PresetInfoRow[] = [presetRow()]): SqliteStore {
   const s = new SqliteStore(':memory:');
   s.upsertPlaceInfo([placeRow()]);
   s.upsertCameraInfo([cameraRow()]);
-  s.upsertPresetPos(presets);
+  s.upsertPresetInfo(presets);
   return s;
 }
 
@@ -70,7 +70,7 @@ describe('SqliteStore 스키마/부모 테이블 (신 6테이블)', () => {
         .prepare(`SELECT name FROM sqlite_master WHERE type='table'`).all()
         .map((r) => (r as { name: string }).name),
     );
-    for (const t of ['place_info', 'camera_info', 'preset_pos', 'slot_setup', 'parking_evnt', 'parking_slot']) {
+    for (const t of ['place_info', 'camera_info', 'preset_info', 'slot_setup', 'parking_evnt', 'parking_slot']) {
       expect(names.has(t)).toBe(true);
     }
     // 구 테이블은 없어야 한다(clean-cut).
@@ -79,11 +79,11 @@ describe('SqliteStore 스키마/부모 테이블 (신 6테이블)', () => {
     }
   });
 
-  it('upsertPlaceInfo/upsertCameraInfo/upsertPresetPos — PK 충돌 시 갱신(멱등)', () => {
+  it('upsertPlaceInfo/upsertCameraInfo/upsertPresetInfo — PK 충돌 시 갱신(멱등)', () => {
     store = new SqliteStore(':memory:');
     store.upsertPlaceInfo([placeRow()]);
     store.upsertCameraInfo([cameraRow({ password: 'secret', camName: 'C1' })]);
-    store.upsertPresetPos([presetRow()]);
+    store.upsertPresetInfo([presetRow()]);
     const db = (store as unknown as { db: Database.Database }).db;
     // password 는 store 계층에선 평문 저장(마스킹은 dbRoutes 조회계층 책임).
     expect((db.prepare(`SELECT password, cam_name FROM camera_info WHERE cam_id=1`).get() as { password: string; cam_name: string }))
@@ -97,8 +97,8 @@ describe('SqliteStore 스키마/부모 테이블 (신 6테이블)', () => {
 
 // ── foreign_keys=ON 실효 ────────────────────────────────────
 describe('SqliteStore FK 무결성 (foreign_keys=ON 실효)', () => {
-  it('부모(preset_pos) 없는 slot_setup INSERT 거부 → throw + 확정본 미변경(롤백)', () => {
-    // preset_pos 는 (1,1)만 시드. (1,9) 는 부모 부재 → FK 위반.
+  it('부모(preset_info) 없는 slot_setup INSERT 거부 → throw + 확정본 미변경(롤백)', () => {
+    // preset_info 는 (1,1)만 시드. (1,9) 는 부모 부재 → FK 위반.
     store = seededStore([presetRow({ presetId: 1 })]);
     store.replaceSlotSetup([slotRow({ slotId: 1, presetId: 1 })]);
     expect(store.getSlotSetup()).toHaveLength(1);
@@ -121,7 +121,7 @@ describe('SqliteStore FK 무결성 (foreign_keys=ON 실효)', () => {
 // ── replaceSlotSetup 트랜잭션 원자성 ────────────────────────
 describe('SqliteStore replaceSlotSetup 원자성 (설계 배경 A.3)', () => {
   it('정상 교체 → 전량 반영(멱등 replace)', () => {
-    store = seededStore([presetRow({ presetId: 1 }), presetRow({ presetId: 2, sname: 'Preset 2' })]);
+    store = seededStore([presetRow({ presetId: 1 }), presetRow({ presetId: 2, presetName: 'Preset 2' })]);
     store.replaceSlotSetup([
       slotRow({ slotId: 1, presetId: 1, presetSlotIdx: 1 }),
       slotRow({ slotId: 2, presetId: 2, presetSlotIdx: 1 }),
@@ -165,7 +165,7 @@ describe('SqliteStore replaceSlotSetup 원자성 (설계 배경 A.3)', () => {
 // ── getSlotSetup: presetKey 파생 · JSON 파싱 · 정렬 ─────────
 describe('SqliteStore getSlotSetup (presetKey 파생 · roi/vpd/lpd 파싱)', () => {
   it('presetKey=`${camId}:${presetId}` 파생 + *_json → 객체/배열 복원 + centered boolean', () => {
-    store = seededStore([presetRow({ presetId: 2, sname: 'Preset 2' })]);
+    store = seededStore([presetRow({ presetId: 2, presetName: 'Preset 2' })]);
     store.replaceSlotSetup([
       slotRow({
         slotId: 8, camId: 1, presetId: 2, presetSlotIdx: 6,
@@ -201,7 +201,7 @@ describe('SqliteStore getSlotSetup (presetKey 파생 · roi/vpd/lpd 파싱)', ()
   });
 
   it('ORDER BY cam_id, preset_id, preset_slotidx', () => {
-    store = seededStore([presetRow({ presetId: 1 }), presetRow({ presetId: 2, sname: 'P2' })]);
+    store = seededStore([presetRow({ presetId: 1 }), presetRow({ presetId: 2, presetName: 'P2' })]);
     store.replaceSlotSetup([
       slotRow({ slotId: 3, presetId: 2, presetSlotIdx: 1 }),
       slotRow({ slotId: 1, presetId: 1, presetSlotIdx: 1 }),
@@ -407,7 +407,7 @@ describe('SqliteStore 파일경로·스키마 재생성', () => {
       expect(existsSync(join(dir, 'nested'))).toBe(true);
       s1.upsertPlaceInfo([placeRow()]);
       s1.upsertCameraInfo([cameraRow()]);
-      s1.upsertPresetPos([presetRow()]);
+      s1.upsertPresetInfo([presetRow()]);
       s1.replaceSlotSetup([slotRow({ slotId: 1, presetId: 1, presetSlotIdx: 1 })]);
       s1.close();
       // 재오픈 → ensureSchema IF NOT EXISTS 재생성 무해, 기존 데이터 보존.

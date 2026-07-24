@@ -51,7 +51,7 @@ function seededStore(presetId: number): SqliteStore {
   stores.push(s);
   s.upsertPlaceInfo([{ placeId: 1, placeName: 'Place01' }]);
   s.upsertCameraInfo([{ camId: 1, camName: null, camUuid: null, url: null, userId: null, password: null, rtspUrl: null, camType: 'ptz', camCompany: null, placeId: 1, imgW: 1000, imgH: 1000, updatedAt: 'T' }]);
-  s.upsertPresetPos([{ camId: 1, presetId, sname: null, pan: 0, tilt: 0, zoom: 1, updatedAt: 'T' }]);
+  s.upsertPresetInfo([{ camId: 1, presetId, presetName: null, placeId: 1, pan: 0, tilt: 0, zoom: 1, updatedAt: 'T' }]);
   return s;
 }
 

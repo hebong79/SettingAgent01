@@ -15,7 +15,7 @@ import type { ToolsConfig } from '../src/config/toolsConfig.js';
 import type {
   CameraInfoRow,
   PlaceInfoRow,
-  PresetPosRow,
+  PresetInfoRow,
   SlotSetupRow,
 } from '../src/capture/types.js';
 import type { CapturedImage, SetupArtifact } from '../src/domain/types.js';
@@ -37,8 +37,8 @@ const cameraRow: CameraInfoRow = {
   camId: 1, camName: null, camUuid: null, url: null, userId: null, password: null, rtspUrl: null,
   camType: 'ptz', camCompany: null, placeId: 1, imgW: 1920, imgH: 1080, updatedAt: 'T',
 };
-const presetRow = (over: Partial<PresetPosRow> = {}): PresetPosRow => ({
-  camId: 1, presetId: 1, sname: 'P', pan: 10, tilt: 5, zoom: 2, updatedAt: 'T', ...over,
+const presetRow = (over: Partial<PresetInfoRow> = {}): PresetInfoRow => ({
+  camId: 1, presetId: 1, presetName: 'P', placeId: 1, pan: 10, tilt: 5, zoom: 2, updatedAt: 'T', ...over,
 });
 const roi = [{ x: 0.2, y: 0.2 }, { x: 0.5, y: 0.2 }, { x: 0.55, y: 0.5 }, { x: 0.2, y: 0.48 }];
 const slot = (over: Partial<SlotSetupRow> = {}): SlotSetupRow => ({
@@ -47,11 +47,11 @@ const slot = (over: Partial<SlotSetupRow> = {}): SlotSetupRow => ({
   pan: 10, tilt: 5, zoom: 3, centered: 1, img1: 'a.jpg', slot3dFrontCenter: null, updatedAt: 'T', ...over,
 });
 
-function seededStore(presets: PresetPosRow[] = [presetRow()]): SqliteStore {
+function seededStore(presets: PresetInfoRow[] = [presetRow()]): SqliteStore {
   const s = new SqliteStore(':memory:');
   s.upsertPlaceInfo([placeRow]);
   s.upsertCameraInfo([cameraRow]);
-  s.upsertPresetPos(presets);
+  s.upsertPresetInfo(presets);
   return s;
 }
 const rawDb = (s: SqliteStore) => (s as unknown as { db: Database.Database }).db;
@@ -202,7 +202,7 @@ function build(): Built {
   store = new SqliteStore(':memory:');
   store.upsertPlaceInfo([placeRow]);
   store.upsertCameraInfo([cameraRow]);
-  store.upsertPresetPos([presetRow({ presetId: 1 }), presetRow({ presetId: 2 }), presetRow({ presetId: 3 })]);
+  store.upsertPresetInfo([presetRow({ presetId: 1 }), presetRow({ presetId: 2 }), presetRow({ presetId: 3 })]);
   store.replaceSlotSetup([
     slot({ slotId: 1, presetId: 1, presetSlotIdx: 1 }),
     slot({ slotId: 2, presetId: 2, presetSlotIdx: 1 }),
