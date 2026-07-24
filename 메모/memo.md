@@ -28,6 +28,43 @@ memo.md에 새 항목을 추가하기 **전에** 파일 크기를 확인한다. 
 
 ---
 
+## 2026-07-24 초당 3프레임 패킷 부활 — 근본원인(편도 폴백) 제거 + 연결폴 30초 + 패킷로그 5분 요약
+
+**세션 요약 (브랜치 `fix/live-stream-poll-and-packet-log` → main 머지, origin 푸시 완료 · vitest 238files/2800 green · tsc 0)**
+
+- 발단: 마스터가 로그 스샷 2장(`fetch failed` 도배 / `status:200` 도배)과 함께 "초당 3프레임 요청 패킷이 부활했다. 근본 원인을 파악해줘".
+
+**① 근본원인 — 뷰어의 MJPEG→폴링 폴백이 편도(one-way)였다**
+
+- 3fps 폴링을 켜는 경로는 저장소 전체에 단 하나 — `app.js` `fallbackToPolling()` → `loop.start(fps=3)`. 트리거는 `<img src="/viewer/api/stream">` 의 `onerror`.
+- **스트림으로 돌아오는 자동 경로가 없었다.** 복귀는 사용자가 시작 버튼·cam/preset 변경을 눌렀을 때뿐. 4초 `connectionTick` 은 Unity 재연결을 감지해 뱃지만 켤 뿐 스트림을 복구하지 않음.
+- 로그 실증(`logs/setting_20260724_215422.log`): 21:54:22 서버 재기동 → MJPEG 절단 → 폴백(3.3/s, 전부 fetch failed) / 22:18:03 Unity down 상태에서 라이브 재시작 → `/stream` 502 → 재고착 / 22:18:17 Unity 기동 → **6.3/s 로 7분+ 지속**. 1프레임 = `mode=manual` 스냅샷 = `cam.setPTZ` + `cam.captureJPG` **2 RPC**(로그의 `ms:2~15`/`ms:58~76` 교대가 증거). 즉 뷰어가 카메라에 **초당 3회 제어 명령**을 쏘고 있었다.
+- 클라이언트는 서버가 아니라 **Chrome 탭**(pid 확인, `src/` 에 `setInterval` 0건). 그 시점에도 `/viewer/api/stream` 은 200/11.7MB(3초)로 **정상** — 고장난 건 탭의 `liveMode='poll'` 상태였다.
+
+**② 수정 — 폴백 코드 자체를 삭제하고 스트림 자동 재시도로 대체**
+
+- 삭제: `fallbackToPolling()`, `liveMode` 의 `'poll'`, `core.js` `fpsToInterval()`, `createStreamLoop` 의 타이머(`start`/`setTimer`/`clearTimer`), `index.html` 의 fps 입력, 대응 d.ts·테스트. **존치**: 라이브 off 의 1회 스냅샷(`snapshot.tick()`).
+- 개명: `createStreamLoop` → `createSnapshotFetcher(deps) → { tick, abort }` (타이머 빠지면 이름이 사실과 불일치).
+- 대체: `core.js` 순수함수 `nextStreamRetryDelay(prev)`(1s→×2→30s cap)·`streamRetryLabel()` + app.js 결선(`cancelStreamRetry()` 를 **타이머 소유 단일 지점**으로, 콜백에 `liveMode` 가드). `onload` = 백오프 리셋(MJPEG 는 프레임마다 발화). 최악에도 **30초당 1요청**.
+- qa 가 잡은 엣지 1건 보정: 실패 직후 시작 재클릭 시 **동일 URL 재대입**을 브라우저가 생략해 또 다른 고착 가능 → 실패 이력이 있을 때만 캐시버스터 `_r`. 정상 경로 URL 형태는 불변.
+
+**③ 연결폴 4초 → 30초** (`web/app.js` `CONN_POLL_MS = 30000`)
+
+- 라이브 중이면 스트림 `onerror`/`onload` 가 연결을 실시간 통지하므로 폴은 배경 동기화 역할만. 30초를 상한으로 본 근거: 그 이상이면 Unity 기동 후 목록 미반영 구간이 길어져 **수동 새로고침(F5)** 을 유발(그게 더 비싸다).
+
+**④ 패킷 로그 5분 요약** (신규 `src/util/packetAggregator.ts` 순수모듈 + `packetLog.ts` 결선)
+
+- 정책 4: **같은 키 첫 발생은 즉시 기록**(이번 진단이 최초 발생 시각·케이던스로 가능했으므로 진단력 사수) / 이후 반복만 5분 창 집계 / **실패·비-2xx 는 항상 즉시**(level 40 승격) / `n<=1` 이면 요약 생략.
+- 집계 키 `METHOD url(쿼리제거)#op` — 쿼리 제거는 Hucoms 가 id/passwd/좌표를 쿼리에 실어 **키 무한증식**(부수효과로 자격증명 미유입), `op` 는 `/rpc` 하나에 `cam.list`/`cam.setPTZ`/`cam.captureJPG` 가 뭉개지는 것 방지. `fetchWithTimeout` 에 선택 인자 `op?` 추가(다른 호출자 무영향).
+- 플러시는 **지연 sweep(타이머 0개)**. qa 지적으로 **`span` 필드 추가** — `win` 만 쓰면 침묵 구간이 섞여 rate 가 최대 1/100 로 과소평가된다. 판독: 활성 rate `(n-1)/span*1000`, 창 평균 `n/win*1000`, 침묵량 `win-span`.
+- 라이브 실측: `23:39:52 즉시 → 23:44:52 요약{win:303972, span:299971, n:76, ok:76, msAvg:10}` + 즉시 1줄 = **5분에 3줄**(종전 76줄). 활성 rate 0.25/s = 4초 간격 → **그 시점 브라우저가 하드리로드 전이라 30초가 미적용**임이 요약 한 줄로 드러남(진단력 보존의 실증).
+
+**함정·인수인계**
+
+- `web/*` 는 **nodemon 감시 밖**(`src` 만 감시). 뷰어 코드를 고쳐도 **하드리로드(Ctrl+Shift+R) 전까지 기존 탭은 옛 코드로 계속 돈다** — 이번 고착도 그래서 오래 살아있었다. 다음 세션에서 뷰어 변경 후엔 항상 이걸 먼저 확인할 것.
+- 미검증 한계: 실브라우저 스모크(F21~23), MJPEG 의 프레임별 `onload` 발화·동일 URL 재요청 생략 여부는 node 유닛으로 재현 불가. `/ptz?cam_idx=N` 은 쿼리 제거로 카메라별 관측력 상실(한계로 수용).
+- 문서: `docs/20260724_225404_라이브스트림_폴링폴백제거_자동재시도.md`, `docs/20260724_234344_연결폴30초_패킷로그5분요약.md`. 감사 산출물 `_workspace/00~08`.
+
 ## 2026-07-24 프리셋 순서값(id) 도입 — 분석탭 첫 열 + DB preset_info.id 첫 컬럼 배치
 
 **세션 요약 (커밋 `1f044f1`, `1d7d3b2` · 워크트리 `preset-order-id` → main FF 머지, origin 푸시는 안 함)**

@@ -1,70 +1,125 @@
-# 04 영향도 요약 — 전역번호 재번호(A안)
+# 04 영향도 분석 — 3fps 폴링 폴백 제거 + 스트림 자동 재시도
 
-작성: documenter / 2026-07-23 20:40:07 (KST) / WT: analyze-fill-check
-최종 문서: `SettingAgent/docs/20260723_204007_전역번호재번호_A안.md`
+작성: 2026-07-24 22:54 / 문서화·영향도 분석가(documenter) / 근거: 00~03 산출물 + 실제 코드(`web/core.js`,`web/core.d.ts`,`web/app.js`,`web/index.html`,`web/app.css`,`src/viewer/routes.ts`)
 
----
-
-## 1. 건드린 모듈 (변경 그래프)
-
-**신규(추가만, 기존 파일 무변경):**
-- `src/setup/renumberMapping.ts` — `validateRenumberMapping` (순수 검증)
-- `src/calibrate/slotPtzRenumber.ts` — `remapSlotPtz`(순수) / `renumberSlotPtzFile`(best-effort IO)
-- 테스트 5개: `test/renumberMapping.test.ts`, `test/sqliteStore.renumber.test.ts`, `test/slotPtzRenumber.test.ts`, `test/renumberRoute.test.ts`, `test/renumber.adversarial.test.ts`
-
-**수정(외과적, 메서드/라우트/함수 본문 단위 추가·교체):**
-- `src/capture/SqliteStore.ts` — `renumberSlotIds` 메서드 1개 추가. 기존 메서드(`replaceSlotSetup` 포함) 무변경.
-- `src/api/server.ts` — import 4종(`validateRenumberMapping`, `renumberSlotPtzFile`, `writeSetupResultFiles`, `logger`) + `RenumberBodySchema` + closure `renumberHandler` + 라우트 2개(`POST /mapping/renumber`, `POST /viewer/api/mapping/renumber`) 추가. 기존 라우트(`PUT /mapping` 등) 본문 무변경.
-- `web/app.js` — `saveManualIndex()` 함수 본문만 교체(호출부 `$('an-manual-save').addEventListener` 등 불변).
-- `test/viewerPtzSyncCoverage.test.ts` — NO_MOVE 라우트 분류 표에 `/mapping/renumber` 1행 추가(커버리지 봉인 테스트가 미분류 신규 라우트를 강제하므로 필수 변경).
-
-**참고(이 작업과 무관, WT에 이미 존재하던 선행 변경 — 혼동 방지용 명시):**
-- `src/setup/artifactFromSlotSetup.ts`(`buildArtifactFromSlotSetup`)는 이번 작업의 신규 산출물이 아니라 **이전 작업(분석 페이지 DB 즉석생성, `docs/20260723_174313_...`)에서 이미 만들어진 함수**를 재사용한 것이다. 본 작업은 이 함수를 import해 setup_artifact 재빌드에 쓸 뿐 수정하지 않았다.
-- `test/precisePreciseProgress.test.ts`(1줄 변경)는 git status상 이 WT의 별도 선행 변경으로 보이며, 본 작업의 변경 범위에 포함되지 않는다.
+최종 문서: `SettingAgent/docs/20260724_225404_라이브스트림_폴링폴백제거_자동재시도.md`
 
 ---
 
-## 2. slot_id 참조처 전파 정합
+## 1. web/ 자산 간 의존 파급
 
-| 참조처 | 재번호 처리 | 정합 확인 |
-|---|---|---|
-| DB `slot_setup.slot_id`(PK) | `renumberSlotIds` 트랜잭션 DELETE+re-INSERT, 전 14컬럼 원시 보존, slot_id만 new | QA §1-B A: 7소수 미round5 값·TEXT 컬럼·`updated_at` 바이트 동일 실증 |
-| DB `parking_evnt.slot_id`(FK, 스키마만) | 참조 안 함 — 재번호는 이 테이블이 **비어 있음**을 사전 확인 후에만 진행(행 있으면 throw) | QA §1-B C: `parking_evnt`/`parking_slot` 각각 참조행 주입 시 throw+DB무변경 실증 |
-| DB `parking_slot.slot_id`(FK, 스키마만) | 상동 | 상동 |
-| `setup_result.json` `slots[].slotId` | DB 재번호 후 `writeSetupResultFiles(getSlotSetup(), saveStore)` 재생성 → `buildSetupResult`가 `s.slotId`(=new) 사용 | QA §1-B E: DB↔setup_result 전역ID 일치(presetIdx 조인) |
-| `slot_ptz.json` `items[].slotId`/`globalIdx` | DB로 재생성 불가(plateWidth/converged가 DB에 없음) → 기존 파일을 읽어 `remapSlotPtz`로 old→new만 리맵 후 rewrite | QA §1-B E,F: plateWidth 물리고정 유지, new asc 정렬, 미커버 무변, 비배열 items skip |
-| `setup_artifact.json` `globalIndex[].globalIdx`/`slotId`, `slots[].slotId` | DB 재번호 후 `buildArtifactFromSlotSetup(getSlotSetup())`으로 전체 재빌드·저장 | QA §1-B E: globalIdx===Number(slotId) 불변식 + 4소스 일치 |
-| 클라이언트 `web/app.js` (분석 탭 표/주차면 목록) | `saveManualIndex`가 서버 응답 성공 시 `loadMapping→renderAnalysis→renderSlotList` 순으로 재조회·재렌더 | 코드 확인(직접 Read) — 순서 준수, `renderAnalysis`는 내부에서 `fetchArtifact()`로 재조회하므로 `lastArtifact` 자동 갱신 |
+```
+web/core.js (순수 로직, DOM/타이머 미참조)
+   ├─ export nextStreamRetryDelay, streamRetryLabel   (신규)
+   ├─ export createSnapshotFetcher  ← 개명(구 createStreamLoop, start/setTimer/clearTimer 삭제)
+   └─ export moveRenderDirective    (본문 무변경, 인자 union만 축소)
+        │  타입 재수출
+        ▼
+web/core.d.ts
+   ├─ SnapshotFetcherDeps ← StreamLoopDeps (setTimer?/clearTimer? 삭제)
+   ├─ SnapshotFetcher{tick,abort} ← StreamLoop{start,stop,tick}
+   ├─ createSnapshotFetcher 선언 ← createStreamLoop
+   ├─ nextStreamRetryDelay/streamRetryLabel 신규 선언
+   └─ moveRenderDirective 인자 'off'|'stream' (구 +'poll' 제거)
+        │  import
+        ▼
+web/app.js
+   ├─ import 교체: createStreamLoop→createSnapshotFetcher, +nextStreamRetryDelay/streamRetryLabel
+   ├─ const snapshot = createSnapshotFetcher({...})  (구 loop)
+   ├─ liveMode 'off'|'stream'(구 +'poll'), fallbackToPolling() 삭제
+   ├─ 신규: cancelStreamRetry/onStreamLoad/onStreamError/connectStream
+   ├─ startLive/stopLive/reconnectLiveIfActive 재구현(connectStream 경유)
+   ├─ move() else 분기: loop.tick() → snapshot.tick()
+   └─ DOM 참조: $('fps') 삭제, $('live-status') 신규
+        │  DOM 결선 대상
+        ▼
+web/index.html
+   ├─ 삭제: <input id="fps">
+   └─ 신규: <span id="live-status" aria-live="polite">
+        │  스타일
+        ▼
+web/app.css
+   └─ 신규: #live-status 규칙 3줄 (#ptz-control-status 패턴 차용, 기존 .field.compact input 등 무변경)
+```
 
-결론: **4개 소스(DB·setup_result.json·slot_ptz.json·setup_artifact.json) + 클라이언트 표시가 단일 트랜잭션(DB) + 순차 best-effort(파일 3종) + 재렌더(클라)로 정합됨**을 설계·구현·QA 3단계 모두에서 일관되게 확인.
+**개명(`createStreamLoop → createSnapshotFetcher`)의 파급 범위는 4개 지점으로 닫혀 있다**: `core.js`(정의) · `core.d.ts`(타입) · `app.js`(호출 4곳: 생성/두 stop 지점/tick 지점) · `test/viewerCore.test.ts`(describe 제목·it 이름 갱신, 신규 `test/liveStreamRetry.test.ts`는 새 이름으로 작성). `grep -rn "createStreamLoop|fpsToInterval|StreamLoop"` 를 `test/ src/ web/` 전체에 돌려 잔존 참조 0건을 확인했다(구현자 §2 로그). **`src/`(서버) 는 이 개명·삭제와 무관** — `CameraSource`/`SimulatorSource`/`RealPtzSource`의 `streamMjpeg`는 서버측 별도 심볼로 이름이 겹치지 않는다.
 
 ---
 
-## 3. 회귀 위험 · 불변식 (변경 없음 확인)
+## 2. 서버측(`src/`) 영향 — 무변경 확인
 
-- **`PUT /mapping`(`saveMappingHandler`, 순수 artifact 편집 저장)**: 본문 무변경. `web/app.js`의 다른 소비자(ROI 편집 등, 예: 1360/2368 라인대)는 계속 이 경로를 사용 — 회귀 없음.
-- **`finalize`, `autoChain`(정밀수집 자동체인)**: 무접촉. 이번 작업이 건드리는 것은 slot_id **라벨**뿐이며 finalize/autoChain의 부트스트랩·검출 로직에는 관여하지 않음.
-- **직전 선행 fix(GET `/mapping` DB-fallback, `docs/20260723_174313_...`)**: `buildArtifactFromSlotSetup`을 import해 재사용할 뿐 그 함수 자체나 GET `/mapping`(`resolveMapping`) 로직은 무변경.
-- **전량 vitest / typecheck**: QA 보고 기준 **220 files / 2593 tests green**, `tsc --noEmit` **0 에러** (개발자 자체 실행분 219 files / 2581 tests + QA 적대 테스트 1파일/12건 합산). documenter는 이 수치를 재실행하지 않고 QA 리포트를 그대로 인용한다.
+### 2.1 `/viewer/api/stream`, `/viewer/api/snapshot`
+`src/viewer/routes.ts`는 이번 작업에서 **한 줄도 수정되지 않았다**(구현자 §1, grep 결과로 확증). `handleStream`(라우트 242~313행)·`handleSnapshot`·`StreamQuery`/`SnapshotQuery`(zod) 전부 그대로.
+
+### 2.2 `StreamQuery`의 `_r` strip
+```ts
+const StreamQuery = z.object({
+  source: z.string().optional(),
+  cam: z.coerce.number().int().positive(),
+  preset: z.coerce.number().int().positive(),
+  pan: z.coerce.number().optional(),
+  tilt: z.coerce.number().optional(),
+  zoom: z.coerce.number().optional(),
+});
+```
+`z.object(...)`는 기본이 **strip 모드**(strict/passthrough 미지정)라, 재시도 URL에 붙는 미지의 키 `_r=<timestamp>`는 파싱 시 조용히 제거된다. 스키마 변경이 전혀 필요 없었다는 설계·구현 판단을 코드로 직접 확인했다.
+
+### 2.3 `MAX_STREAMS=4` 와 재시도의 상호작용 (위험 평가)
+`routes.ts:38` `const MAX_STREAMS = 4;`, 카운터는 `handleStream`의 `streamState.active`(등록기 지역, 전체 소스 공유 — 소스별이 아님). 증가 시점은 **"실제 연결 성립 후"**(292행 `streamState.active++`)로, 첫 프레임 `await it.next()`가 실패(501/502/503)하면 카운터는 **증가하지 않는다**. 감소는 `finally`에서 무조건 실행(310행).
+
+- **재시도가 슬롯을 고갈시킬 위험: 낮음.** 실패한 연결 시도는 카운터를 건드리지 않으므로, 스트림이 죽어 있는 소스에 대해 여러 탭이 반복 재시도해도 `streamState.active`는 0에 머문다 — "좀비 슬롯 점유"가 발생할 수 없는 구조다.
+- 정상 시나리오(스트림이 살아있고 탭 4개 이상 동시 시청)에서의 상한 초과는 **이번 변경과 무관하게 기존에도 존재하던 제약**이다(5번째 연결 503). 재시도 로직은 이 한계를 새로 만들지도, 완화하지도 않는다.
+- **오히려 개선된 지점**: 구 폴백은 실패 시 `/viewer/api/snapshot`(스트림 카운터 밖의 경로)으로 333ms마다 계속 요청했다. 신 설계는 `/viewer/api/stream` 재시도이지만 지수 백오프(최대 30초 간격)로 요청 자체가 200배 줄어, 실패 상태에서의 서버 부하는 구 폴백보다 크게 감소했다.
+- **확인 필요(미검증)**: 다수 탭이 동시에 같은 실패 소스에 재시도를 걸 때 재시도 타이머가 우연히 동기화(thundering herd)될 가능성은 이론상 존재하나, 지수 백오프 상한(30s)과 탭별 독립 상태(모듈 전역이 탭=페이지 단위)로 완화되며 이번 범위의 검증 대상은 아니었다.
 
 ---
 
-## 4. 한계 (은닉 없이 명시)
+## 3. 비범위 경로 — 영향받지 않음 근거
 
-1. **FK writer 미작성 가정 의존.** `parking_evnt`/`parking_slot`에 실제 writer가 없다는 전제(00_leader_context 가정 A) 위에서 재번호가 안전하다. 이 가정이 향후 깨지면(즉 두 테이블에 writer가 생기면) 현재의 "참조행 있으면 무조건 차단" 방어는 재번호 자체를 막아버리므로, 그 시점엔 cascade 갱신 전략 재설계가 **필요**하다(현재 범위 밖, 확인 필요 항목으로 남김).
-2. **`setup_artifact.json`의 ROI 표현 = DB 파생 bbox로 정본 이동.** 재번호 시 `setup_artifact.json`은 DB 기준으로 전체 재빌드되므로, 이 파일에만 있던 수동 폴리곤 편집(있었다면)은 사각형(bbox)으로 대체된다. 새로운 손실은 아니다(기존 GET `/mapping` DB 폴백도 동일 표현이었음, `roiByPreset` 타입 자체가 `NormalizedRect`) — 폴리곤 정본은 DB `slot_roi`/`setup_result.json`의 `floor_roi`에 보존됨을 QA가 바이트 단위로 실증했다. 다만 "폴리곤 편집을 setup_artifact에 남기고 싶다"는 요건이 향후 생기면 별도 과제.
-3. **실브라우저 육안 확인 미수행.** QA 검증은 fastify `inject` 라우트 통합 테스트로 전 경로(DB/파일 3종/원자성/경계면 정합)를 실증했으나, 실제 웹 UI에서 사용자가 표를 편집하고 저장 버튼을 누르는 육안 스모크는 이 라운드에서 수행되지 않았다.
+| 경로 | 근거 |
+|------|------|
+| 정밀수집 500ms 프레임 폴(`capFrameTimer`, `startCapFramePolling`) | 이 함수는 기존부터 `stopLive()`를 호출해 라이브 스트림/재시도를 정지시킨 뒤 자신의 별도 타이머로 진행 표시를 갱신한다. `stopLive()`가 `cancelStreamRetry()`를 포함하도록 확장됐을 뿐 **호출부 코드는 0줄 변경**(설계 §2.3 표, 구현 §1.3 "해당 3곳 코드 변경 0"). |
+| 센터라이징 500ms 프레임 폴(`calFrameTimer`, `startCalFramePolling`) | 상동 — `stopLive()` 상속. |
+| 번호판 탐색 500ms 프레임 폴(`discFrameTimer`, `startDiscFramePolling`) | 상동 — `stopLive()` 상속. |
+| `CaptureJob`(`src/capture/CaptureJob.ts`) | 서버측 정밀수집 잡 파이프라인. `web/` 변경과 레이어가 다르고 이번 diff에 포함되지 않음(파일 미수정). |
+| `CameraSourceClient.pollSnapshots`(서버측, 스트림 미지원 소스 폴백) | `src/`(서버) 무변경 확인(§2.1)에 포함 — RealPtzSource(Hucoms) 등 `streamMjpeg` 미구현 소스에 대한 **서버측** 폴백 경로로, 이번에 제거된 것은 **프론트(`web/app.js`)의 폴링 폴백**과는 다른 계층. 명칭 유사성으로 혼동하기 쉬우나 코드 경로가 분리되어 있어 무영향. |
+| `/viewer/api/snapshot` 라우트 자체 | §2.1에서 무변경 확인. `mode=manual`(수동 PTZ 오버라이드 1회 스냅샷), `gotoPreset()`의 프리셋 스냅샷 폴백 등 소비처는 계속 이 라우트를 쓴다 — `snapshot.tick()`(구 `loop.tick()`)이 여전히 호출. |
+
+**검증 근거**: qa 03 §4-4 "정밀수집/센터라이징/탐색의 500ms 프레임 폴 3경로는 무변경 비범위로, 전용 신규 케이스는 작성하지 않았고 전체 스위트 2751 통과로만 회귀 확인을 갈음했다" — 즉 이 3경로에 대한 **전용 회귀 테스트는 없다**(확인 필요 항목으로 남김. 전체 스위트 통과가 간접 증거이나, 라이브 브라우저 상에서 잡 시작 시 스트림이 실제로 멈추는지는 §5 "라이브 스모크 미수행"과 동일하게 실측 필요).
 
 ---
 
-## 5. 후속 제안 (간결)
+## 4. 공유 도메인 타입(SlotState/ParkingEvent 등) 영향
 
-- FK writer(`parking_evnt`/`parking_slot`) 도입이 로드맵에 있다면, 재번호 기능과의 상호작용(cascade UPDATE vs 차단 유지)을 그 작업의 설계 단계에서 미리 검토해두는 것을 권장.
-- 실 브라우저 육안 스모크(표 편집→저장→분석 탭/주차면 목록 갱신 확인)를 다음 세션에서 짧게 수행하면 REST 계약 실증에 UI 왕복까지 더해져 완결성이 높아짐(선택 사항, 현재도 결함으로 보진 않음).
+**해당 없음.** 이번 변경은 SettingAgent 웹 뷰어의 라이브 스트림 UI 상태(`liveMode` 등 로컬 변수)와 `web/core.js`의 순수 함수에 국한되며, `@parkagent/types`의 공유 도메인 타입이나 `SlotState`/`ParkingEvent` 류 스키마를 전혀 건드리지 않았다. ActionAgent/DMAgent로의 전파도 없다.
 
 ---
 
-## 6. 최종 산출물 경로
+## 5. 20260709 문서와의 관계
 
-- 상세 문서: `SettingAgent/docs/20260723_204007_전역번호재번호_A안.md`
-- 본 영향도 요약: `SettingAgent/_workspace/04_doc_impact.md`
+`docs/20260709_141227_SettingAgent_MJPEG연속스트리밍_전환.md`가 도입한 "MJPEG 실패 시 폴링(`fallbackToPolling`/`loop.start(fps)`)으로 폴백"(동 문서 §5 다이어그램 최하단, §7 루프2 L2-3, §9 변경 파일 표)은 이번 작업으로 **폐지되어 더 이상 코드와 일치하지 않는다**. 해당 문서는 과거 시점 기록물이므로 **수정하지 않았다** — 이 사실의 갱신은 본 세션이 새로 작성한 문서(`docs/20260724_225404_*.md` §1.2 "존치" 각주 및 본 파일)에서만 기록한다.
+
+부수 확인 필요 항목(설계자 §6 언급, 미해결): `docs/20260625_182819_SettingViewer_구현문서.md`가 `core.js` 함수 목록에 `fpsToInterval`을 언급하고 있을 수 있다 — 이번 세션에서는 열람·정정하지 않았다(리더 판단 대상으로 남김, **확인 필요**).
+
+---
+
+## 6. 테스트 근거 (사실 인용, 위장 없음)
+
+- `npx vitest run` 전체 — **235 files / 2751 tests 전부 통과**(qa 03 §0).
+- 신규 `test/liveStreamRetry.test.ts` — **33 tests 통과**(A~E + E′ 9케이스 포함).
+- `npx tsc -p tsconfig.json --noEmit` — **exit 0**.
+- **미수행**: 계획 §5 F21~23 라이브 스모크(Unity 기동/정지 상태의 실브라우저 관찰) — qa 03 §4-1에 한계로 명시, 리더/사용자 실측 필요.
+- **미검증**: 브라우저 `multipart/x-mixed-replace` onload semantics, 동일 URL 재대입 시 재요청 생략 여부(§3.3 보정의 전제) — node 유닛 재현 불가로 qa 03 §4-3에 한계로 명시.
+
+---
+
+## 7. 요약
+
+| 항목 | 결론 |
+|------|------|
+| web/ 자산 파급 | core.js→core.d.ts→app.js→index.html/app.css 4단 연쇄, 개명 참조 4개 지점으로 닫힘. grep 전수 확인 0건 잔존 |
+| 서버(`src/`) | 무변경. `StreamQuery`가 `_r` strip, 스키마 변경 불필요 |
+| MAX_STREAMS=4 상호작용 | 낮은 위험 — 카운터가 연결 성립 후에만 증가해 실패 재시도가 슬롯을 점유하지 않음. 트래픽은 오히려 최대 200배 감소 |
+| 비범위 경로(정밀수집/센터라이징/탐색, CaptureJob, CameraSourceClient.pollSnapshots) | 코드 변경 0, `stopLive()` 상속으로 무영향. 단 이 3경로 전용 회귀 테스트는 없어(전체 스위트로 갈음) 라이브 실측 확인 필요 항목으로 남김 |
+| 20260709 문서 | 폴백 기술이 구식화됨을 본 문서에서 기록, 원문은 미수정 |
+| 공유 도메인 타입 | 영향 없음(웹 뷰어 로컬 상태·순수함수 국한) |

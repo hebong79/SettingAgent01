@@ -108,7 +108,6 @@ export function toPixel(rect: NormalizedRect, imgW: number, imgH: number): Pixel
 export function toPixelQuad(quad: NormalizedQuad, imgW: number, imgH: number): PixelPoint[];
 export function presetKey(camIdx: number | string, presetIdx: number | string): string;
 export function slotLabel(slotId: string, globalIndex?: GlobalIndexEntry[]): string;
-export function fpsToInterval(fps: number): number;
 export function clampZoom(z: number, min?: number, max?: number): number;
 export function stepPtz(cur: Ptz, dir: string, step: number): Ptz;
 export function resolveAbsPtz(
@@ -386,7 +385,7 @@ export function applyManualPlacement(
   placementBySlot: Record<string, { camIdx?: number | string; presetIdx?: number | string; positionIdx?: number | string }>,
 ): { ok: true; placements: PlacementSubmit[]; changed: boolean } | { ok: false; error: string };
 
-export interface StreamLoopDeps {
+export interface SnapshotFetcherDeps {
   fetchFn: (url: string, opt: { signal: AbortSignal }) => Promise<{
     blob: () => Promise<unknown>;
     headers: { get: (name: string) => string | null };
@@ -396,20 +395,20 @@ export interface StreamLoopDeps {
   revokeObjectURL: (url: string) => void;
   setImage: (url: string) => void | Promise<void>;
   onPtz?: (headers: { get: (name: string) => string | null }) => void;
-  setTimer?: (fn: () => void, ms: number) => unknown;
-  clearTimer?: (handle: unknown) => void;
 }
 
-export interface StreamLoop {
-  start: (fps: number) => void;
-  stop: () => void;
+export interface SnapshotFetcher {
   tick: () => Promise<void>;
+  abort: () => void;
 }
 
-export function createStreamLoop(deps: StreamLoopDeps): StreamLoop;
+export function createSnapshotFetcher(deps: SnapshotFetcherDeps): SnapshotFetcher;
+
+export function nextStreamRetryDelay(prevMs?: number | null): number;
+export function streamRetryLabel(attempt: number, delayMs: number): string;
 
 export function moveRenderDirective(
-  liveMode: 'off' | 'stream' | 'poll',
+  liveMode: 'off' | 'stream',
 ): 'stream-reconnect' | 'tick';
 
 export function parseLoadedArtifact(

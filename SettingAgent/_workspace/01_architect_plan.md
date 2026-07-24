@@ -1,320 +1,281 @@
-# 01 설계서 — 전역번호 재번호(A안): 수동매핑 → DB slot_id + json 전파
+# 01 설계 계획 — 라이브 3fps 스냅샷 폴링 고착 제거(폴백 삭제 + 스트림 자동 재시도)
 
-작성: 설계자(architect) / 근거: `_workspace/00_leader_context.md` + 코드 직접 확인(아래 "근거 코드" 참조).
-작업 위치(엄수): `WT = d:\Work\Parking3D\AgentVLA\ParkAgent\.claude\worktrees\analyze-fill-check`. 메인 경로 금지.
+작성: 2026-07-24 / 설계자(architect) / 근거: `_workspace/00_leader_context.md`(리더 확정 범위 그대로 따름)
 
----
+## 0. 한 줄 요약
 
-## 0. 요지 · 결정형 vs LLM 경계
-
-- **전부 결정형(MCP 도구 성격) — LLM 두뇌 0.** DB 트랜잭션 재번호 + 순수 remap 함수 + 파일 IO. 모호·맥락판단 없음.
-- 데이터 파괴 절대 금지: 재번호는 **slot_id 라벨만 이동**, 물리 슬롯(cam/preset/preset_slotidx)·기하(slot_roi/vpd/lpd/occupy)·센터링(pan/tilt/zoom/centered/img1/front_center) 전 컬럼 보존.
-- 전역번호 == slot_id == globalIdx == slot_ptz.globalIdx 는 **하나의 정수 신원**. 재번호 = 이 신원 값을 순열로 갈아끼우는 것.
-- 파괴 위험 지점(★특히 경고): (1) DB DELETE+re-INSERT 시 컬럼 누락, (2) 잘못된 순열로 PK 충돌/부분 커밋, (3) slot_ptz 를 DB 로 재생성 시도(→ plateWidth/converged 소실). 아래 설계로 전부 차단.
+`fallbackToPolling()`(MJPEG→3fps 스냅샷 폴링 편도 폴백)을 **삭제**하고, `liveMode`를 `'off' | 'stream'` 2상태로 축소한 뒤
+**스트림 지수 백오프 자동 재시도**(순수 함수 `nextStreamRetryDelay` / `streamRetryLabel` + app.js 얇은 DOM 결선)로 대체한다.
+라이브 off 상태의 **1회 스냅샷 tick 은 존치**(move/gotoPreset 화면 갱신). 서버(`src/`) 무변경.
 
 ---
 
-## 1. old→new 매핑 추출 · 검증(공유 순수함수)
+## 1. 삭제 목록 (파일·심볼 단위) / 존치 목록
 
-**프론트가 보낼 것(확정):** `POST` body `{ mapping: [{ oldSlotId:number, newSlotId:number }, ...] }`.
-- 프론트는 이미 `applyManualGlobalIds(lastArtifact, collectManualIds())` 로 `artifact.globalIndex`(각 `{globalIdx, slotId, ...}`)를 만든다. 여기서
-  `mapping = res.artifact.globalIndex.map(g => ({ oldSlotId: Number(g.slotId), newSlotId: g.globalIdx }))` 로 파생해 전송.
-- 백엔드는 **전체 artifact 를 신뢰/파싱하지 않는다** — 최소 페이로드(mapping 배열)만 받고 자체 재검증한다(클라 검증은 UX용, 서버가 정본 게이트).
+### 1.1 삭제
 
-**신규 순수 모듈: `src/setup/renumberMapping.ts`** (route·test 공유, DOM/DB 무의존):
-```ts
-export interface RenumberEntry { oldSlotId: number; newSlotId: number; }
-export interface RenumberValidation {
-  ok: boolean;
-  error?: string;               // 실패 사유(400 노출)
-  idMap?: Map<number, number>;  // 성공 시 old→new
-}
-/**
- * currentIds = 현재 DB slot_setup 의 slot_id 전량. mapping = 프론트 제출.
- * 순열 게이트: (N=currentIds.length)
- *  - mapping.length === N
- *  - oldSlotId 집합 === currentIds 집합 (전 행 커버·누락/추가/중복 없음)
- *  - newSlotId 전부 정수 && 집합 === {1..N} (고유 + 1..N 커버)
- * 통과 시 idMap(old→new) 반환. 실패 시 ok:false + 사람이 읽는 error.
- */
-export function validateRenumberMapping(currentIds: number[], mapping: RenumberEntry[]): RenumberValidation;
-```
-- newId 를 **정확히 {1..N}** 로 강제(Requirements #5, 클라 `validateManualIndex` 와 동치). 단순 고유가 아니라 1..N 커버까지.
-- **검증 위치 = 이 순수함수 한 곳.** 라우트는 이 함수만 부른다 → 테스트로 전 케이스 커버.
+| 파일 | 심볼·위치 | 조치 | 사유 |
+|------|-----------|------|------|
+| `web/app.js` | `fallbackToPolling()` (1560~1566) | **함수 전체 삭제** | 3fps 폴링을 켜는 유일 경로(근본 원인) |
+| `web/app.js` | `liveMode` 의 `'poll'` 상태 (1528 선언 주석 포함) | 도메인 축소 `'off' \| 'stream'` | 고착 상태 자체 제거 |
+| `web/app.js` | `reconnectLiveIfActive()` 의 `if (liveMode === 'poll') loop.stop();` (1574) | 삭제 | poll 상태 소멸로 고아 |
+| `web/app.js` | `frame.onerror = () => fallbackToPolling();` (1547, 1576) | `onStreamError` 결선으로 교체 | 폴백 → 재시도 |
+| `web/app.js` | `$('fps')` 참조 (1565) | 삭제(입력 자체 제거) | 유일 소비처 소멸 |
+| `web/app.js` | 4057 주석 `// poll 상태에서 이동 시 스트림 복귀.` | 문구 갱신(동작은 유지) | 사라진 상태 언급 금지 |
+| `web/core.js` | `fpsToInterval()` (37~40) | **삭제** | 유일 소비처 `createStreamLoop.start` 소멸 |
+| `web/core.js` | `createStreamLoop` 의 `start(fps)`, 지역 `timer`, `deps.setTimer`, `deps.clearTimer` (1197~1198, 1202, 1225~1234) | **삭제** | 타이머 = 폴링 그 자체 |
+| `web/core.d.ts` | `fpsToInterval` 선언 (111) | 삭제 | 상동 |
+| `web/core.d.ts` | `StreamLoopDeps.setTimer/clearTimer`, `StreamLoop.start` (399~400, 404) | 삭제 | 상동 |
+| `web/index.html` | `<label class="field compact">fps <input id="fps" …></label>` (75) | **삭제** | 폴링 fps 조절 UI — 폴링 소멸로 무의미 |
+| `test/viewerCore.test.ts` | `fpsToInterval` import(8) + `describe('fpsToInterval')`(71~78) | 삭제 | 대상 함수 삭제 |
+| `test/viewerCore.test.ts` | `it('start: 주입 setTimer 로 …')`(525~534), `it('fake timers: start 후 간격마다 tick 발화 …')`(550~573) | 삭제 | 타이머 API 소멸 |
+| `test/viewerCore.test.ts` | `it('(poll) → tick …')`(191~193) + 183~185 describe 주석의 poll 서술 | 삭제/갱신 | `'poll'` 도메인 소멸 |
 
-**검증 기준:** vitest — 정상 순열→ok+idMap 정확 / old 누락·추가·중복→error / new 중복→error / new 가 1..N 아님(예: {1,2,4})→error / length 불일치→error / currentIds 빈배열→error.
+### 1.2 존치(건드리지 않음) — 명시적 비범위
 
----
-
-## 2. `SqliteStore.renumberSlotIds(idMap)` — 트랜잭션 DELETE+re-INSERT 전 컬럼 보존
-
-**위치:** `src/capture/SqliteStore.ts` 에 메서드 추가(기존 `replaceSlotSetup` 패턴 복제, 전량 delete 는 여기서만 정당 — 순열 재라벨이라 전 행 대상).
-
-**시그니처:**
-```ts
-/**
- * slot_id 라벨만 순열 재부여(재번호). 전 컬럼 보존 — slot_id 외 어떤 값도 변형 금지.
- * idMap 은 현 slot_id 전량을 정확히 커버하는 순열(라우트가 validateRenumberMapping 로 사전 검증).
- * DELETE 후 re-INSERT 를 단일 트랜잭션 → 예외 시 자동 롤백(이전 상태 보존).
- * 방어: (a) 모든 행의 slot_id 가 idMap 에 있어야 함(없으면 throw), (b) new id 고유(PK 충돌 throw),
- *       (c) parking_evnt/parking_slot 비었음 확인(참조행 있으면 FK 위반 전에 throw — 데이터 보호).
- * 반환: { changed } = 재삽입 행수.
- */
-renumberSlotIds(idMap: Map<number, number>): { changed: number };
-```
-
-**의사코드:**
-```ts
-renumberSlotIds(idMap) {
-  // 1) FK 방어: 참조 테이블이 비어 있어야 안전하게 전량 DELETE 가능(현행 writer 미작성 → 비어 있음 전제).
-  const evnt = this.db.prepare(`SELECT COUNT(*) c FROM parking_evnt`).get().c;
-  const pslot = this.db.prepare(`SELECT COUNT(*) c FROM parking_slot`).get().c;
-  if (evnt > 0 || pslot > 0) throw new Error('renumber blocked: parking_evnt/parking_slot not empty (FK refs)');
-
-  // 2) 원시 행 전량 SELECT(파싱 안 함 — TEXT/REAL 그대로 재삽입해 바이트 보존, round5 재적용 금지).
-  const rows = this.db.prepare(
-    `SELECT slot_id, cam_id, preset_id, preset_slotidx, slot_roi, vpd_bbox, lpd_obb, occupy_range,
-            pan, tilt, zoom, centered, img1, slot3d_front_center, updated_at FROM slot_setup`).all();
-
-  // 3) 순열 방어(라우트 검증과 이중화 — 스토어 단독 호출/테스트 안전).
-  const seen = new Set();
-  for (const r of rows) {
-    if (!idMap.has(r.slot_id)) throw new Error(`renumber: slot_id ${r.slot_id} not in idMap`);
-    const nid = idMap.get(r.slot_id);
-    if (seen.has(nid)) throw new Error(`renumber: duplicate new id ${nid}`); // PK 충돌 예방
-    seen.add(nid);
-  }
-
-  // 4) DELETE 전량 → re-INSERT(slot_id 만 new, 나머지 원시값 그대로) 단일 트랜잭션.
-  const del = this.db.prepare(`DELETE FROM slot_setup`);
-  const ins = this.db.prepare(`INSERT INTO slot_setup
-    (slot_id, cam_id, preset_id, preset_slotidx, slot_roi, vpd_bbox, lpd_obb, occupy_range,
-     pan, tilt, zoom, centered, img1, slot3d_front_center, updated_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
-  const tx = this.db.transaction((list) => {
-    del.run();
-    for (const r of list) {
-      ins.run(idMap.get(r.slot_id), r.cam_id, r.preset_id, r.preset_slotidx, r.slot_roi,
-              r.vpd_bbox, r.lpd_obb, r.occupy_range, r.pan, r.tilt, r.zoom,
-              r.centered, r.img1, r.slot3d_front_center, r.updated_at);
-    }
-    return list.length;
-  });
-  return { changed: tx(rows) };
-}
-```
-- ★ `round5` **재적용 안 함**(원시 SELECT 값 그대로) — 재저장 드리프트 0.
-- ★ `updated_at` **보존**(라벨만 바뀜, 실데이터 불변) — 재작성 안 함.
-- FK: slot_setup→preset_pos(cam_id,preset_id) 는 cam_id/preset_id 불변이라 유지. UNIQUE(cam_id,preset_id,preset_slotidx) 도 불변.
-
-**검증 기준:** vitest(`:memory:`) — (1) 순열 swap 후 `getSlotSetup()` 의 slotId 가 new 집합과 일치, 각 물리행의 cam/preset/roi/vpd/lpd/occupy/pan/tilt/zoom/centered/front_center **완전 동일**(라벨만 이동). (2) idMap 미커버→throw. (3) new 중복→throw. (4) parking_evnt 1행 주입 후 호출→throw & 롤백(행수 불변). (5) 반환 changed == 행수.
+- **`loop.tick()` 1회 스냅샷 경로 전체**: `createStreamLoop` 의 `tick`(백프레셔 `inflight` 가드 · Blob URL revoke · `onPtz` 옵션)과 `stop`(inflight abort).
+  `move()`(1611) 의 `'tick'` 분기, `gotoPreset()` 의 preset 모드 스냅샷 폴백은 **무변경 동작**.
+- **`/viewer/api/snapshot` 라우트 · `SnapshotQuery` · `CaptureJob` · `CameraSourceClient.pollSnapshots`**: 서버측 무변경.
+- **정밀수집/센터라이징/탐색 500ms 프레임 폴**(`capFrameTimer`/`calFrameTimer`/`discFrameTimer`): 잡 진행 표시용 별도 경로 — 무변경.
+- **`web/app.css` 의 `.field.compact input`**: `abs-pan/abs-tilt/abs-zoom` 등 다른 입력이 사용 → 삭제 금지.
+- **`moveRenderDirective` 함수 자체**: `move()` 가 계속 사용 → 유지(계약만 축소, §4).
+- **`docs/20260709_141227_*.md`**: 과거 시점 기록물 → 수정하지 않는다(신규 문서에서 폐지 사실을 기술 — documenter 판단).
 
 ---
 
-## 3. slot_ptz.json 리맵 — 순수 remap + 파일 IO 분리
+## 2. 대체 설계 — 스트림 지수 백오프 자동 재시도
 
-**신규 모듈: `src/calibrate/slotPtzRenumber.ts`.**
+### 2.1 순수 함수(`web/core.js`, vitest 직접 검증 대상)
 
-**순수 함수(테스트 대상):**
-```ts
-import type { SlotPtzArtifact } from './types.js';
-/**
- * items[].slotId/globalIdx 만 old→new 로 remap. plateWidth/converged/centered/ptz/camIdx/presetIdx/reason 보존.
- * idMap 에 없는 slotId 항목은 변경 없이 유지(best-effort — 정상적으로는 slot_setup 하위집합이라 전부 커버됨).
- * new globalIdx asc 재정렬. createdAt 은 원본 유지(센터링 데이터 자체는 불변임을 반영).
- */
-export function remapSlotPtz(artifact: SlotPtzArtifact, idMap: Map<number, number>): SlotPtzArtifact {
-  const items = artifact.items.map((it) => {
-    const nid = idMap.get(Number(it.slotId));
-    if (nid == null) return it; // 미커버는 그대로(방어)
-    return { ...it, slotId: String(nid), globalIdx: nid };
-  });
-  items.sort((a, b) => (a.globalIdx ?? Infinity) - (b.globalIdx ?? Infinity));
-  return { createdAt: artifact.createdAt, items };
-}
-```
+`createStreamLoop` 정의부 근처(파일 하단 스트림 섹션)에 추가한다. **DOM/타이머 미참조**.
 
-**파일 IO(best-effort, 절대 throw 로 라우트 죽이지 않음):**
-```ts
-import { readFileSync, existsSync } from 'node:fs';
-import { writeSlotPtz } from './slotPtzWriter.js';
-import { logger } from '../util/logger.js';
-/** 반환: 'written' | 'skipped'(부재/파싱실패). 예외 삼킴(로그만). */
-export function renumberSlotPtzFile(outFile: string, idMap: Map<number, number>): 'written' | 'skipped' {
-  try {
-    if (!existsSync(outFile)) return 'skipped';
-    const parsed = JSON.parse(readFileSync(outFile, 'utf-8')) as SlotPtzArtifact;
-    if (!parsed || !Array.isArray(parsed.items)) return 'skipped';
-    writeSlotPtz(remapSlotPtz(parsed, idMap), outFile); // 기존 writer 재사용(stringify5·mkdir).
-    return 'written';
-  } catch (e) { logger.warn({ err: e, outFile }, 'slot_ptz 재번호 리맵 실패(격리)'); return 'skipped'; }
-}
-```
-- ★ slot_ptz 는 **DB 로 재생성 불가**(plateWidth/converged 가 DB 에 없음) → 반드시 파일 읽어 items 리맵 후 rewrite. 이 설계가 정답(00_leader_context 근거).
-- outFile 경로 = `deps.calibrate.outFile`(= `data/slot_ptz.json`, tools.config.json:76).
-
-**검증 기준:** vitest — (1) remapSlotPtz: 2항목 순열 후 slotId/globalIdx new & plateWidth/converged/ptz 동일 & new asc 정렬. (2) idMap 미포함 항목 무변. (3) renumberSlotPtzFile: 임시파일 왕복 후 파일 내용 new 반영. (4) 파일 부재→'skipped' 무예외.
-
----
-
-## 4. setup_result.json 재생성 — 기존 진입점 재사용
-
-- DB 재번호 **후** `writeSetupResultFiles(deps.sqlite.getSlotSetup(), deps.saveStore)` 호출(재생성).
-- `buildSetupResult` 가 `s.slotId`(=new slot_id) 사용 → slotId 재번호 자동 반영. 물리 순서(cam/preset/preset_slotidx)는 getSlotSetup ORDER BY 로 보존, slotId 라벨만 새 값.
-- best-effort: `saveStore` 미주입 시 스킵(파일 없음). 이력본(Setup_*.json)+고정본(setup_result.json) 2벌 동일 산출(기존 규약).
-
-**검증 기준:** 라우트 통합 테스트에서 saveStore 스텁으로 재작성 호출됐고 slots[].slotId 가 new 값인지 확인.
-
----
-
-## 5. setup_artifact.json — DB 기준 재빌드 저장(결정 + 근거)
-
-**결정: 옵션 1 — `deps.repo.saveArtifact(buildArtifactFromSlotSetup(deps.sqlite.getSlotSetup()))`** (DB 재번호 후).
-
-**근거(정합·단순):**
-- 재번호의 의미 = "DB slot_setup 을 정본으로 만들고 파일로 전파". 재번호 후 DB-파생 artifact 가 **정본 표현**(globalIdx = new slot_id, slotId 문자열 = new).
-- `resolveMapping`(server.ts:124)은 파일에 slots 있으면 파일 우선 → **재번호 후 파일을 갱신하지 않으면 GET /mapping 이 옛 globalIdx 를 서빙**(불일치). 그러므로 파일은 반드시 갱신 대상. 재빌드 저장이 파일을 신선하게 유지(옵션2 '파일 삭제'는 물리파일 부재 → renderAnalysis 의 `data/setup_artifact.json` 소스 표기·외부 소비자 기대와 어긋남).
-- 파일 그래프(slots/presets.coveredSlotIds/globalIndex 의 slotId 상호참조)를 통째로 remap 하는 것보다 DB 재빌드가 훨씬 단순·결정형.
-
-**★ 감수하는 트레이드오프(문서화·경고):** setup_artifact.json 에만 존재하고 DB 에 없는 **수동 ROI 폴리곤 편집**(있다면)은 DB-파생 bbox 로 치환됨. 근거: (a) 수동매핑 패널은 ROI 가 아니라 전역ID 만 다룸, (b) DB slot_roi 가 기하 정본, (c) `buildArtifactFromSlotSetup` 은 이미 GET 폴백의 표현(roiByPreset=bbox)이라 신규 손실 아님. ROI 폴리곤 보존이 요건이면 별도 과제(범위 밖) — 리더에 플래그.
-
-**검증 기준:** 라우트 후 `repo.loadArtifact().globalIndex` 의 globalIdx 가 전부 new slot_id 와 일치.
-
----
-
-## 6. 신규 라우트 `POST /mapping/renumber` (server.ts 내 closure)
-
-**위치 결정: `src/api/server.ts`** (captureRoutes 아님).
-- 근거: 필요한 deps(`repo`, `sqlite`, `saveStore`, `calibrate.outFile`)가 **전부 server.ts 클로저에 존재** → captureRoutes 로 새 deps(`repo`, `slotPtzFile`) 스레딩 불필요(외과적·최소 변경).
-- 프론트 `api()` = `/viewer/api${path}`(app.js:76) → **뷰어 블록에도 등록 필수**. 헤드리스 `/mapping/renumber` + 뷰어 `/viewer/api/mapping/renumber` 둘 다 같은 closure 핸들러 위임(PUT /mapping ↔ /viewer/api/mapping 대칭과 동일 패턴).
-
-**요청 shape(zod):**
-```ts
-const RenumberBodySchema = z.object({
-  mapping: z.array(z.object({
-    oldSlotId: z.number().int().positive(),
-    newSlotId: z.number().int().positive(),
-  })).min(1),
-});
-```
-
-**closure 핸들러(buildServer 내부, resolveMapping 옆):**
-```ts
-function renumberHandler(body, reply) {
-  if (!deps.sqlite) { reply.code(501); return { error: 'sqlite not configured' }; }
-  const parsed = RenumberBodySchema.safeParse(body);
-  if (!parsed.success) { reply.code(400); return { error: 'invalid body', detail: parsed.error.flatten() }; }
-
-  // 1) 검증(순수). currentIds = DB 현재 slot_id 전량.
-  const currentIds = deps.sqlite.getSlotSetup().map((s) => s.slotId);
-  const v = validateRenumberMapping(currentIds, parsed.data.mapping);
-  if (!v.ok) { reply.code(400); return { error: v.error }; }        // ★ DB 무변경(원자성)
-
-  // 2) DB 재번호(트랜잭션·전 컬럼 보존). throw 시 롤백.
-  let changed;
-  try { changed = deps.sqlite.renumberSlotIds(v.idMap!).changed; }
-  catch (e) { reply.code(500); return { error: 'renumber failed', detail: String(e) }; }
-
-  // 3) 파일 전파(각 격리·best-effort — DB 커밋 후엔 파일 실패가 요청을 실패시키지 않음).
-  let slotPtz = 'skipped';
-  if (deps.calibrate?.outFile) slotPtz = renumberSlotPtzFile(deps.calibrate.outFile, v.idMap!);
-
-  let setupResult = null;
-  if (deps.saveStore) { try { setupResult = writeSetupResultFiles(deps.sqlite.getSlotSetup(), deps.saveStore); } catch (e) { logger.warn(...); } }
-
-  let artifactSaved = false;
-  try { deps.repo.saveArtifact(buildArtifactFromSlotSetup(deps.sqlite.getSlotSetup())); artifactSaved = true; }
-  catch (e) { logger.warn(...); }
-
-  return { ok: true, renumbered: changed, slotPtz,
-           setupResult: setupResult ? { archive: setupResult.archive, fixed: setupResult.fixed } : null,
-           artifactSaved };
-}
-app.post('/mapping/renumber', async (req, reply) => renumberHandler(req.body, reply));
-// 뷰어 블록(app.register 내부)에도:
-instance.post('/viewer/api/mapping/renumber', async (req, reply) => renumberHandler(req.body, reply));
-```
-
-**처리 순서(원자성 규약):** 검증(실패→400·DB무변경) → DB 재번호(트랜잭션·all-or-nothing) → slot_ptz → setup_result → setup_artifact. DB 커밋 성공이 진실의 기준; 파일 3종은 순차 best-effort(부분 실패는 응답 필드로 노출·로깅, 롤백 없음 — DB 정본이 이미 옳음).
-
-**import 추가(server.ts):** `writeSetupResultFiles`(store/setupResult.js), `renumberSlotPtzFile`(calibrate/slotPtzRenumber.js), `validateRenumberMapping`(setup/renumberMapping.js), `logger`(util/logger.js). `buildArtifactFromSlotSetup`·`z` 는 이미 있음.
-
-**검증 기준:** buildServer inject 통합 — (1) 유효 mapping→200, DB slotId=new, setup_result 재작성(slotId=new), setup_artifact.globalIdx=new. (2) 비순열→400 & `getSlotSetup()` id 불변(DB 무변경). (3) 뷰어 경로도 동일 동작.
-
----
-
-## 7. 프론트 — saveManualIndex 를 재번호 라우트로 전환
-
-**대상: `web/app.js` `saveManualIndex()` (3304).** 기존 PUT `/mapping`(artifact 통째) → POST `/mapping/renumber`(mapping 배열).
 ```js
-async function saveManualIndex() {
-  if (!lastArtifact) return;
-  const msg = $('an-manual-msg');
-  const res = applyManualGlobalIds(lastArtifact, collectManualIds()); // 클라 검증 게이트 유지(빠른 피드백)
-  if (!res.ok) { if (msg) msg.textContent = `저장 불가: ${res.error}`; return; }
-  const mapping = res.artifact.globalIndex.map((g) => ({ oldSlotId: Number(g.slotId), newSlotId: g.globalIdx }));
-  try {
-    const r = await fetch(api('/mapping/renumber'), {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ mapping }),
-    });
-    const data = await r.json().catch(() => ({}));
-    if (r.ok) {
-      if (msg) msg.textContent = `재번호 저장됨: ${data.renumbered}면 (slot_ptz:${data.slotPtz})`;
-      await loadMapping();       // 검수 탭·state.mapping 재동기화
-      await renderAnalysis();    // 분석 탭 재렌더(재번호 반영)
-      renderSlotList();          // 주차면 목록 재렌더
-    } else { if (msg) msg.textContent = `저장 실패: ${data.error ?? r.status}`; }
-  } catch (err) { if (msg) msg.textContent = `저장 실패(네트워크): ${err}`; }
+// 스트림 재연결 백오프 상수(초기 1s → ×2 → 상한 30s). app.js 가 지연을 들고 setTimeout 만 담당.
+const STREAM_RETRY_BASE_MS = 1000;
+const STREAM_RETRY_FACTOR = 2;
+const STREAM_RETRY_MAX_MS = 30000;
+
+/**
+ * 다음 재시도 지연(ms). prevMs 미지정/0/비수치(=첫 실패) → 초기값, 그 외 ×2(상한 클램프).
+ * 수열: 1000 → 2000 → 4000 → 8000 → 16000 → 30000 → 30000 …
+ */
+export function nextStreamRetryDelay(prevMs) {
+  const prev = Number(prevMs);
+  if (!Number.isFinite(prev) || prev <= 0) return STREAM_RETRY_BASE_MS;
+  return Math.min(STREAM_RETRY_MAX_MS, prev * STREAM_RETRY_FACTOR);
+}
+
+/**
+ * 재시도 상태 표시 문구(순수). delayMs 가 상한(30s)에 도달하면 "연속 실패" 안내를 덧붙인다.
+ * attempt = 연속 실패 횟수(1-based).
+ */
+export function streamRetryLabel(attempt, delayMs) {
+  const sec = Math.round(delayMs / 1000);
+  const base = `스트림 끊김 — ${sec}초 후 재연결 (${attempt}회째)`;
+  return delayMs >= STREAM_RETRY_MAX_MS
+    ? `${base} · 연결 실패가 계속됩니다 — 서버/카메라 상태를 확인하세요`
+    : base;
 }
 ```
-- **기존 PUT `/mapping`(순수 artifact 편집 저장)·`saveMappingHandler` 는 무변경 유지** — ROI 편집 등 다른 소비자(app.js 1360/2368 등) 회귀 0. 이 패널만 전환.
-- `renderAnalysis` 는 내부에서 `fetchArtifact()`→`api('/mapping')` 재조회하므로 `lastArtifact` 자동 갱신. `renderSlotList()` 는 `state.mapping`(loadMapping 이 채움) 소비 → 호출 순서 loadMapping→renderSlotList 준수.
 
-**검증 기준:** (수동/육안·qa 라우트 통합으로 대체 가능) 입력 변경→저장→표·슬롯맵·분석 탭이 new 전역ID 로 갱신. 비순열 입력은 클라에서 차단(applyManualGlobalIds), 서버도 400 이중방어.
+- 상수는 **모듈 내부 고정**(설정 UI 추가 금지 — CLAUDE.md §2). 상한 도달 판정은 `streamRetryLabel` 내부에서만 필요하므로 export 하지 않는다.
+
+### 2.2 DOM 결선(`web/app.js`, 얇게)
+
+`// --- 라이브 MJPEG 스트림 ---` 섹션(1525~1579)을 아래 형태로 교체한다.
+
+```js
+let liveMode = 'off';        // 'off' | 'stream'(MJPEG). 폴링 폴백은 폐지(3fps 고착 원인).
+let streamRetryTimer = null; // 재연결 대기 setTimeout 핸들(대기 중일 때만 non-null)
+let streamRetryDelay = 0;    // 직전 재시도 지연(ms). 0 = 실패 이력 없음
+let streamRetryAttempt = 0;  // 연속 실패 횟수
+
+function streamUrl() { /* 무변경 */ }
+
+/** 대기 중 재연결 타이머·백오프 상태·표시 문구를 모두 초기화(누수·유령 재연결 방지 단일 지점). */
+function cancelStreamRetry() {
+  if (streamRetryTimer) { clearTimeout(streamRetryTimer); streamRetryTimer = null; }
+  streamRetryDelay = 0;
+  streamRetryAttempt = 0;
+  const el = $('live-status');
+  if (el) el.textContent = '';
+}
+
+/** 프레임 도착(MJPEG 는 프레임마다 onload) → 백오프 리셋 + 상태 표시 해제. */
+function onStreamLoad() {
+  if (liveMode !== 'stream') return;
+  if (!streamRetryAttempt && !streamRetryTimer) return; // 정상 지속 프레임 — 무동작.
+  cancelStreamRetry();
+}
+
+/** 스트림 실패(501/502/503/네트워크 절단) → 지수 백오프 재시도 예약. */
+function onStreamError() {
+  if (liveMode !== 'stream') return;   // off/잡 진행 중 잔여 이벤트 무시.
+  if (streamRetryTimer) return;        // 이미 대기 중 → 중복 예약 금지.
+  streamRetryDelay = nextStreamRetryDelay(streamRetryDelay);
+  streamRetryAttempt += 1;
+  const el = $('live-status');
+  if (el) el.textContent = streamRetryLabel(streamRetryAttempt, streamRetryDelay);
+  streamRetryTimer = setTimeout(() => {
+    streamRetryTimer = null;
+    if (liveMode !== 'stream') return; // 대기 중 정지/잡 진입 → 유령 재연결 차단(2중 가드).
+    // 동일 URL 재대입은 브라우저가 재요청을 생략할 수 있어 재시도에만 캐시버스터를 붙인다.
+    frame.src = `${streamUrl()}&_r=${Date.now()}`;
+  }, streamRetryDelay);
+}
+
+/** 스트림 (재)연결 공통부 — startLive/reconnectLiveIfActive 가 공유. */
+function connectStream() {
+  cancelStreamRetry();          // 대기 타이머·백오프 초기화(경로 불문).
+  snapshot.abort();             // 진행 중 1회 스냅샷 중단(blob 이 스트림을 덮지 않게).
+  liveMode = 'stream';
+  frame.onerror = onStreamError;
+  frame.onload = onStreamLoad;
+  frame.src = streamUrl();
+  drawRoiOverlay();             // 스트림은 per-frame 재그리기 없음 → 연결 시 1회.
+}
+
+function startLive() { connectStream(); }
+
+function stopLive() {
+  liveMode = 'off';
+  frame.onerror = null;
+  frame.onload = null;          // 핸들러 해제 후 src 제거(순서 유지).
+  cancelStreamRetry();
+  frame.removeAttribute('src'); // 연결 종료 → reply.raw close → 상류 abort.
+  snapshot.abort();
+}
+
+function reconnectLiveIfActive() {
+  if (liveMode === 'off') return; // 라이브 꺼짐 → 무동작(기존 계약 유지).
+  connectStream();
+}
+```
+
+- `streamUrl()` 본체는 **무변경** — `move()`/`reconnectLiveIfActive()` 가 같은 URL 을 내는 성질(재로드 없이 무해한 race, docs 20260709 §race)을 보존한다. 캐시버스터 `_r` 은 **재시도 경로에만** 붙인다.
+- 서버 `StreamQuery` 는 비-strict `z.object` 라 미지의 키 `_r` 을 **stript** 한다 → **서버 무변경으로 안전**(routes.ts:40~48 확인).
+
+### 2.3 타이머 취소 경로 점검(누수·유령 재연결)
+
+| 경로 | 진입 함수 | 취소 보장 |
+|------|-----------|-----------|
+| 라이브 시작 버튼 `btn-start` | `startLive → connectStream` | `cancelStreamRetry()` |
+| 라이브 정지 버튼 `btn-stop` | `stopLive` | `cancelStreamRetry()` + `liveMode='off'` |
+| cam/preset/source 변경, `btn-goto`, 슬롯·주차면 행 클릭 | `reconnectLiveIfActive → connectStream` | `cancelStreamRetry()` |
+| 정밀수집 시작 | `startCapFramePolling`(2176) → `stopLive()` | 상속(무변경) |
+| 센터라이징 시작 | `startCalFramePolling`(2729) → `stopLive()` | 상속(무변경) |
+| 번호판 탐색 시작 | `startDiscFramePolling`(2901) → `stopLive()` | 상속(무변경) |
+| 잡 종료 후 라이브 복귀(2334/2806/2842/2967) | `startLive()` | `cancelStreamRetry()` 후 재연결 |
+| 타이머 발화 시점 | `setTimeout` 콜백 | `liveMode !== 'stream'` 조기 반환(2중 가드) |
+
+→ **타이머 소유자는 `cancelStreamRetry()` 단 하나**. 잡 진입 3곳은 이미 `stopLive()` 를 부르므로 추가 변경 0.
+
+### 2.4 UI 표시(재시도 상태)
+
+- 위치: `web/index.html` `.stream-controls`(72~76) — **삭제되는 fps 입력 자리를 그대로 사용**.
+  ```html
+  <div class="stream-controls toolbar">
+    <button id="btn-start" class="primary">시작</button>
+    <button id="btn-stop">정지</button>
+    <span id="live-status" aria-live="polite"></span>
+  </div>
+  ```
+- `web/app.css`: `#ptz-control-status`(702~708) 패턴을 따른 최소 규칙 3줄 추가.
+  ```css
+  #live-status { color: var(--muted); font-size: 12px; line-height: 1.35; }
+  ```
+- 문구는 전부 `streamRetryLabel()`(순수) 산출 → app.js 는 `textContent` 대입만 한다.
 
 ---
 
-## 8. 테스트 계획(qa 전달)
+## 3. `createStreamLoop` 잔여 형태
 
-신규 파일별 vitest(WT 경로, `cd .../SettingAgent && npx vitest run <spec>`):
-1. `test/renumberMapping.spec.ts` — validateRenumberMapping 6+ 케이스(§1 검증기준).
-2. `test/sqliteStore.renumber.spec.ts` — renumberSlotIds `:memory:` 보존/순열/충돌/FK가드(§2 검증기준).
-3. `test/slotPtzRenumber.spec.ts` — remapSlotPtz 순수 + renumberSlotPtzFile 파일 왕복/부재 skip(§3 검증기준).
-4. `test/renumberRoute.spec.ts` — buildServer inject: 200 정상 전파(DB/setup_result/setup_artifact/slot_ptz) · 400 비순열 DB무변경 · 뷰어 경로(§6 검증기준).
-5. 회귀: 기존 PUT /mapping spec·finalize·autoChain 전량 green, `npx tsc --noEmit` 0.
+타이머 제거 후 남는 것은 **1회성 fetch + abort** 뿐이므로 이름이 사실과 어긋난다(“loop” 아님). 자기 변경으로 생긴 오해를 정리한다(CLAUDE.md §3).
 
-각 단계 성공기준은 "X 입력→Y 반환/상태" 로 명문화됨(위 §별 검증 기준).
+- `web/core.js`: `createStreamLoop(deps)` → **`createSnapshotFetcher(deps)`**, 반환 `{ tick, abort }`.
+  - `tick()`: 현행 본문 그대로(백프레셔·revoke·onPtz·try/catch 무시) — **동작 무변경**.
+  - `abort()`: 현행 `stop()` 에서 타이머 정리부를 뺀 나머지(`inflight.abort()`).
+  - `deps`: `fetchFn / makeUrl / createObjectURL / revokeObjectURL / setImage / onPtz?` (setTimer/clearTimer 제거).
+  - JSDoc 첫 줄을 "스냅샷 1회 취득기(백프레셔·Blob revoke·abort)"로 갱신.
+- `web/app.js` 호출부(총 4곳): `const loop = createStreamLoop({…})`(1482) → `const snapshot = createSnapshotFetcher({…})`,
+  `loop.stop()`(1546·1557) → `snapshot.abort()`, `await loop.tick()`(1611) → `await snapshot.tick()`.
+- `web/core.d.ts` 동기화(389~409): `StreamLoopDeps` → `SnapshotFetcherDeps`(setTimer/clearTimer 제거),
+  `StreamLoop` → `SnapshotFetcher { tick(): Promise<void>; abort(): void }`, `export function createSnapshotFetcher(deps: SnapshotFetcherDeps): SnapshotFetcher;`
+  추가 선언: `export function nextStreamRetryDelay(prevMs?: number | null): number;`,
+  `export function streamRetryLabel(attempt: number, delayMs: number): string;`
+- 검증: `npm run typecheck`(tsc --noEmit)로 d.ts↔테스트 정합 확인 — vitest 는 타입을 보지 않으므로 **둘 다 필수**.
 
----
-
-## 9. 영향도 · 회귀 위험
-
-**신규(추가만):**
-- `src/setup/renumberMapping.ts`(순수 검증), `src/calibrate/slotPtzRenumber.ts`(remap+IO).
-- `SqliteStore.renumberSlotIds`(메서드 추가 — 기존 메서드 무변경).
-- server.ts: import 4종 + closure `renumberHandler` + 라우트 2개(헤드리스·뷰어).
-
-**수정(외과적):**
-- `web/app.js` `saveManualIndex` 본문만 교체(다른 함수 불변).
-
-**불변식(파괴 0 확인 목록):**
-- 센터링(pan/tilt/zoom/centered/img1/front_center)·기하(slot_roi/vpd/lpd/occupy) 전 컬럼 보존(§2 원시 SELECT 재삽입).
-- 기존 라우트 무변경: PUT /mapping, GET /mapping(resolveMapping), finalize, autoChain, calibrate. 리더 이전 DB-fallback fix 유지.
-- slot_ptz plateWidth/converged 무손실(파일 리맵, DB 재생성 금지).
-- 전량 vitest green + tsc 0.
-
-**회귀 위험 & 완화:**
-- (위험) FK 참조행 존재 시 전량 DELETE 불가 → (완화) §2 방어 카운트로 사전 throw(현행 parking_evnt/parking_slot 비어 있음).
-- (위험) 파일 부분 실패 → (완화) best-effort 격리, DB 정본 우선, 응답 필드로 가시화.
-- (위험) 뷰어/헤드리스 경로 불일치 → (완화) 동일 closure 핸들러 공유.
+> 대안(채택 안 함): 이름 유지 + 주석만 수정. 호출부 churn 은 4줄로 동일 수준인데 이름이 계속 거짓말을 하므로 기각.
 
 ---
 
-## 10. 가정 · 미해결(리더 확인 사항)
+## 4. `moveRenderDirective` 계약
 
-- **가정 A:** parking_evnt/parking_slot 은 현재 writer 미작성으로 비어 있음(00_leader_context §DB). 방어 카운트로 안전장치 병행.
-- **가정 B:** slot_ptz.json 경로는 `deps.calibrate.outFile`(=data/slot_ptz.json). calibrate deps 미주입 헤드리스 구성이면 slot_ptz 리맵 스킵('skipped').
-- **결정 C(플래그):** setup_artifact 는 DB 재빌드(§5 옵션1). setup_artifact.json 에만 있던 수동 ROI 폴리곤 편집은 DB-파생 bbox 로 치환됨 — 현 데이터모델(DB=기하 정본)에서 정합이나, ROI 폴리곤 보존이 요건이면 별도 과제(범위 밖).
-- **결정 D:** 라우트는 server.ts 에 배치(captureRoutes 아님) — deps 스레딩 최소화. 경로명 `/mapping/renumber`(+뷰어) — 기존 /mapping 계열과 의미 일관.
-- 상충 없음: 요청과 설계 결정(DB 정본·LLM 최소·5소수·전량보존) 모두 부합.
+- 계약: `moveRenderDirective(liveMode: 'off' | 'stream') → 'stream-reconnect' | 'tick'`
+  - `'stream'` → `'stream-reconnect'`(새 PTZ 가 실린 `frame.src = streamUrl()` 재연결)
+  - `'off'` → `'tick'`(1회 스냅샷 override — **존치**)
+- **본문 코드 무변경**(`liveMode === 'stream' ? … : …`). JSDoc(1244~1249)에서 `'poll'`/폴백 서술만 제거.
+- `web/core.d.ts:411~413`: 인자 union 을 `'off' | 'stream'` 으로 축소.
+- 테스트: `'poll' → tick` 케이스 삭제, `'stream'`/`'off'` 2 케이스 유지. describe 제목·주석에서 폴백 서술 제거.
+- `move()`(1607~1612) 의 else 분기 주석을 `// 라이브 off — 1회 스냅샷 override.` 로 갱신(‘poll 폴백 지속갱신’ 문구 제거).
+
+---
+
+## 5. 검증 계획 (qa-tester 가 쓸 vitest 케이스)
+
+실행: `npm run test`(= `vitest run`) + `npm run typecheck`. 대상 파일: `test/viewerCore.test.ts`(기존) + 소스텍스트 회귀는 동 파일 말미 또는 신규 `test/liveStreamRetry.test.ts`(기존 `dbCenteringOverlay.test.ts` / `cameraKindSelect.test.ts` 의 `readFileSync` 패턴 재사용).
+
+**A. `nextStreamRetryDelay`(백오프 수열·리셋)**
+1. `nextStreamRetryDelay(0) === 1000`, `undefined`/`null`/`NaN`/음수 → `1000`(첫 실패 초기값).
+2. `1000→2000`, `2000→4000`, `4000→8000`, `8000→16000`.
+3. `16000→30000`(상한 클램프, 32000 아님), `30000→30000`(멱등 — 상한 유지).
+4. 수열 누적 검증: 8회 반복 시 `[1000,2000,4000,8000,16000,30000,30000,30000]`.
+
+**B. `streamRetryLabel`(상한 도달 UI 문구)**
+5. `streamRetryLabel(1, 1000)` → `'1초'`·`'1회째'` 포함, 상한 안내 문구 **미포함**.
+6. `streamRetryLabel(6, 30000)` → `'30초'`·`'6회째'` + `'서버/카메라 상태를 확인하세요'` 포함.
+
+**C. `moveRenderDirective` 계약**
+7. `moveRenderDirective('stream') === 'stream-reconnect'`.
+8. `moveRenderDirective('off') === 'tick'`.
+9. (회귀) `'poll'` 케이스가 테스트에 남아 있지 않을 것 — 삭제로 충족.
+
+**D. `createSnapshotFetcher`(1회 스냅샷 tick 백프레셔 유지)**
+10. 백프레셔: inflight 중 `tick()` 겹침은 스킵 → `fetchFn` 1회(기존 486~500 이관).
+11. 새 프레임 시 이전 Blob URL revoke, 첫 프레임은 revoke 없음(기존 502~514 이관).
+12. `onPtz` 가 응답 헤더로 1회 호출(기존 516~523 이관).
+13. `abort()`: 진행 중 요청의 `signal.aborted === true`(기존 536~548 에서 `clearTimer` 단언 제거).
+14. **타이머 부재 회귀**: `createSnapshotFetcher(deps)` 반환 객체에 `start` 가 없다 — `expect((f as any).start).toBeUndefined()`, 그리고 fake timers 로 1초 진행해도 `fetchFn` 추가 호출 0(자발적 폴링 없음).
+
+**E. 소스텍스트 회귀(DOM 결선은 유닛테스트 불가 → 텍스트 단언으로 갈음)**
+15. `web/app.js` 에 `fallbackToPolling` / `loop.start(` / `$('fps')` 문자열이 **없다**.
+16. `web/app.js` 에 `liveMode = 'poll'` / `'poll'` 리터럴이 **없다**.
+17. `web/core.js` 에 `fpsToInterval` / `setInterval` 문자열이 **없다**(core 는 타이머 미참조 모듈이어야 함).
+18. `web/index.html` 에 `id="fps"` 가 **없고** `id="live-status"` 가 **있다**.
+19. `stopLive` / `connectStream` 본문에 `cancelStreamRetry()` 호출이 있고, `cancelStreamRetry` 가 `clearTimeout` 을 호출한다(타이머 취소 보장).
+20. 재시도 `setTimeout` 콜백에 `liveMode !== 'stream'` 조기 반환 가드가 있다(유령 재연결 방지).
+
+**F. 라이브(리더 경험적 확인 — vitest 밖)**
+21. Unity 정지 상태에서 `시작` → `#live-status` 가 1s→2s→4s… 로 증가하며 표시, `/viewer/api/snapshot` 요청은 **0건**(3fps 패킷 부활 없음).
+22. Unity 기동 → 첫 프레임 도착 시 상태 문구 자동 소멸(백오프 리셋), 이후 스트림 유지.
+23. 재시도 대기 중 `정지`/정밀수집 시작 → 대기 타이머가 끊겨 이후 `/viewer/api/stream` 재요청 0건.
+
+---
+
+## 6. 영향도 / 운영 주의점
+
+- **정적 자산은 nodemon 감시 밖**: `nodemon.json` 은 `watch: ["src"], ext: "ts,json"` → `web/*.js|html|css` 변경은 서버 재기동으로 반영되지 않고, **브라우저 하드리로드(Ctrl+Shift+R)** 가 필요하다. 이미 `liveMode='poll'` 로 고착된 기존 탭은 **리로드 전까지 3fps 폴링을 계속**한다(수정 확인 전 반드시 하드리로드).
+- **사용자 가시 UI 변경**: 뷰포트 하단 `fps` 입력 사라짐 → 라이브 프레임레이트는 서버 스트림이 결정(사용자 조절 불가). 같은 자리에 재시도 상태 표시가 생긴다.
+- **스트림 미지원 소스(501 STREAM_UNSUPPORTED)**: 폴백이 없어 30초 간격 재시도 + 안내 문구로 종료(리더가 수용한 트레이드오프 — 현재 등록 소스 4종 전부 스트림 지원). `img.onerror` 는 HTTP 상태를 볼 수 없어 501 과 일시 장애를 구분하지 못한다.
+- **서버(`src/`) 무변경**: `/viewer/api/snapshot` 라우트와 `CameraSourceClient.pollSnapshots`(서버측 스트림 미지원 폴백)는 그대로 — 정밀수집/센터라이징/탐색이 계속 사용한다. 재시도 캐시버스터 `_r` 은 `StreamQuery`(비-strict zod)가 무시하므로 스키마 변경 불필요.
+- **트래픽**: 최악(스트림 영구 실패) 기준 30초당 1요청 — 기존 3.3~6.3 req/s 대비 **약 200배 감소**.
+- **문서(documenter)**: 신규 `yyyyMMdd_hhmmss_*.md` 에 (1) 폴링 폴백 폐지·재시도 도입, (2) `createStreamLoop → createSnapshotFetcher` 개명, (3) fps UI 제거를 기록. `docs/20260709_141227_*.md` 는 과거 기록물이라 수정하지 않고, `docs/20260625_182819_SettingViewer_구현문서.md` 의 core.js 함수 목록(`fpsToInterval` 언급)만 각주 수준으로 정정 여부를 판단.
+
+---
+
+## 7. 가정 / 미해결 (developer·qa 확인 요망)
+
+1. **`img.onload` 반복 발화 가정**: Chrome 의 `multipart/x-mixed-replace` 이미지는 프레임마다 `load` 를 발화한다고 보되, **최소 보장은 “첫 프레임 도착 시 1회”** 다. 설계는 1회만 발화해도 백오프 리셋이 성립하므로 두 경우 모두 안전하다.
+2. **무음 정지(silent stall)**: 200 응답 후 상류가 조용히 멈추면 `onerror` 가 안 뜰 수 있어 자동 재시도가 걸리지 않는다(사용자가 `시작` 재클릭으로 회복). 워치독 타이머 도입은 **범위 밖**(폴링 재도입 성격 — 필요시 별건).
+3. **개명 승인**: `createStreamLoop → createSnapshotFetcher` 는 설계자 판단(이름이 사실과 불일치). 리더가 최소 변경을 더 원하면 이름 유지 + JSDoc 정정으로 축소 가능(§3 대안).
+4. **백오프 상수**(1s / ×2 / 30s cap)는 리더 컨텍스트의 “예: 30s cap” 를 따랐다. 값 조정이 필요하면 core.js 상수 3개만 바꾸면 된다(테스트 A 수열도 동반 수정).

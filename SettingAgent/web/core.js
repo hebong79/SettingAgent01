@@ -34,11 +34,6 @@ export function slotLabel(slotId, globalIndex) {
   return hit ? String(hit.globalIdx) : slotId;
 }
 
-/** fps → setInterval 간격(ms). fps=3 → 333. */
-export function fpsToInterval(fps) {
-  return Math.round(1000 / fps);
-}
-
 /** zoom 클램프(1~36). */
 export function clampZoom(z, min = ZOOM_MIN, max = ZOOM_MAX) {
   return Math.min(max, Math.max(min, z));
@@ -1182,24 +1177,46 @@ export function slotMapModel(rows, idBySlot, selectedSlotId) {
   });
 }
 
+// 스트림 재연결 백오프 상수(초기 1s → ×2 → 상한 30s). app.js 가 지연을 들고 setTimeout 만 담당.
+const STREAM_RETRY_BASE_MS = 1000;
+const STREAM_RETRY_FACTOR = 2;
+const STREAM_RETRY_MAX_MS = 30000;
+
 /**
- * 스냅샷 폴링 루프(백프레셔·Blob revoke·정지). DOM/브라우저 전역 미참조 → 의존성 주입.
+ * 다음 재시도 지연(ms). prevMs 미지정/0/비수치(=첫 실패) → 초기값, 그 외 ×2(상한 클램프).
+ * 수열: 1000 → 2000 → 4000 → 8000 → 16000 → 30000 → 30000 …
+ */
+export function nextStreamRetryDelay(prevMs) {
+  const prev = Number(prevMs);
+  if (!Number.isFinite(prev) || prev <= 0) return STREAM_RETRY_BASE_MS;
+  return Math.min(STREAM_RETRY_MAX_MS, prev * STREAM_RETRY_FACTOR);
+}
+
+/**
+ * 재시도 상태 표시 문구(순수). delayMs 가 상한(30s)에 도달하면 "연속 실패" 안내를 덧붙인다.
+ * attempt = 연속 실패 횟수(1-based).
+ */
+export function streamRetryLabel(attempt, delayMs) {
+  const sec = Math.round(delayMs / 1000);
+  const base = `스트림 끊김 — ${sec}초 후 재연결 (${attempt}회째)`;
+  return delayMs >= STREAM_RETRY_MAX_MS
+    ? `${base} · 연결 실패가 계속됩니다 — 서버/카메라 상태를 확인하세요`
+    : base;
+}
+
+/**
+ * 스냅샷 1회 취득기(백프레셔·Blob revoke·abort). DOM/브라우저 전역 미참조 → 의존성 주입.
  * deps:
  *   - fetchFn(url, { signal }) → Response(blob() 보유)
- *   - makeUrl(seq) → 요청 URL(매 프레임 t 증가)
+ *   - makeUrl(seq) → 요청 URL(매 호출 t 증가)
  *   - createObjectURL(blob) → string
  *   - revokeObjectURL(url)
  *   - setImage(url) → Promise|void (img.src 교체 + decode)
  *   - onPtz(headers) (선택) 응답 헤더로 현재 PTZ 갱신
- *   - setTimer(fn, ms) → handle / clearTimer(handle) (기본: setInterval/clearInterval)
  */
-export function createStreamLoop(deps) {
-  const setTimer = deps.setTimer ?? ((fn, ms) => setInterval(fn, ms));
-  const clearTimer = deps.clearTimer ?? ((h) => clearInterval(h));
-
+export function createSnapshotFetcher(deps) {
   let seq = 0;
   let inflight = null; // AbortController
-  let timer = null;
   let lastUrl = null;
 
   async function tick() {
@@ -1222,29 +1239,20 @@ export function createStreamLoop(deps) {
     }
   }
 
-  function start(fps) {
-    if (timer) return;
-    timer = setTimer(tick, fpsToInterval(fps));
-  }
-
-  function stop() {
-    if (timer) {
-      clearTimer(timer);
-      timer = null;
-    }
+  function abort() {
     if (inflight) {
       inflight.abort();
       inflight = null;
     }
   }
 
-  return { start, stop, tick };
+  return { abort, tick };
 }
 
 /**
- * 이동(수동 PTZ·프리셋) 시 렌더 경로 결정(순수, DOM 무관). liveMode ∈ {'off','stream','poll'}.
+ * 이동(수동 PTZ·프리셋) 시 렌더 경로 결정(순수, DOM 무관). liveMode ∈ {'off','stream'}.
  * 루프3: Unity /stream 이 pan/tilt/zoom override 를 지원 → 스트림 모드면 새 PTZ 로 stream 재연결('stream-reconnect'),
- * 그 외(poll 폴백/off)는 폴링 tick('tick', poll 지속갱신 / off 1회 스냅샷 override). origin 무관(스트림이 수동·프리셋 PTZ 를 모두 렌더).
+ * off 면 1회 스냅샷 tick('tick'). origin 무관(스트림이 수동·프리셋 PTZ 를 모두 렌더).
  * → 'stream-reconnect' | 'tick'.
  */
 export function moveRenderDirective(liveMode) {

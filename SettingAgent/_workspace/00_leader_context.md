@@ -1,49 +1,51 @@
-# 00 리더 컨텍스트 — 전역번호 재번호(A안): 수동매핑 → DB slot_id + json 전파
+# 00 리더 컨텍스트 — 뷰어 라이브 3fps 스냅샷 폴링 고착 제거
 
-## 목표(Goal, 마스터 확정 A안 2026-07-23)
-분석 탭 "전역 인덱스 수동 매핑"에서 전역 ID(=슬롯번호)를 바꿔 [저장]하면:
-1) DB slot_setup.slot_id 가 그 값으로 재번호되고(저장),
-2) setup_result.json 에 반영되고(재생성),
-3) slot_ptz.json / setup_artifact.json 도 함께 변경된다.
-"매핑을 다시 하는 이유 = json 파일에 다시 저장하려는 것." 전역번호==slot_id 를 항상 결합.
+작성: 2026-07-24 / 실행 모드: **A(선형 파이프라인)** — 성공기준을 vitest + 라이브 라우트/로그 관측으로 확정 가능.
 
-## 현행 사실(리더 선조사 — 재파생 금지)
-- 수동매핑 저장 현행: saveManualIndex(app.js:3304) → applyManualGlobalIds → PUT /mapping → saveMappingHandler(server.ts:48) → repo.saveArtifact = **setup_artifact.json 파일만**. DB·setup_result 무접촉. ← 이게 결함.
-- setup_result.json: writeSetupResultFiles(setupResult.ts:68) ← buildSetupResult(DB slot_setup). slotId = s.slotId(=DB slot_id). 재생성 진입점 이미 있음: POST /capture/setup-result(captureRoutes.ts:614) = writeSetupResultFiles(deps.store.getSlotSetup(), saveStore).
-- slot_ptz.json: items[]{camIdx,presetIdx,slotId(str),globalIdx(num),ptz,plateWidth,centered,converged}. slotId==globalIdx==slot_id. writeSlotPtz(slotPtzWriter.ts:80). **오직 센터라이징(PtzCalibrator)만 씀**. plateWidth/converged 는 DB slot_setup 에 없음 → DB로 완전재생성 불가 → **old→new 리맵**으로 items 의 slotId/globalIdx 만 갱신 후 rewrite 가 정답.
-- setup_artifact.json: 내 이전 fix 로 GET /mapping 이 파일 없/빈slots 시 DB(getSlotSetup)에서 buildArtifactFromSlotSetup 조립. globalIdx=slot_id. → 재번호 후 DB 기준으로 자동 정합(파일 비우거나 재빌드).
+## 사용자 요청
 
-## DB 스키마(SqliteStore.ts) 핵심
-- slot_setup: slot_id INTEGER PRIMARY KEY, UNIQUE(cam_id,preset_id,preset_slotidx). 컬럼: slot_roi,vpd_bbox,lpd_obb,occupy_range,pan,tilt,zoom,centered,img1,slot3d_front_center,updated_at.
-- FK 참조자: parking_evnt.slot_id, parking_slot.slot_id → REFERENCES slot_setup(slot_id). **둘 다 "스키마만"(writer 미작성) → 실제 비어 있음.** foreign_keys=ON.
-- 기존 패턴: replaceSlotSetup(DELETE+INSERT 단일 트랜잭션, 전 컬럼). upsertSlotCentering/Lpd/FrontCenter(부분 UPDATE). → 재번호는 replaceSlotSetup 류 DELETE+INSERT 로 전 컬럼 보존 + slot_id 만 remap(permutation 충돌 회피).
+> "초당 3프레임 요청 패킷이 부활했다. 근본적인 원인을 파악해줘." → (원인 보고 후) **"수정해주고 기존 코드는 제거해줘."**
 
-## 매핑 의미
-- 표 각 행 = 현재 slot_id(=전역ID). 사용자가 전역ID 입력을 바꾸면 old→new 순열(1..N 고유). 물리 슬롯(cam/preset/preset_slotidx + ROI/lpd/ptz)은 그대로, slot_id 라벨만 이동.
-- applyManualGlobalIds 결과 artifact.globalIndex 로 old(slotId)→new(globalIdx) 순열을 추출 가능.
+## 리더가 확정한 근본 원인 (로그·실측 근거)
 
-## 재번호 연쇄(설계 요지)
-1. 검증: newId 집합이 1..N 고유·전 행 커버(누락/중복/범위 위반 400).
-2. DB: SqliteStore.renumberSlotIds(Map<oldId,newId>) — 트랜잭션 DELETE+re-INSERT 전 컬럼 보존, slot_id 만 new. (parking_evnt/parking_slot 비었음 확인 or 방어).
-3. slot_ptz.json: 파일 읽어 items[].slotId=String(new)·globalIdx=new 로 remap(순서는 new asc 재정렬 권장), rewrite(writeSlotPtz). 파일 부재면 skip(best-effort).
-4. setup_result.json: writeSetupResultFiles(DB) 재생성(재번호된 slot_id 반영).
-5. setup_artifact.json: DB 기준 재빌드 저장(buildArtifactFromSlotSetup) 또는 파일 재기록 → globalIdx=new=slot_id.
-6. 신규 라우트 1개(예: POST /capture/renumber-slots {mapping}) 또는 PUT /mapping 확장. 프론트 saveManualIndex 가 이 라우트를 부르도록 전환. 성공 후 loadMapping+renderAnalysis+주차면목록 재렌더.
+3fps 폴링을 켜는 코드 경로는 단 하나: `web/app.js:1565` `loop.start(Number($('fps').value) || 3)`,
+호출자는 `fallbackToPolling()`(app.js:1561) 하나뿐이며 트리거는 `frame.onerror`.
 
-## 파괴/회귀 불변식
-- 재번호는 전 컬럼 보존(데이터 파괴 금지 — finalize-wipe 메모 영역). 센터라이징 값(pan/tilt/zoom/centered/front_center) 보존.
-- 기존 PUT /mapping(순수 artifact 편집 저장)·finalize·autoChain 무변경. 내 이전 DB-fallback fix 유지.
-- 기존 vitest 전량 green + tsc 0.
+**MJPEG → 스냅샷 폴링 폴백이 편도(one-way)** — 스트림이 한 번 실패하면 `liveMode='poll'` + `setInterval(333ms)` 으로
+영구 고착된다. 스트림 자동 복귀 경로가 없고(사용자가 시작/cam·preset 변경 시에만 복귀), 실패 시 백오프도 없다.
 
-## 작업 위치(엄수)
-WT = d:\Work\Parking3D\AgentVLA\ParkAgent\.claude\worktrees\analyze-fill-check
-모든 에이전트는 WT 절대경로로 읽기/쓰기. vitest 는 `cd "/d/Work/Parking3D/AgentVLA/ParkAgent/.claude/worktrees/analyze-fill-check/SettingAgent" && npx vitest run ...`. 메인 경로 금지.
+### 증거 (`SettingAgent/logs/setting_20260724_215422.log`)
 
-## Requirements 체크리스트(마감 대조)
-1. 전역ID 변경+저장 → DB slot_setup.slot_id 재번호(순열 안전·전 컬럼 보존) (unit)
-2. setup_result.json slotId 재번호 반영 (unit)
-3. slot_ptz.json items slotId/globalIdx old→new 리맵(plateWidth/converged 보존) (unit)
-4. setup_artifact.json globalIdx=new slot_id 정합 (unit/route)
-5. 검증: newId 1..N 고유·전행커버 아니면 400, DB 무변경 (unit)
-6. 프론트: saveManualIndex 가 재번호 라우트 호출 → 성공 후 재렌더
-7. 파괴/회귀 0: 센터링 보존, 기존 라우트 무변경, tsc 0·전량 green
+| 시각 | 관측 | 해석 |
+|------|------|------|
+| 21:54:22 | 서버 재기동 | 열린 탭의 MJPEG 절단 → onerror → 폴백(3.3 패킷/s, 전부 fetch failed) |
+| 22:18:03 | 33·36 패킷/10초 | Unity down 상태에서 라이브 재시작 → `/stream` 502 → 폴백 재고착 |
+| 22:18:17 | Unity(Parking3D pid 8796) 기동 | 이후 **63 패킷/10초 = 6.3/s** = 3fps × RPC 2회 |
+| ~22:25 | 6.3/s 7분+ 지속 | 스트림이 정상인데도 폴링 유지 |
+
+- 1프레임 = `mode=manual` 스냅샷 = `cam.setPTZ` + `cam.captureJPG` **2 RPC**(`RpcCameraSource.snapshot`).
+  로그의 `ms:2~15`(setPTZ) / `ms:58~76`(captureJPG) 교대 패턴이 이를 확증.
+- 클라이언트는 서버가 아니라 **Chrome 탭**(pid 12756 → 13020 ESTABLISHED). `src/` 에 `setInterval` 0건.
+- 실측: Unity `GET /stream` 200(13MB/3s), SettingAgent `GET /viewer/api/stream?cam=1&preset=1` 200(11.7MB/3s)
+  → 스트림 경로는 **정상**. 고장난 것은 탭의 상태(`liveMode='poll'`).
+
+## 이번 작업 범위 (리더 결정)
+
+"기존 코드 제거" = **레거시 3fps 폴링 폴백 경로 자체를 삭제**한다(죽은 분기 방치 금지 — CLAUDE.md §3).
+
+1. `fallbackToPolling()` 삭제 → **스트림 자동 재시도(지수 백오프)** 로 대체.
+2. `liveMode` 도메인: `'off' | 'stream'` (+ 재시도 대기 상태 표현) — `'poll'` 제거.
+3. 고아가 되는 코드 제거: `core.js` `fpsToInterval`, `createStreamLoop` 의 타이머(`start`/`setTimer`/`clearTimer`),
+   `index.html` 의 `fps` 입력, `core.d.ts` 대응 타입, 관련 테스트.
+   **단, 라이브 off 상태의 1회 스냅샷(`loop.tick()`)은 존치**(move/gotoPreset 화면 갱신에 필요).
+4. 재시도 중임을 UI에 표시(무표시 열화 금지).
+
+### 유지/비범위
+- 정밀수집·센터라이징·탐색의 500ms 프레임 폴(`capFrameTimer`/`calFrameTimer`/`discFrameTimer`)은 **잡 진행 표시용 별도 경로** — 무변경.
+- `/viewer/api/snapshot` 라우트·`CaptureJob`·`CameraSourceClient.pollSnapshots`(스트림 미지원 소스 서버측 폴백) 무변경.
+
+### 알려진 트레이드오프 (설계 시 반영)
+`img.onerror` 는 HTTP 상태를 알 수 없어 501(STREAM_UNSUPPORTED)과 일시 장애를 구분하지 못한다.
+폴링 폴백을 없애면 스트림 미지원 소스에서는 재시도만 반복된다.
+현재 등록 소스는 전부 스트림 지원(`/viewer/api/health`: simulator-1/2 `http-mjpeg`, real-camera-1/2 `rtsp-ffmpeg`)이므로 수용 가능.
+재시도 상한 도달 시 사용자에게 명시적으로 알리는 것으로 갈음한다.

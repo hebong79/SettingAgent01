@@ -1,10 +1,14 @@
-import { logger } from './logger.js';
+import { logPacket } from './packetLog.js';
 
-/** 타임아웃이 있는 fetch. AbortController 로 timeoutMs 초과 시 중단. 통신 패킷 로그(cat:'packet'). */
+/**
+ * 타임아웃이 있는 fetch. AbortController 로 timeoutMs 초과 시 중단. 통신 패킷 로그(cat:'packet').
+ * op 는 집계 키를 나누는 논리 오퍼레이션명(예: RPC 메서드). 생략하면 키는 METHOD+경로.
+ */
 export async function fetchWithTimeout(
   url: string,
   init: RequestInit,
   timeoutMs: number,
+  op?: string,
 ): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -12,10 +16,10 @@ export async function fetchWithTimeout(
   const t0 = Date.now();
   try {
     const res = await fetch(url, { ...init, signal: controller.signal });
-    logger.info({ cat: 'packet', method, url, status: res.status, ms: Date.now() - t0 }, '통신 패킷');
+    logPacket({ method, url, op, status: res.status, ms: Date.now() - t0, msgBase: '통신 패킷' });
     return res;
   } catch (err) {
-    logger.warn({ cat: 'packet', method, url, err: err instanceof Error ? err.message : String(err), ms: Date.now() - t0 }, '통신 패킷 실패');
+    logPacket({ method, url, op, err: err instanceof Error ? err.message : String(err), ms: Date.now() - t0, msgBase: '통신 패킷' });
     throw err;
   } finally {
     clearTimeout(timer);

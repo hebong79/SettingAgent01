@@ -8,8 +8,10 @@ import {
   clampZoom,
   stepPtz,
   resolveAbsPtz, // 절대이동 입력 → PTZ(빈 칸=현재값 유지, 순수).
-  createStreamLoop,
-  moveRenderDirective, // 이동 시 렌더 경로 결정(순수). 루프3: stream=재연결 / poll·off=tick.
+  createSnapshotFetcher, // 1회 스냅샷 취득기(백프레셔·Blob revoke·abort).
+  nextStreamRetryDelay, // 스트림 재연결 지수 백오프 지연(순수).
+  streamRetryLabel, // 재시도 상태 표시 문구(순수).
+  moveRenderDirective, // 이동 시 렌더 경로 결정(순수). 루프3: stream=재연결 / off=tick.
   captureProgress,
   captureElapsedMs,
   formatElapsed,
@@ -208,9 +210,10 @@ async function loadHealth() {
 }
 
 // --- 시뮬레이터(Unity) 연결 주기 폴 ------------------------------------
-// 4초마다 loadCameras() 재수신 → 성공=연결(badge-camera on). 카메라/프리셋 변경 시에만 재렌더(선택 유지).
+// 30초마다 loadCameras() 재수신 → 성공=연결(badge-camera on). 카메라/프리셋 변경 시에만 재렌더(선택 유지).
 // 연결 전이(끊김→연결)는 loadCameras 재수신에 자연 포함. 정밀수집 중엔 폴 억제(카메라/RPC 경합 방지).
-const CONN_POLL_MS = 4000;
+// 4s → 30s: 라이브 중이면 스트림 onerror/onload 가 연결 상태를 실시간으로 알리므로 폴은 배경 동기화 역할만 한다.
+const CONN_POLL_MS = 30000;
 let simConnected = null; // null=미상 | true | false
 let connInflight = false; // 폴 중복 방지 가드
 
@@ -1478,8 +1481,8 @@ async function openResult() {
   }
 }
 
-// --- 스트림 루프 ---------------------------------------------------------
-const loop = createStreamLoop({
+// --- 1회 스냅샷 취득 -----------------------------------------------------
+const snapshot = createSnapshotFetcher({
   makeUrl: (seq) => {
     // 시뮬레이터는 현재 PTZ를 프레임 렌더에 사용한다. 실카메라는 단순 폴백 캡처가 이동 명령이 되지 않게 preset 모드로 읽기만 한다.
     const realStream = state.sourceDetails[state.source]?.streamTransport === 'rtsp-ffmpeg';
@@ -1524,8 +1527,11 @@ function updatePtzDisplay() {
 
 // --- 라이브 MJPEG 스트림 -------------------------------------------------
 // 라이브 뷰를 <img src="/viewer/api/stream"> 로 연결한다.
-// 백엔드는 시뮬레이터 HTTP MJPEG 또는 실카메라 RTSP→FFmpeg MJPEG를 같은 경로로 제공하고, 오류 시 폴링으로 폴백한다.
-let liveMode = 'off'; // 'off' | 'stream'(MJPEG) | 'poll'(폴백 폴링)
+// 백엔드는 시뮬레이터 HTTP MJPEG 또는 실카메라 RTSP→FFmpeg MJPEG를 같은 경로로 제공하고, 오류 시 지수 백오프로 스트림을 재시도한다.
+let liveMode = 'off'; // 'off' | 'stream'(MJPEG). 폴링 폴백은 폐지(3fps 고착 원인).
+let streamRetryTimer = null; // 재연결 대기 setTimeout 핸들(대기 중일 때만 non-null)
+let streamRetryDelay = 0; // 직전 재시도 지연(ms). 0 = 실패 이력 없음
+let streamRetryAttempt = 0; // 연속 실패 횟수
 
 /** 현재 cam/preset/source로 스트림 URL 조립. 시뮬레이터만 렌더용 PTZ override를 전달한다. */
 function streamUrl() {
@@ -1540,42 +1546,78 @@ function streamUrl() {
   return api(`/stream?${p.toString()}`);
 }
 
-/** 라이브 시작: MJPEG 스트림 연결. 실패(501/네트워크/503) 시 폴링 폴백. */
-function startLive() {
+/** 대기 중 재연결 타이머·백오프 상태·표시 문구를 모두 초기화(누수·유령 재연결 방지 단일 지점). */
+function cancelStreamRetry() {
+  if (streamRetryTimer) {
+    clearTimeout(streamRetryTimer);
+    streamRetryTimer = null;
+  }
+  streamRetryDelay = 0;
+  streamRetryAttempt = 0;
+  const el = $('live-status');
+  if (el) el.textContent = '';
+}
+
+/** 프레임 도착(MJPEG 는 프레임마다 onload) → 백오프 리셋 + 상태 표시 해제. */
+function onStreamLoad() {
+  if (liveMode !== 'stream') return;
+  if (!streamRetryAttempt && !streamRetryTimer) return; // 정상 지속 프레임 — 무동작.
+  cancelStreamRetry();
+}
+
+/** 스트림 실패(501/502/503/네트워크 절단) → 지수 백오프 재시도 예약. */
+function onStreamError() {
+  if (liveMode !== 'stream') return; // off/잡 진행 중 잔여 이벤트 무시.
+  if (streamRetryTimer) return; // 이미 대기 중 → 중복 예약 금지.
+  streamRetryDelay = nextStreamRetryDelay(streamRetryDelay);
+  streamRetryAttempt += 1;
+  const el = $('live-status');
+  if (el) el.textContent = streamRetryLabel(streamRetryAttempt, streamRetryDelay);
+  streamRetryTimer = setTimeout(() => {
+    streamRetryTimer = null;
+    if (liveMode !== 'stream') return; // 대기 중 정지/잡 진입 → 유령 재연결 차단(2중 가드).
+    // 동일 URL 재대입은 브라우저가 재요청을 생략할 수 있어 재시도에만 캐시버스터를 붙인다.
+    frame.src = `${streamUrl()}&_r=${Date.now()}`;
+  }, streamRetryDelay);
+}
+
+/** 스트림 (재)연결 공통부 — startLive/reconnectLiveIfActive 가 공유. */
+function connectStream() {
+  // 직전 연결이 실패 상태였는지(대기 중이거나 실패 이력) 를 초기화 전에 기록한다.
+  const retrying = !!streamRetryTimer || streamRetryAttempt > 0;
+  cancelStreamRetry(); // 대기 타이머·백오프 초기화(경로 불문).
+  snapshot.abort(); // 진행 중 1회 스냅샷 중단(blob 이 스트림을 덮지 않게).
   liveMode = 'stream';
-  loop.stop(); // 폴백 폴링이 돌던 경우 중지(카메라 공존 방지).
-  frame.onerror = () => fallbackToPolling();
-  frame.src = streamUrl();
+  frame.onerror = onStreamError;
+  frame.onload = onStreamLoad;
+  // 실패 직후 재연결은 동일 URL 재대입이 되어 브라우저가 재요청을 생략할 수 있다(예약도 취소된 정지 상태).
+  // 그 경우에만 캐시버스터를 붙이고, 정상 경로의 URL 형태는 그대로 둔다.
+  frame.src = retrying ? `${streamUrl()}&_r=${Date.now()}` : streamUrl();
   drawRoiOverlay(); // 시작 1회(스트림은 표시 크기 불변이라 per-frame 재그리기 불필요).
 }
 
-/** 라이브 정지: 스트림 연결 종료(→ reply.raw close → 상류 abort) + 폴백 폴링도 중지. */
+/** 라이브 시작: MJPEG 스트림 연결. 실패(501/네트워크/503) 시 지수 백오프 재시도. */
+function startLive() {
+  connectStream();
+}
+
+/** 라이브 정지: 스트림 연결 종료(→ reply.raw close → 상류 abort) + 재연결 대기 취소. */
 function stopLive() {
   liveMode = 'off';
   frame.onerror = null;
+  frame.onload = null; // 핸들러 해제 후 src 제거(순서 유지).
+  cancelStreamRetry();
   frame.removeAttribute('src'); // 연결 종료.
-  loop.stop();
-}
-
-/** 스트림 실패 시 기존 폴링 경로로 폴백(미지원 소스·네트워크 오류). */
-function fallbackToPolling() {
-  frame.onerror = null; // 폴백 후 재진입 방지.
-  if (liveMode === 'off') return;
-  liveMode = 'poll';
-  loop.start(Number($('fps').value) || 3);
+  snapshot.abort();
 }
 
 /**
- * cam/preset 변경 시 라이브 중이면 스트림 모드로 (재)연결. 폴링(수동 override) 중이었으면
- * 폴링을 멈추고 스트림으로 복귀한다(프리셋/cam 은 /stream 이 존중하므로 MJPEG 뷰가 올바름).
+ * cam/preset 변경 시 라이브 중이면 스트림 모드로 (재)연결.
+ * (프리셋/cam 은 /stream 이 존중하므로 MJPEG 뷰가 올바름.)
  */
 function reconnectLiveIfActive() {
   if (liveMode === 'off') return; // 라이브 꺼짐 → 무동작.
-  if (liveMode === 'poll') loop.stop(); // 수동 폴링 중이었으면 중지 후 스트림 복귀.
-  liveMode = 'stream';
-  frame.onerror = () => fallbackToPolling();
-  frame.src = streamUrl(); // 새 cam/preset 으로 (재)연결 → /stream 이 preset 존중.
-  drawRoiOverlay(); // 스트림은 per-frame 재그리기 없음 → 재연결 시 1회.
+  connectStream(); // 새 cam/preset 으로 (재)연결 → /stream 이 preset 존중.
 }
 
 // --- 제어 ---------------------------------------------------------------
@@ -1608,7 +1650,7 @@ async function move(ptz) {
       // 시뮬레이터는 PTZ override로 재렌더하고, 실카메라는 물리 이동 후 RTSP를 다시 연결한다.
       frame.src = streamUrl();
     } else {
-      await loop.tick(); // poll 폴백 지속갱신 / off 1회 스냅샷 override.
+      await snapshot.tick(); // 라이브 off — 1회 스냅샷 override.
     }
     return true;
   } catch (err) {
@@ -4054,7 +4096,7 @@ function wire() {
 
   $('btn-start').addEventListener('click', () => startLive());
   $('btn-stop').addEventListener('click', () => stopLive());
-  $('btn-goto').addEventListener('click', () => { gotoPreset(); reconnectLiveIfActive(); }); // poll 상태에서 이동 시 스트림 복귀.
+  $('btn-goto').addEventListener('click', () => { gotoPreset(); reconnectLiveIfActive(); }); // 프리셋 이동 후 새 PTZ 로 스트림 재연결.
   $('preset-save').addEventListener('click', () => savePreset(false)); // 선택 프리셋을 현재 PTZ로 갱신
   $('preset-new').addEventListener('click', () => savePreset(true)); // 현재 PTZ를 새 프리셋으로 추가
   $('preset-delete').addEventListener('click', deletePreset); // 선택 프리셋 삭제
