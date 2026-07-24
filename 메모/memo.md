@@ -28,6 +28,65 @@ memo.md에 새 항목을 추가하기 **전에** 파일 크기를 확인한다. 
 
 ---
 
+## 2026-07-24 전역 인덱스 수동 매핑 행 편집 + zone 열 제거 + 센터라이징 설명 정정
+
+**세션 요약 (커밋 `2f4a98a`, 브랜치 `feat/manual-index-editable-rows` → main FF 머지·푸시)**
+
+- 마스터 요청 3건: ① 정밀수집 화면 **센터라이징 설명이 틀렸다**(실제는 `setup_result.json` + DB `slot_setup`) ② 전역 인덱스 수동 매핑 표의 **모든 열을 편집 가능**하게(카메라·프리셋·프리셋내 위치), slotId 는 전역ID를 따라감 ③ **zone 의미 조사 후 무의미하면 삭제**.
+- ①: `index.html:207` 문구를 `setup_result.json` + DB `slot_setup` 으로 정정. 구 표기 `centering_slot` 테이블은 2026-07-18 DB 개편 때 사라졌다(현 저장은 `PtzCalibrator.ts:423-425` = slot_ptz.json + `upsertSlotCentering`(slot_setup 부분 UPDATE) + setup_result 2벌). `slot_ptz.json` 은 여전히 쓰이지만 마스터가 지목한 2개만 문구에 넣었다.
+- ③ **zone 판정 = 정보량 0 → 표에서 삭제**: 값 출처는 LLM `zoneLabels` 아니면 폴백 `cam{camIdx}` 뿐인데, **DB slot_setup 에 zone 컬럼이 없어** setup_result 에도 안 실리고 setup_artifact 안에서만 왕복한다. LLM 최소화 정책상 실값은 항상 `cam{N}` = 카메라 열 중복. `buildMappingRows` 의 zone 필드까지 제거(고아 정리). **단 `ParkingSlot.zone` 필드 자체는 유지** — 스키마·Finalizer·LLM 경로·분석 탭 '존' 카드가 물려 있어 요청 범위 밖.
+
+**②의 설계 판단 (그냥 input 만 넣으면 반쪽)**
+
+- 편집이 의미를 가지려면 **DB 정본에 반영**돼야 한다. 기존 저장 버튼은 `POST /mapping/renumber`(slot_id 재번호)뿐이라 배치 3컬럼용 경로를 신설: **`POST /mapping/placement`**(+뷰어 alias). `SqliteStore.updateSlotPlacement` 는 cam/preset/slotidx + updated_at 만 부분 UPDATE(기하·검출·센터링 무접촉).
+- **함정1 — UNIQUE(cam,preset,preset_slotidx)**: 위치 교환(A↔B)을 행 단위로 UPDATE 하면 중간상태에서 제약이 깨진다. → ① 대상 행 `preset_slotidx` 전부 NULL 로 비우고 ② 최종값 적용하는 2단계 트랜잭션(SQLite 는 NULL 을 서로 다른 값으로 봄).
+- **함정2 — 저장 순서**: 배치는 **현재** slot_id 를 키로 쓰므로 반드시 `placement` → `renumber` 순. 반대로 하면 남의 행을 고친다. 배치 실패 시 재번호는 아예 안 보낸다(DB 무변경 유지). 이 순서를 소스 정적 테스트로 봉인함.
+- **함정3 — 부분 갱신의 침범**: `validateSlotPlacement` 는 미제출 행의 **현재 삼중키까지 시드로 넣고** 충돌을 본다. FK(preset_info 미등록 cam/preset)도 사전 차단해 500 대신 400.
+- **의도적으로 안 한 것**: ROI 좌표 변환 없음(원 프리셋 화면 기준 정규화라 옮겨도 그대로 남음 → 재수집 필요), 센터링 PTZ 자동 삭제 없음(데이터 파괴 금지). 대신 안내문에 ⚠ 경고. `slot_ptz.json` 도 배치 변경 시 무접촉. **자동 클리어 정책이 필요하면 마스터 지시 대기.**
+
+**검증**
+
+- `vitest run` **2713 green**(신규 27: 서버 게이트 7 / 라우트 통합 6 / 클라 게이트 9 / UI 구조 봉인 5), `tsc --noEmit` 0.
+- **라이브 HTTP 스모크**(임시 tsx 스크립트로 실서버 listen + 파일 SQLite): 이동 200 & DB 반영, 충돌 400 & DB 무변경, `GET /mapping` 재조립 `1→[1] 2→[3,2]` 확인 후 스크립트 삭제.
+- 기존 가드가 신규 라우트 분류를 강제함(`viewerPtzSyncCoverage.test.ts` → NO_MOVE 등록). 브라우저 DOM 자동화는 여전히 없음(이전 세션 기록과 동일) → 마크업 정적 봉인으로 대체.
+
+**현재 상태 / 다음**
+
+- main FF 머지 후 origin/main 푸시 완료. `feat/manual-index-editable-rows` 브랜치는 남겨둠(정리 가능).
+- 실제 브라우저 화면 확인은 미실시 — 서버 띄우고 분석 탭에서 표 렌더·입력·저장 왕복 1회 눈으로 볼 것.
+- 작업 전부터 있던 미커밋 변경(`config/tools.config.json`, `data/*.json`, `_workspace_*` 삭제분)은 손대지 않음.
+
+---
+
+## 2026-07-24 뷰어 Touring Test 버튼 이동 + result 파일 생성 버튼 제거 (워크트리 세션)
+
+**세션 요약 (커밋 1개 `cfc8d34`, 워크트리 `worktree-work-20260724` / 브랜치 동명)**
+
+- 마스터 요청 2건: ① 정밀수집 툴바의 **Touring Test** 버튼을 아래 **센터라이징** 영역으로 이동 ② **result 파일 생성** 버튼 제거(센터라이징 끝나면 `setup_result.json` 자동 저장되므로).
+- 구현: `web/index.html` 에서 `#cap-touring` 을 `.cap-actions.toolbar.capture-actions` → `.centering-inline` 의 **삭제된 `#cal-result-file` 자리 그대로** 이동. `.centering-inline` 이 `auto / minmax(0,1fr)` 2열 그리드라 **CSS 무변경**으로 `[센터라이징] [Touring Test]` 한 행 배치가 나온다. `web/app.js` 에서 `makeSetupResultFile()` 핸들러+결선 삭제(고아 코드 제거), `#cap-touring` 은 id 불변이라 `runTouringTest` 결선 그대로.
+- **버튼 제거가 안전한 근거**: 파일 생성 진입점은 `writeSetupResultFiles()` 하나뿐이고 호출처 3곳 중 정상 경로는 `PtzCalibrator.saveSetupSnapshot()`(센터라이징 완료 시 자동). 나머지는 재번호 경로(`server.ts`)와 버튼이 쓰던 `POST /capture/setup-result`.
+- **`POST /capture/setup-result` 라우트는 남겼다** — 지금 호출자는 테스트뿐이지만, 공개 REST 표면 삭제는 UI 요청 범위 밖. 정리 여부는 마스터 판단 대기(문서 §6에 명시).
+
+**검증**
+
+- 신규 가드 4건: `buildTouringPlan.test.ts` 에 버튼 위치(`.centering-inline` 안 `#cal-start` 뒤 · 툴바엔 없음)·결선 유지 2건, `setupResultRoute.test.ts` 의 기존 "버튼 존재" 검증 2건을 **재추가 방지 가드**(`not.toContain`) 1건으로 교체.
+- `tsc --noEmit` 0 / `vitest run` 2656 pass. **잔여 실패 2건은 기존 데이터 의존 실패** — `buildTouringPlan.test.ts` 의 실데이터 픽스처가 gitignore 대상 `save/setup_result.json` 을 읽는데 현 파일은 23슬롯 `centering` 이 **전부 null**(마지막 생성 이후 미센터라이징). **변경 없는 main 체크아웃에서도 동일 재현**(14 pass / 2 fail) 확인 — 내 변경 탓이 아님. 센터라이징 1회 돌리면 해소.
+- 라이브(13020): 뷰어 정적파일이 `Cache-Control: no-store` 라 **서버 재시작 없이 새로고침만으로** 반영됨을 실측. 서빙 HTML/JS 에서 새 배치·`cal-result-file` 0건·`makeSetupResultFile` 0건 확인.
+- 브라우저 DOM 자동화(playwright/jsdom)는 이 저장소에 **없다** — 뷰어 검증은 기존 방식대로 마크업·결선 소스 검사로 한다.
+
+**동시 세션 충돌 처리 (상대편 기록과 대칭)**
+
+- 머지하려 메인 체크아웃을 `main` 으로 전환한 순간, 세션 시작엔 없던 **다른 세션의 미커밋 스키마 WIP**(`PresetPosRow→PresetInfoRow` 계열, src+테스트 20여개)이 드러났고 `test/setupResultRoute.test.ts` 가 겹쳐 머지 거부됨.
+- **남의 WIP은 손대지 않는 쪽**으로 처리: 브랜치를 원래 `feature/preset-pos-to-info` 로 되돌리고, 작업트리를 건드리지 않는 **`git push . worktree-work-20260724:main`** 으로 main ref만 FF. 워크트리 공유 스택이므로 **stash는 쓰지 않았다**.
+- 이후 상대 세션이 그 위로 rebase 해 `origin/main aa4d4a3` 에 함께 올라감. 최종 확인: `origin/main` 이 `cfc8d34` 포함, 내 파일 5개 중 4개 바이트 동일, `setupResultRoute.test.ts` 3줄 차이는 상대의 스키마 개명이 얹힌 정상 결과. 내 가드 테스트 3건 origin/main 에 생존.
+
+**현재 상태 / 다음**
+
+- 푸시 완료 상태(내가 민 게 아니라 상대 세션 rebase 편승). 워크트리 `worktree-work-20260724` 는 역할 종료 — 정리 가능.
+- Touring Test 실동작 확인은 아직 못 함: `save/setup_result.json` 의 `centering` 이 전량 null 이라 지금 누르면 **전 슬롯 skip**. 센터라이징 1회 후 재확인 필요.
+
+---
+
 ## 2026-07-24 DB 테이블 preset_pos → preset_info 리네임 + 누락필드 추가 — main 병합·푸시 완료
 
 **세션 요약 (커밋 4개, origin/main `aa4d4a3` 반영)**
