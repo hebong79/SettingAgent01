@@ -28,6 +28,48 @@ memo.md에 새 항목을 추가하기 **전에** 파일 크기를 확인한다. 
 
 ---
 
+## 2026-07-24 DB 테이블 preset_pos → preset_info 리네임 + 누락필드 추가 — main 병합·푸시 완료
+
+**세션 요약 (커밋 4개, origin/main `aa4d4a3` 반영)**
+
+- 발단: 마스터가 `my_db_table.md`에 §camera_info·§preset_info 정의를 붙이며 "DB테이블 추가및 생성해줘".
+- **선확인으로 방향이 바뀐 건**: `camera_info`는 **이미 스키마에 완전 존재**(§3 정의와 일치, +img_w/img_h)라 만들 게 없었고, `preset_info`는 기존 `preset_pos`와 pos가 중복이었다. 이 중복을 물었더니 마스터 결정 = **"preset_pos를 preset_info로 이름 바꾸고 없는 필드 추가 + 사용처도 수정"**.
+- 확정 스키마: 테이블 `preset_pos`→`preset_info`, 컬럼 `sname`→`preset_name`(기존 sname이 곧 프리셋 라벨), 신규 `place_id`(기본 1), `pan/tilt/zoom` REAL 3컬럼 유지(pos용 JSON 컬럼 새로 만들지 않음), `slot_setup` FK 갱신. 타입 `PresetPosRow`→`PresetInfoRow`, 메서드 `upsertPresetPos`→`upsertPresetInfo`.
+
+**핵심 기술 함정 2개 (설계 단계에서 잡음 — 그냥 짰으면 깨짐)**
+
+1. **ensureSchema 순서 역전 필수**: 기존 DB에서 `CREATE TABLE IF NOT EXISTS preset_info`가 먼저 돌면 **빈 preset_info가 생겨** 뒤이은 `ALTER TABLE preset_pos RENAME TO preset_info`가 "이미 존재"로 실패. → 리네임 마이그레이션을 **CREATE 블록 이전**에 배치.
+2. **`foreign_keys=ON` + `ADD COLUMN ... REFERENCES ... NOT NULL DEFAULT 1` 동시 불가**(SQLite 규칙: FK 활성 중 REFERENCES 컬럼 ADD는 기본값 NULL이어야 함). → ALTER 경로는 REFERENCES 생략, 신규 CREATE 경로만 REFERENCES 유지. **place_id FK divergence는 수용**(place_id 항상 1·place_info(1) 상존. 엄격 동치는 테이블 재빌드 12단계라 단순함 우선).
+- `ALTER TABLE ... RENAME TO`가 **자식 slot_setup의 FK 참조를 자동 추종**함은 가정이 아니라 레거시 파일 DB를 시드해 **실증**함.
+
+**검증**: tsc 0 / vitest **229파일 2685테스트 전량 green**. 신규 테스트 27건(`presetInfoMigration.test.ts` 4 + `presetInfoMigration.adversarial.test.ts` 23). 라이브(13020) `/db/tables`에 `preset_info` 노출·`preset_pos` 404, 5행 데이터 보존(updated_at이 마이그레이션 이전 시각 유지로 입증), slot_setup 23행 정합.
+
+**핵심 사실 (다음 세션 참고)**
+
+- ⚠️ **`sname`은 두 문맥에 공존**: (a) DB 컬럼/Row 필드 → `preset_name`/`presetName`으로 변경됨, (b) **camerapos.json의 JSON 키 `sname` → 외부 포맷 계약이라 불변**. `cameraposWriter`/`mapTargets`/`roiDbLoad`의 JSON 읽기·쓰기는 그대로고 **매핑 지점에서만 번역**한다. 일괄 sed 치환 금지.
+- **`preset_pos` 잔존 참조는 전부 정당하니 지우지 말 것**: `SqliteStore.ts`(구DB 감지→rename하는 마이그레이션 로직 — 지우면 미변환 DB 영구 불가), `presetInfoMigration*.test.ts`·`slot3dFrontCenter.test.ts`(구 스키마를 **입력으로 시드**하는 픽스처), `SettingAgent/docs/*.md`(과거 시점 기록물).
+- 실 DB는 서버 첫 기동 시 **자동 마이그레이션·롤백 코드 없음**. 백업 `data/setting.sqlite.bak-presetinfo-20260724_145745` + **`-wal`(3.1MB)·`-shm` 동반 필수**(본체 49KB보다 WAL이 큼 — WAL 빼면 복구 불가).
+- 정본 문서 최종: `1 floor_ROI / 2 camera_info / 3 preset_info / 4 place_info / 5 slot_setup / 6 parking_evnt / 7 parking_slot` (번호 연속·중복 해소, preset_pos 완전 제거). 마스터가 직접 편집한 부분은 손대지 않고 그대로 커밋했다.
+
+**⚠️ 동시 세션 충돌 (재발 방지)**
+
+- 작업 중 **다른 세션이 같은 메인 리포에서 `cfc8d34`를 main에 올림**(Touring Test 버튼 이동 + result 버튼 제거). 그 커밋이 `test/setupResultRoute.test.ts`를 **내 커밋과 함께 건드려** FF 병합 불가 → **main 위로 rebase**로 해소(충돌 없이 자동병합됐지만 **자동병합은 문법만 보장**하므로 반드시 테스트로 재검증했고 전량 green).
+- 그 과정에서 작업트리의 `web/app.js`·`index.html` 더티가 **남의 커밋 내용과 바이트 동일**함을 대조한 뒤에야 복원했다(남의 변경은 확인 없이 버리지 말 것).
+- 무관 더티(마스터의 `my_db_table.md`, 런타임 `data/`, 기존 `_workspace_*` 삭제분 41건)는 **stash로 보호 후 전량 복원**, 커밋엔 1건도 안 섞였다. 커밋은 **경로 한정**(`git commit -- <paths>`)으로 인덱스에 이미 staged된 남의 삭제분을 피했다.
+- 교훈: **병렬 세션이 예상되면 워크트리 분리가 안전**하다. 단 하네스 서브에이전트는 메인 리포에 launch-pin되므로, 이번엔 일부러 **메인 리포에 브랜치만 따서**(worktree 아님) 경로 불일치를 피했다 — 이 트레이드오프를 매번 판단할 것.
+
+**잔여과제**
+
+- ⚠️ **`preset_name`이 운영 DB 5행 전부 NULL** (선재 결함, 이번 회귀 아님 — updated_at이 마이그레이션보다 선행). 원인: `loadRoiIntoDb`가 camerapos 라벨을 upsert한 **직후** 라벨 없는 ROI 유래 프리셋을 재upsert해 `ON CONFLICT SET preset_name=excluded.preset_name`으로 **라벨을 말소**. 마스터 확인함·미수정.
+- `preset_pos`/`preset_info` 동시 존재 시 구 테이블 데이터 **무경고 미이관**(F4, 현실성 낮아 수용).
+- 마이그레이션된 기존 DB는 `place_id` 컬럼이 **맨 뒤**에 붙음(ADD COLUMN 특성, 기능 영향 없음).
+- `feat/vpd-seg-cuboid` 원격 포인터가 4커밋 뒤처짐 — 내용은 origin/main에 있어 유실 없음(다른 세션 브랜치라 미조치).
+- 관련 메모리: [[settingagent-db-schema]], [[finalize-slotsetup-wipe-fragility]], [[settingagent-persist-5decimals]].
+
+**커밋**: `b04b3ff`(리네임 본체) → `d230870`(문서 preset_info 정의) → `58a60f8`(문서 preset_pos 제거) → `aa4d4a3`(문서 번호 재정렬). **main = origin/main = `aa4d4a3`**. 산출물: `SettingAgent/docs/20260724_152212_preset_pos를_preset_info로_리네임.md`, `SettingAgent/_workspace_preset_info/01~04`.
+
+---
+
 ## 2026-07-24 분석페이지 DB 즉석생성 + 전역번호 재번호(A안) — main 병합·푸시 완료
 
 **세션 요약 (2기능, 커밋 `663f8dd`, origin/main 반영)**
