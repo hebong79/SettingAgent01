@@ -3,8 +3,8 @@ import { slotMapModel } from '../web/core.js';
 import type { MappingRow } from '../web/core.js';
 
 const rows: MappingRow[] = [
-  { slotId: 'c1p1s1', camIdx: 1, presetIdx: 1, positionIdx: 1, zone: 'A-01', globalIdx: 1 },
-  { slotId: 'c1p3s1', camIdx: 1, presetIdx: 3, positionIdx: 1, zone: 'B-01', globalIdx: 2 },
+  { slotId: 'c1p1s1', camIdx: 1, presetIdx: 1, positionIdx: 1, globalIdx: 1 },
+  { slotId: 'c1p3s1', camIdx: 1, presetIdx: 3, positionIdx: 1, globalIdx: 2 },
 ];
 
 describe('slotMapModel (슬롯 박스 맵 모델)', () => {

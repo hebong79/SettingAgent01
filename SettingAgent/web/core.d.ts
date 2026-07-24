@@ -344,7 +344,6 @@ export interface MappingRow {
   camIdx: number;
   presetIdx: number;
   positionIdx: number | null;
-  zone: string;
   globalIdx: number | null;
 }
 export function buildMappingRows(artifact: ArtifactLike | null | undefined): MappingRow[];
@@ -365,6 +364,17 @@ export function applyManualGlobalIds<T extends ArtifactLike>(
   artifact: T,
   idBySlot: Record<string, number | string>,
 ): { ok: true; artifact: T } | { ok: false; error: string; validation?: { ok: boolean; duplicates: number[]; gaps: number[] } };
+
+export interface PlacementSubmit {
+  slotId: number;
+  camId: number;
+  presetId: number;
+  presetSlotIdx: number;
+}
+export function applyManualPlacement(
+  artifact: ArtifactLike | null | undefined,
+  placementBySlot: Record<string, { camIdx?: number | string; presetIdx?: number | string; positionIdx?: number | string }>,
+): { ok: true; placements: PlacementSubmit[]; changed: boolean } | { ok: false; error: string };
 
 export interface StreamLoopDeps {
   fetchFn: (url: string, opt: { signal: AbortSignal }) => Promise<{

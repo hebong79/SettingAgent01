@@ -36,6 +36,7 @@ import {
   updateSlotFloorRoi,
   buildMappingRows,
   applyManualGlobalIds,
+  applyManualPlacement, // 배치(카메라/프리셋/프리셋내 위치) 직접 입력 검증(순수)
   slotMapModel,
   parseLoadedArtifact, // 로컬 결과 파일 파싱·최소형태검증(순수)
   defaultResultFilename, // 저장 대화상자 제안 파일명(순수)
@@ -3193,36 +3194,48 @@ function renderManualIndex() {
   const table = document.createElement('table');
   table.className = 'an-table';
   table.innerHTML =
-    '<thead><tr><th>전역 ID</th><th>카메라</th><th>프리셋</th><th>프리셋내 위치</th><th>slotId</th><th>zone</th></tr></thead>';
+    '<thead><tr><th>전역 ID</th><th>카메라</th><th>프리셋</th><th>프리셋내 위치</th><th>slotId (현재)</th></tr></thead>';
   const tbody = document.createElement('tbody');
   for (const r of rows) {
     const tr = document.createElement('tr');
     tr.dataset.slotId = r.slotId;
     tr.addEventListener('click', () => selectMapSlot(r.slotId)); // 표 행 ↔ 슬롯맵 동기화.
-    const idTd = document.createElement('td');
-    const input = document.createElement('input');
-    input.type = 'number';
-    input.min = '1';
-    input.className = 'an-manual-input';
-    input.dataset.slotId = r.slotId;
-    input.value = r.globalIdx ?? '';
-    input.addEventListener('input', () => {
-      validateManualTable();
-      renderSlotMap(); // 입력 즉시 박스 번호 갱신.
-    });
-    idTd.appendChild(input);
-    tr.appendChild(idTd);
-    for (const c of [r.camIdx, r.presetIdx, r.positionIdx ?? '-', r.slotId, r.zone]) {
-      const td = document.createElement('td');
-      td.textContent = String(c);
-      tr.appendChild(td);
-    }
+    // 전역 ID(저장 시 slot_id 재번호) + 배치 3열(카메라/프리셋/프리셋내 위치) 모두 직접 입력.
+    tr.appendChild(manualCell(r.slotId, 'gid', r.globalIdx));
+    tr.appendChild(manualCell(r.slotId, 'cam', r.camIdx));
+    tr.appendChild(manualCell(r.slotId, 'preset', r.presetIdx));
+    tr.appendChild(manualCell(r.slotId, 'pos', r.positionIdx));
+    const sidTd = document.createElement('td');
+    sidTd.textContent = String(r.slotId);
+    sidTd.title = 'DB slot_id(현재). 저장하면 왼쪽 전역 ID 값으로 재번호됩니다 — slotId = 전역 ID.';
+    tr.appendChild(sidTd);
     tbody.appendChild(tr);
   }
   table.appendChild(tbody);
   box.appendChild(table);
   validateManualTable();
   renderSlotMap();
+}
+
+/**
+ * 매핑 표의 편집 셀 1개(number input). field='gid'|'cam'|'preset'|'pos'.
+ * 입력 즉시 정합 재검증 + 슬롯맵 번호 갱신(전역ID 변경이 박스 라벨에 바로 보이게).
+ */
+function manualCell(slotId, field, value) {
+  const td = document.createElement('td');
+  const input = document.createElement('input');
+  input.type = 'number';
+  input.min = '1';
+  input.className = field === 'gid' ? 'an-manual-input' : 'an-manual-input an-manual-place';
+  input.dataset.slotId = slotId;
+  input.dataset.field = field;
+  input.value = value ?? '';
+  input.addEventListener('input', () => {
+    validateManualTable();
+    renderSlotMap();
+  });
+  td.appendChild(input);
+  return td;
 }
 
 /** 슬롯 박스 맵 렌더(우측). 박스=주차면, 내부=전역ID. 클릭 시 표와 동기화. */
@@ -3267,28 +3280,49 @@ function selectMapSlot(slotId) {
 /** 표의 전역ID 입력값을 {slotId: 값} 으로 수집. */
 function collectManualIds() {
   const map = {};
-  for (const input of document.querySelectorAll('.an-manual-input')) {
+  for (const input of document.querySelectorAll('.an-manual-input[data-field="gid"]')) {
     map[input.dataset.slotId] = input.value;
   }
   return map;
 }
 
-/** 현재 입력값 정합(1..N 고유) 표시. */
+/** 표의 배치 입력값을 {slotId: {camIdx, presetIdx, positionIdx}} 로 수집. */
+function collectManualPlacement() {
+  const map = {};
+  const fields = { cam: 'camIdx', preset: 'presetIdx', pos: 'positionIdx' };
+  for (const input of document.querySelectorAll('.an-manual-place')) {
+    const slotId = input.dataset.slotId;
+    if (!map[slotId]) map[slotId] = {};
+    map[slotId][fields[input.dataset.field]] = input.value;
+  }
+  return map;
+}
+
+/** 현재 입력값 정합(전역ID 1..N 고유 + 배치 삼중키·위치 연속) 표시. */
 function validateManualTable() {
   const status = $('an-manual-status');
   if (!status || !lastArtifact) return;
-  const res = applyManualGlobalIds(lastArtifact, collectManualIds());
-  status.textContent = res.ok ? '정합 OK (1..N 고유)' : res.error;
-  status.className = res.ok ? 'an-manual-ok' : 'an-manual-bad';
+  const gid = applyManualGlobalIds(lastArtifact, collectManualIds());
+  const place = applyManualPlacement(lastArtifact, collectManualPlacement());
+  const ok = gid.ok && place.ok;
+  status.textContent = ok ? '정합 OK (전역ID 1..N 고유 · 배치 충돌 없음)' : (gid.ok ? place.error : gid.error);
+  status.className = ok ? 'an-manual-ok' : 'an-manual-bad';
 }
 
-/** 자동 번호: 표 순서(카메라→프리셋→위치)대로 1..N 채움. */
+/** 자동 번호: 표 순서(카메라→프리셋→위치)대로 전역ID 1..N 채움(배치 열은 손대지 않음). */
 function autoNumberManual() {
-  [...document.querySelectorAll('.an-manual-input')].forEach((input, i) => (input.value = String(i + 1)));
+  [...document.querySelectorAll('.an-manual-input[data-field="gid"]')].forEach(
+    (input, i) => (input.value = String(i + 1)),
+  );
   validateManualTable();
 }
 
-/** #7 저장: 전역ID 매핑 적용 → POST /mapping/renumber(DB slot_id 재번호 + json 전파). */
+/**
+ * #7 저장: ① 배치 변경분 → POST /mapping/placement(DB cam/preset/위치)
+ *          ② 전역ID 순열 → POST /mapping/renumber(DB slot_id 재번호 + json 전파).
+ * 순서 고정 — 배치는 현재 slot_id 를 키로 쓰므로 재번호보다 **먼저** 반영해야 한다.
+ * 배치가 그대로면 ①은 건너뛴다(불필요한 updated_at 갱신 방지).
+ */
 async function saveManualIndex() {
   if (!lastArtifact) return;
   const msg = $('an-manual-msg');
@@ -3297,9 +3331,28 @@ async function saveManualIndex() {
     if (msg) msg.textContent = `저장 불가: ${res.error}`;
     return;
   }
+  const place = applyManualPlacement(lastArtifact, collectManualPlacement());
+  if (!place.ok) {
+    if (msg) msg.textContent = `저장 불가: ${place.error}`;
+    return;
+  }
   // 현재 slotId=old, 입력 전역ID=new 순열을 매핑 배열로 파생(백엔드가 재검증).
   const mapping = res.artifact.globalIndex.map((g) => ({ oldSlotId: Number(g.slotId), newSlotId: g.globalIdx }));
   try {
+    let placed = '';
+    if (place.changed) {
+      const rp = await fetch(api('/mapping/placement'), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ placements: place.placements }),
+      });
+      const dp = await rp.json().catch(() => ({}));
+      if (!rp.ok) {
+        if (msg) msg.textContent = `배치 저장 실패: ${dp.error ?? rp.status}`;
+        return; // 재번호는 진행하지 않는다(DB 무변경 유지).
+      }
+      placed = `배치 ${dp.updated}면 · `;
+    }
     const r = await fetch(api('/mapping/renumber'), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -3307,12 +3360,12 @@ async function saveManualIndex() {
     });
     const data = await r.json().catch(() => ({}));
     if (r.ok) {
-      if (msg) msg.textContent = `재번호 저장됨: ${data.renumbered}면 (slot_ptz:${data.slotPtz})`;
+      if (msg) msg.textContent = `${placed}재번호 저장됨: ${data.renumbered}면 (slot_ptz:${data.slotPtz})`;
       await loadMapping(); // 검수 탭·state.mapping 재동기화.
       await renderAnalysis(); // 분석 탭 재렌더(재번호 반영).
       renderSlotList(); // 주차면 목록 재렌더.
     } else {
-      if (msg) msg.textContent = `저장 실패: ${data.error ?? r.status}`;
+      if (msg) msg.textContent = `${placed}재번호 실패: ${data.error ?? r.status}`;
     }
   } catch (err) {
     if (msg) msg.textContent = `저장 실패(네트워크): ${err}`;

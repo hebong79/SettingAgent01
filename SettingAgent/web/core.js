@@ -1042,8 +1042,9 @@ function slotContext(artifact, slot, giBySlot) {
 }
 
 /**
- * 전역 인덱스 매핑 표 행 산출(순수). 슬롯별 카메라/프리셋/프리셋내 위치/zone/현재 전역ID.
- * 카메라→프리셋→위치 순 정렬. UI 가 전역ID 직접 입력으로 매핑하게 한다.
+ * 전역 인덱스 매핑 표 행 산출(순수). 슬롯별 카메라/프리셋/프리셋내 위치/현재 전역ID.
+ * 카메라→프리셋→위치 순 정렬. UI 가 각 값을 직접 입력해 매핑·배치를 고치게 한다.
+ * ★ zone 은 표에서 제외 — DB(slot_setup)에 컬럼이 없고 값이 항상 `cam{N}`(카메라 열 중복)이라 정보가 0.
  */
 export function buildMappingRows(artifact) {
   if (!artifact || !Array.isArray(artifact.slots)) return [];
@@ -1055,7 +1056,6 @@ export function buildMappingRows(artifact) {
       camIdx: ctx.camIdx,
       presetIdx: ctx.presetIdx,
       positionIdx: ctx.positionIdx,
-      zone: s.zone ?? '',
       globalIdx: giBySlot.get(s.slotId)?.globalIdx ?? null,
     };
   });
@@ -1090,6 +1090,64 @@ export function applyManualGlobalIds(artifact, idBySlot) {
   }
   entries.sort((a, b) => a.globalIdx - b.globalIdx);
   return { ok: true, artifact: { ...artifact, globalIndex: entries } };
+}
+
+/**
+ * 사용자가 표에서 고친 배치(카메라/프리셋/프리셋내 위치)를 검증해 DB 제출 shape 로 변환(순수).
+ * placementBySlot: { [slotId]: { camIdx, presetIdx, positionIdx } } — 값은 문자열 입력 허용.
+ *
+ * 게이트(서버 validateSlotPlacement 와 이중화 — 여기는 빠른 UX 피드백):
+ *  ① 모든 슬롯에 세 값이 1 이상 정수  ② (cam,preset,위치) 삼중키 중복 금지
+ *  ③ 같은 (cam,preset) 안에서 위치는 1..M 연속(빈 번호 금지 — 프리셋내 위치의 정의)
+ *  ④ slotId 가 전역 정수여야 한다(DB slot_id 키). 구 형식(c1p1s1)은 재빌드 전까지 배치 변경 불가.
+ * → { ok:true, placements, changed } | { ok:false, error }. changed=현재 배치와 다른 행이 있는지.
+ */
+export function applyManualPlacement(artifact, placementBySlot) {
+  const rows = buildMappingRows(artifact);
+  if (rows.length === 0) return { ok: false, error: '산출물 없음' };
+
+  const placements = [];
+  let changed = false;
+  const triples = new Map(); // `cam:preset:pos` → slotId(원문)
+  const byPreset = new Map(); // `cam:preset` → 위치 배열
+  for (const r of rows) {
+    const edit = placementBySlot?.[r.slotId] ?? {};
+    const camId = Number(edit.camIdx);
+    const presetId = Number(edit.presetIdx);
+    const presetSlotIdx = Number(edit.positionIdx);
+    for (const [label, v] of [['카메라', camId], ['프리셋', presetId], ['프리셋내 위치', presetSlotIdx]]) {
+      if (!Number.isInteger(v) || v < 1) {
+        return { ok: false, error: `${label} 값 오류: slot ${r.slotId} (1 이상 정수)` };
+      }
+    }
+    const key = `${camId}:${presetId}:${presetSlotIdx}`;
+    if (triples.has(key)) {
+      return { ok: false, error: `배치 충돌: cam${camId} preset${presetId} 위치${presetSlotIdx} — slot ${triples.get(key)} 와 ${r.slotId}` };
+    }
+    triples.set(key, r.slotId);
+    const groupKey = `${camId}:${presetId}`;
+    if (!byPreset.has(groupKey)) byPreset.set(groupKey, []);
+    byPreset.get(groupKey).push(presetSlotIdx);
+
+    const slotId = Number(r.slotId);
+    if (!Number.isInteger(slotId) || slotId < 1) {
+      return { ok: false, error: `slotId 가 전역 정수가 아닙니다: ${r.slotId} (배치 변경 불가)` };
+    }
+    placements.push({ slotId, camId, presetId, presetSlotIdx });
+    if (camId !== r.camIdx || presetId !== r.presetIdx || presetSlotIdx !== r.positionIdx) changed = true;
+  }
+
+  // ③ 프리셋별 위치 1..M 연속.
+  for (const [groupKey, list] of byPreset) {
+    const sorted = [...list].sort((a, b) => a - b);
+    for (let i = 0; i < sorted.length; i++) {
+      if (sorted[i] !== i + 1) {
+        return { ok: false, error: `프리셋내 위치는 1..${sorted.length} 연속이어야 합니다: cam${groupKey.replace(':', ' preset')} (현재 ${sorted.join(',')})` };
+      }
+    }
+  }
+
+  return { ok: true, placements, changed };
 }
 
 /**

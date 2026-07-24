@@ -23,8 +23,11 @@ describe('buildMappingRows (매핑 표 행)', () => {
   it('카메라→프리셋→위치 순 정렬 + 컬럼 도출', () => {
     const rows = buildMappingRows(artifact);
     expect(rows.map((r) => r.slotId)).toEqual(['c1p1s1', 'c1p1s2', 'c1p3s1']);
-    expect(rows[0]).toMatchObject({ camIdx: 1, presetIdx: 1, positionIdx: 1, zone: 'A-01', globalIdx: 1 });
-    expect(rows[2]).toMatchObject({ camIdx: 1, presetIdx: 3, positionIdx: 1, zone: 'B-01', globalIdx: 3 });
+    expect(rows[0]).toMatchObject({ camIdx: 1, presetIdx: 1, positionIdx: 1, globalIdx: 1 });
+    expect(rows[2]).toMatchObject({ camIdx: 1, presetIdx: 3, positionIdx: 1, globalIdx: 3 });
+  });
+  it('zone 은 행에 포함하지 않는다(DB 미보유·cam{N} 중복 → 표에서 제거)', () => {
+    expect(buildMappingRows(artifact).every((r) => !('zone' in r))).toBe(true);
   });
   it('null 산출물 → 빈 배열', () => {
     expect(buildMappingRows(null)).toEqual([]);

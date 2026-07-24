@@ -7,6 +7,7 @@ import type {
   PresetInfoRow,
   SlotCenteringRow,
   SlotLpdRow,
+  SlotPlacementRow,
   SlotSetupRow,
   SlotSetupView,
 } from './types.js';
@@ -420,6 +421,34 @@ export class SqliteStore {
       return changed;
     });
     return tx(rows);
+  }
+
+  /**
+   * 배치(cam_id/preset_id/preset_slotidx)만 slot_id 키로 부분 UPDATE(updated_at 동반).
+   * 전역 인덱스 수동 매핑 화면의 행 편집 전용 — 기하(slot_roi)·검출·센터링 컬럼 무접촉.
+   *
+   * ★ 2단계 트랜잭션: ① 대상 행 preset_slotidx 를 전부 NULL 로 비운 뒤 ② 최종값을 넣는다.
+   *   UNIQUE(cam_id,preset_id,preset_slotidx) 때문에 위치 교환(A↔B)이 행 단위 UPDATE 중간상태에서
+   *   충돌하는데, SQLite 는 NULL 을 서로 다른 값으로 보므로 비우기 단계가 그 충돌을 없앤다.
+   *   제출 밖 행과의 충돌은 라우트의 validateSlotPlacement 가 사전 차단한다.
+   * slot_id 미존재 행은 조용히 무시. 반환=실제 갱신 행수.
+   */
+  updateSlotPlacement(rows: SlotPlacementRow[], updatedAt: string = new Date().toISOString()): { changed: number } {
+    const clear = this.db.prepare(`UPDATE slot_setup SET preset_slotidx = NULL WHERE slot_id = ?`);
+    const set = this.db.prepare(
+      `UPDATE slot_setup
+         SET cam_id = ?, preset_id = ?, preset_slotidx = ?, updated_at = ?
+       WHERE slot_id = ?`,
+    );
+    const tx = this.db.transaction((list: SlotPlacementRow[]) => {
+      for (const r of list) clear.run(r.slotId);
+      let changed = 0;
+      for (const r of list) {
+        changed += set.run(r.camId, r.presetId, r.presetSlotIdx, updatedAt, r.slotId).changes;
+      }
+      return changed;
+    });
+    return { changed: tx(rows) };
   }
 
   /** slot_setup 검출·센터링 컬럼 전량 초기화(수동 '초기화' 버튼). slot_roi·행은 보존. 반환=초기화 행수. */

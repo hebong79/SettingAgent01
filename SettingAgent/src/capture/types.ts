@@ -155,6 +155,18 @@ export interface SlotCenteringRow {
 }
 
 /**
+ * updateSlotPlacement 입력(부분 갱신 — slot_id 키 UPDATE).
+ * 전역 인덱스 수동 매핑 화면의 배치(카메라/프리셋/프리셋내 위치) 직접 수정 전용.
+ * 기하(slot_roi)·검출·센터링 컬럼은 건드리지 않는다.
+ */
+export interface SlotPlacementRow {
+  slotId: number;
+  camId: number;
+  presetId: number;
+  presetSlotIdx: number;
+}
+
+/**
  * upsertSlotLpd 입력(부분 갱신 — slot_id 키 UPDATE).
  * 번호판 디스커버리(PlateDiscovery)가 lpd_obb 만 원본 좌표로 채운다 — 타 컬럼·타 슬롯 불변.
  * lpdObb 는 stringify5 로 직렬화된 정규화 OBB JSON TEXT(slot_setup TEXT writer 규약).

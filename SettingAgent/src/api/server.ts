@@ -31,6 +31,7 @@ import type { SetupArtifact } from '../domain/types.js';
 import type { SaveStore } from '../store/SaveStore.js';
 import type { CRpcClient } from '../clients/CRpcClient.js';
 import { validateRenumberMapping } from '../setup/renumberMapping.js';
+import { validateSlotPlacement } from '../setup/placementMapping.js';
 import { renumberSlotPtzFile } from '../calibrate/slotPtzRenumber.js';
 import { writeSetupResultFiles } from '../store/setupResult.js';
 import { logger } from '../util/logger.js';
@@ -50,6 +51,19 @@ const RenumberBodySchema = z.object({
       z.object({
         oldSlotId: z.number().int().positive(),
         newSlotId: z.number().int().positive(),
+      }),
+    )
+    .min(1),
+});
+
+const PlacementBodySchema = z.object({
+  placements: z
+    .array(
+      z.object({
+        slotId: z.number().int().positive(),
+        camId: z.number().int().positive(),
+        presetId: z.number().int().positive(),
+        presetSlotIdx: z.number().int().positive(),
       }),
     )
     .min(1),
@@ -334,6 +348,70 @@ export function buildServer(deps: ApiDeps): FastifyInstance {
 
   app.post('/mapping/renumber', async (req, reply) => renumberHandler(req.body, reply));
 
+  /**
+   * 슬롯 배치 수동 변경: 전역 인덱스 수동 매핑 화면에서 행별로 고친
+   * (카메라, 프리셋, 프리셋내 위치)를 DB slot_setup 에 반영한다.
+   * 처리 순서(renumber 와 동일 규약): 검증(실패→400·DB무변경) → DB UPDATE(트랜잭션) →
+   * setup_result → setup_artifact 재빌드. DB 커밋이 진실의 기준; 파일 2종은 순차 best-effort.
+   *
+   * ★ 기하(slot_roi)는 변환하지 않는다 — ROI 는 원래 프리셋 화면 기준 정규화 좌표이므로,
+   *   다른 카메라·프리셋으로 옮기면 좌표는 그대로 남는다(재수집·재센터라이징이 필요).
+   *   센터링 PTZ(pan/tilt/zoom)도 지우지 않는다 — 데이터 파괴 금지, 대신 UI 가 경고한다.
+   */
+  function placementHandler(body: unknown, reply: { code: (c: number) => void }): unknown {
+    if (!deps.sqlite) {
+      reply.code(501);
+      return { error: 'sqlite not configured' };
+    }
+    const parsed = PlacementBodySchema.safeParse(body);
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: 'invalid body', detail: parsed.error.flatten() };
+    }
+
+    // 1) 검증(순수). current = DB 현재 배치 전량, presetKeys = FK 부모.
+    const current = deps.sqlite.getSlotSetup().map((s) => ({
+      slotId: s.slotId, camId: s.camId, presetId: s.presetId, presetSlotIdx: s.presetSlotIdx,
+    }));
+    const v = validateSlotPlacement(current, parsed.data.placements, deps.sqlite.getPresetKeys());
+    if (!v.ok) {
+      reply.code(400);
+      return { error: v.error }; // ★ DB 무변경(원자성)
+    }
+
+    // 2) DB 배치 갱신(트랜잭션). throw 시 롤백.
+    let changed: number;
+    try {
+      changed = deps.sqlite.updateSlotPlacement(parsed.data.placements).changed;
+    } catch (e) {
+      reply.code(500);
+      return { error: 'placement update failed', detail: String(e) };
+    }
+
+    // 3) 파일 전파(각 격리·best-effort — DB 커밋 후엔 파일 실패가 요청을 실패시키지 않음).
+    let setupResult: { archive: string | null; fixed: string | null } | null = null;
+    if (deps.saveStore) {
+      try {
+        const w = writeSetupResultFiles(deps.sqlite.getSlotSetup(), deps.saveStore);
+        setupResult = { archive: w.archive, fixed: w.fixed };
+      } catch (e) {
+        logger.warn({ err: e }, 'setup_result 재생성 실패(격리 — DB 정본은 무관)');
+      }
+    }
+
+    let artifactSaved = false;
+    try {
+      deps.repo.saveArtifact(buildArtifactFromSlotSetup(deps.sqlite.getSlotSetup()));
+      artifactSaved = true;
+    } catch (e) {
+      logger.warn({ err: e }, 'setup_artifact 재빌드 저장 실패(격리 — DB 정본은 무관)');
+    }
+
+    return { ok: true, updated: changed, setupResult, artifactSaved };
+  }
+
+  app.post('/mapping/placement', async (req, reply) => placementHandler(req.body, reply));
+
   // 장기 관측·반복 수집(/capture/*). 의존성 주입 시에만 등록(가산, 기존 라우트 불변).
   if (deps.captureJob && deps.finalizer && deps.sqlite && deps.capture) {
     registerCaptureRoutes(app, {
@@ -399,6 +477,8 @@ export function buildServer(deps: ApiDeps): FastifyInstance {
       instance.put('/viewer/api/mapping', async (req, reply) => saveMappingHandler(deps.repo, req.body, reply));
       // 전역번호 재번호(뷰어 컨텍스트). 헤드리스 POST /mapping/renumber 와 동일 closure 핸들러 공유.
       instance.post('/viewer/api/mapping/renumber', async (req, reply) => renumberHandler(req.body, reply));
+      // 슬롯 배치 수동 변경(뷰어 컨텍스트). 헤드리스 POST /mapping/placement 와 동일 closure 핸들러 공유.
+      instance.post('/viewer/api/mapping/placement', async (req, reply) => placementHandler(req.body, reply));
       // 카메라 라우트 + 정적 SPA(와일드카드는 내부에서 API 라우트 뒤에 register).
       // rpc(Unity 프록시)·llm(모델 선택기=brain)은 주입 시에만 해당 라우트 등록(가산).
       await registerViewerRoutes(instance, {

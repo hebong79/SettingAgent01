@@ -813,6 +813,12 @@ body.resizing {
   text-align: center;
 }
 
+/* 배치(카메라/프리셋/프리셋내 위치) 입력 — 전역ID 와 구분되게 좁고 옅게. */
+.an-manual-place {
+  width: 56px;
+  color: var(--muted);
+}
+
 /* 표(좌) + 슬롯 박스 맵(우) 2단. */
 .an-manual-split {
   display: flex;

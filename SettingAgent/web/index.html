@@ -204,7 +204,7 @@
             <div class="centering-inline">
               <div class="centering-info">
                 <span>기본 정보</span>
-                <p>센터라이징은 번호판 중심을 기준으로 각 주차면의 Pan·Tilt·Zoom을 미세 조정합니다. 완료 결과는 <code>slot_ptz.json</code>과 DB <code>centering_slot</code>에 저장됩니다.</p>
+                <p>센터라이징은 번호판 중심을 기준으로 각 주차면의 Pan·Tilt·Zoom을 미세 조정합니다. 완료 결과는 <code>setup_result.json</code>과 DB <code>slot_setup</code> 테이블에 저장됩니다.</p>
               </div>
               <button id="cal-start" class="primary">센터라이징</button>
               <button id="cap-touring" title="setup_result.json(읽기 전용)을 카메라→프리셋→주차면 순으로 순회하며 각 위치로 이동(각 1초). DB·검출·오버레이를 바꾸지 않는 독립 점검 기능">Touring Test</button>
@@ -305,7 +305,7 @@
         </section>
         <section class="panel-section">
           <div class="section-title">전역 인덱스 수동 매핑</div>
-          <p class="an-manual-help">슬롯마다 <b>전역 ID</b>를 직접 입력해 매핑하세요. 1..N 고유여야 합니다. (카메라·프리셋·프리셋내 위치는 산출물 기준 자동 표기)</p>
+          <p class="an-manual-help">슬롯마다 <b>전역 ID</b>(1..N 고유)와 <b>배치</b>(카메라·프리셋·프리셋내 위치)를 직접 입력해 고칩니다. 프리셋내 위치는 같은 카메라·프리셋 안에서 1..M 연속이어야 합니다. slotId 는 전역 ID 를 따라갑니다(저장 시 <code>slot_setup.slot_id</code> 재번호). ⚠ 배치를 다른 카메라·프리셋으로 옮겨도 ROI·센터라이징 PTZ 는 그대로 남습니다 — 옮긴 슬롯은 재수집·재센터라이징이 필요합니다.</p>
           <div class="an-manual-bar toolbar">
             <button id="an-manual-auto" title="카메라→프리셋→위치 순으로 1..N 자동 번호">자동 번호</button>
             <button id="an-manual-save" class="primary" title="전역 ID 매핑을 저장">저장</button>
