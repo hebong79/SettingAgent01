@@ -303,9 +303,16 @@ export class CalibrationSolver {
    *
    * 채택 게이트(설계서 §7.3): 왜곡항이
    *   (a) 잔차를 minImprovement 이상 줄이고
-   *   (b) 코너를 minCornerShiftPx 이상 밀어야
+   *   (b) 코너를 minCornerShiftPx 이상 밀고
+   *   (c) **k1 < 0 (배럴)** 이어야
    * 채택한다. 아니면 **k1=k2=0 으로 기록**한다 — 측정을 안 한 것과 재봤더니 없었던 것은
    * 다른 사실이므로 `adopted:false` 와 사유를 함께 남긴다.
+   *
+   * ★ (c) 배럴 부호 게이트(설계서 §3의 1차 예측 = "광각단은 반드시 k1<0"): 광각 렌즈의 방사왜곡은
+   *   배럴이다. 양의 k1(핀쿠션)이 나온다면 그것은 잔차를 지배하는 **비방사 성분**(PTZ 팬축·광학
+   *   중심 오프셋에 의한 시차 등)에 옵티마이저가 마진으로 끼워맞춘 아티팩트다 — 실측에서 실제로
+   *   관측됐다(154 z5129 k1=+0.17, 잔차 7→5px 마진 개선). 이런 표를 채택하면 조준을 오히려
+   *   틀리게 만든다. 그래서 부호로 걸러낸다. (망원단 핀쿠션은 이 컴포넌트의 범위 밖이다.)
    */
   solveDistortionZoom(samples: readonly Sample[]): DistortionPoint | null {
     const usable = this.usable(samples);
@@ -326,7 +333,8 @@ export class CalibrationSolver {
     const improvement = base.rms > 0 ? (base.rms - full.rms) / base.rms : 0;
     const rCorner = Math.hypot(this.cx, this.cy) / full.f;
     const cornerShiftPx = Math.abs(distortRadius(rCorner, full) - rCorner) * full.f;
-    const adopted = improvement >= this.minImprovement && cornerShiftPx >= this.minCornerShiftPx;
+    // 배럴(k1<0)만 채택한다 — (c) 부호 게이트. 양의 k1 은 비방사 잔차에 낀 아티팩트로 본다.
+    const adopted = improvement >= this.minImprovement && cornerShiftPx >= this.minCornerShiftPx && full.k1 < 0;
 
     return {
       z: zoom,

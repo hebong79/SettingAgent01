@@ -204,6 +204,14 @@ describe('solveDistortionZoom — 채택 게이트', () => {
     expect(p.rms0Px).toBeDefined();
   });
 
+  it('★핀쿠션(k1>0)은 채택하지 않는다 — 배럴 부호 게이트(실측 아티팩트 방어)', () => {
+    // 광각 렌즈는 배럴(k1<0)이다. 양의 k1 이 잔차를 줄이더라도 그것은 비방사 성분(PTZ 시차 등)에
+    // 낀 아티팩트다 — 실측(154 z5129 k1=+0.17)이 정확히 이 양상이었다. 부호로 걸러낸다.
+    const p = solver.solveDistortionZoom(synthFlow({ hfov: 34.05, coeffs: { k1: 0.17, k2: 0 }, zoom: 5129 }))!;
+    expect(p.adopted).toBe(false);
+    expect(p.k1).toBe(0);
+  });
+
   it('★망원(화각이 좁아 3승 항이 사실상 0)에서도 과적합하지 않는다', () => {
     // 같은 k1 이라도 화각이 좁으면 코너 반경이 작아 실제 변위가 무시할 수준이 된다.
     const p = solver.solveDistortionZoom(synthFlow({ hfov: 9.77, coeffs: { k1: -0.085, k2: 0 }, zoom: 12161 }))!;
