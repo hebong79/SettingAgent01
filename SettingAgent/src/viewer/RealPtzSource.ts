@@ -4,6 +4,7 @@ import { logger } from '../util/logger.js';
 import { SimulatorMjpegAdapter } from '../stream/SimulatorMjpegAdapter.js';
 import type { StreamAdapter } from '../stream/StreamAdapter.js';
 import type { CameraList, CameraSource, Ptz, SnapshotOpts, SnapshotResult } from './CameraSource.js';
+import { IDENTITY_CORRECTOR, type LensCorrector } from '../calibrate/lensCorrection.js';
 
 /** HTTP API Hucoms V1.22 원시 PTZ 범위. */
 const HUCOMS_DEFAULT_PAN_RANGE: [number, number] = [0, 35999];
@@ -157,12 +158,19 @@ export class RealPtzSource implements CameraSource {
   private readonly settlePollMs: number;
   private readonly settleTimeoutMs: number;
   private readonly sleep: (ms: number) => Promise<void>;
+  /**
+   * 광각 렌즈 보정기(설계서 20260725). **기본은 항등** — 주입하지 않으면 centerOnPoint 산출값이
+   * 종전과 비트 단위로 같다(회귀 0). 실측·검증(A/B pass)을 거친 기기에만 sourceRegistry 가
+   * 실제 보정기를 주입한다.
+   */
+  private readonly lensCorrector: LensCorrector;
 
   constructor(
     private cfg: CameraSourceConfig,
     timeoutMs = 7000,
     streamAdapter?: StreamAdapter,
     settle: RealPtzSettleOptions = {},
+    lensCorrector: LensCorrector = IDENTITY_CORRECTOR,
   ) {
     const host = cfg.host ?? '127.0.0.1';
     const port = cfg.port ?? 80;
@@ -178,6 +186,7 @@ export class RealPtzSource implements CameraSource {
     this.settlePollMs = settle.pollMs ?? SETTLE_POLL_MS;
     this.settleTimeoutMs = settle.timeoutMs ?? SETTLE_TIMEOUT_MS;
     this.sleep = settle.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.lensCorrector = lensCorrector;
     // 직접 생성한 레거시 소비자는 Hucoms MJPEG를 유지한다. sourceRegistry의 실카메라는 RTSP adapter를 명시 주입한다.
     this.streamAdapter = streamAdapter ?? new SimulatorMjpegAdapter((_cam, _preset, signal) => this.client.iterMjpeg({ signal }));
     this.streamTransport = this.streamAdapter.transport;
@@ -370,10 +379,18 @@ export class RealPtzSource implements CameraSource {
    *   미정착(타임아웃)은 삼키지 않고 settled:false 로 올린다 — 호출측이 조준 실패로 처리해야 한다.
    */
   async centerOnPoint(_camera: number, point: { x: number; y: number }): Promise<Ptz & { settled: boolean }> {
+    // 광각 렌즈 보정(설계서 20260725). 기본 보정기는 항등이라 표가 없으면 아래 두 줄은
+    // point 를 그대로 통과시킨다 → 종전 산출값과 비트 동일. 게인·곡면율은 zoom 의 함수이므로
+    // 네이티브 zoompos 를 읽어 넘긴다(실패하면 무보정으로 강등 — 조준을 멈추게 하느니).
+    let aim = point;
+    if (this.lensCorrector !== IDENTITY_CORRECTOR) {
+      const native = await this.readNativePtz();
+      if (native) aim = this.lensCorrector.correct(point, native.zoom);
+    }
     await this.client.centerPtz({
       type: 'point',
-      pointX: Math.round(clamp01(point.x) * CENTERING_BASE_WIDTH),
-      pointY: Math.round(clamp01(point.y) * CENTERING_BASE_HEIGHT),
+      pointX: Math.round(clamp01(aim.x) * CENTERING_BASE_WIDTH),
+      pointY: Math.round(clamp01(aim.y) * CENTERING_BASE_HEIGHT),
       speed: 50,
     });
     const settled = await this.waitUntilStopped();
