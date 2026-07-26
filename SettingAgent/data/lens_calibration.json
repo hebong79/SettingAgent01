@@ -1,0 +1,11 @@
+{
+  "_comment": "광각 렌즈 보정표(설계서 20260725). 카메라는 cameraSources[].id 로 매칭. enabled:true 인 카메라에만 클릭 조준 보정이 걸린다. 끄려면 enabled:false 또는 이 파일 삭제. model:'cam-001' = 내장 실측 프리셋(화각·게인) 재사용 — 154 검증에서 게인 일치 확인됨(z8000 2.2~2.7px, 낮 전체검증 2.4px pass). 곡면율(lensDistortion)은 이 PTZ 시차 교란으로 미채택.",
+  "cameras": [
+    {
+      "id": "real-camera-2",
+      "host": "192.168.0.154",
+      "model": "cam-001",
+      "enabled": true
+    }
+  ]
+}

@@ -13,10 +13,13 @@ import { readFileSync } from 'node:fs';
 import { CameraCalibration } from '@parkagent/lens-calib';
 import type { CalibrationSpec } from '@parkagent/lens-calib';
 
-/** data/lens_calibration.json 스키마(설계서 §8). */
+/** data/lens_calibration.json 스키마(설계서 §8). 카메라는 소스 `id`(문자열)로 식별한다 —
+ *  뷰어 cam 번호는 문맥마다 의미가 달라 모호하므로, sourceRegistry 가 아는 유일한 안정 키인
+ *  cameraSources[].id 로 맞춘다(camIdx 는 하위호환용 선택 필드). */
 interface LensCalibrationFile {
   cameras?: Array<
     CalibrationSpec & {
+      id?: string;
       camIdx?: number;
       host?: string;
       enabled?: boolean;
@@ -60,17 +63,19 @@ export function correctorFromCalibration(cal: CameraCalibration): LensCorrector 
 
 /**
  * 아티팩트 파일에서 해당 카메라의 보정을 로드한다. 아래 중 하나라도 아니면 **항등**을 돌려준다:
- *   파일 없음 · 해당 camIdx 없음 · enabled:false · 표가 비어 있음.
+ *   파일 없음 · 해당 id 없음 · enabled:false · 표가 비어 있음.
  * 즉 "켜져 있고 실측 표가 있는 카메라"에만 실제 보정이 걸린다.
+ *
+ * @param cameraKey cameraSources[].id (권장) 또는 camIdx 숫자. 문자열이면 id, 숫자면 camIdx 로 매칭한다.
  */
-export function loadLensCorrector(filePath: string, camIdx: number): LensCorrector {
+export function loadLensCorrector(filePath: string, cameraKey: string | number): LensCorrector {
   let file: LensCalibrationFile;
   try {
     file = JSON.parse(readFileSync(filePath, 'utf8')) as LensCalibrationFile;
   } catch {
     return IDENTITY_CORRECTOR; // 파일이 없거나 깨졌으면 조용히 무보정 — 기존 동작.
   }
-  const entry = file.cameras?.find((c) => c.camIdx === camIdx);
+  const entry = file.cameras?.find((c) => (typeof cameraKey === 'string' ? c.id === cameraKey : c.camIdx === cameraKey));
   if (!entry || entry.enabled !== true) return IDENTITY_CORRECTOR;
   if (!entry.zoomHfov && !entry.centeringGain && !entry.lensDistortion && !entry.model) return IDENTITY_CORRECTOR;
   try {

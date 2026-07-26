@@ -26,28 +26,34 @@ afterEach(() => {
 
 describe('loadLensCorrector — 기본 OFF (회귀 0 의 근거)', () => {
   it('파일이 없으면 항등', () => {
-    expect(loadLensCorrector('/존재하지/않는/경로.json', 1)).toBe(IDENTITY_CORRECTOR);
+    expect(loadLensCorrector('/존재하지/않는/경로.json', 'real-camera-2')).toBe(IDENTITY_CORRECTOR);
   });
 
-  it('해당 camIdx 가 없으면 항등', () => {
-    const p = writeFile(JSON.stringify({ cameras: [{ camIdx: 2, model: 'cam-001', enabled: true }] }));
-    expect(loadLensCorrector(p, 1)).toBe(IDENTITY_CORRECTOR);
+  it('해당 id 가 없으면 항등', () => {
+    const p = writeFile(JSON.stringify({ cameras: [{ id: 'real-camera-2', model: 'cam-001', enabled: true }] }));
+    expect(loadLensCorrector(p, 'real-camera-1')).toBe(IDENTITY_CORRECTOR);
   });
 
   it('enabled 가 true 가 아니면 항등 (검증 pass 를 사람이 켜야 한다)', () => {
-    const p = writeFile(JSON.stringify({ cameras: [{ camIdx: 1, model: 'cam-001' }] })); // enabled 없음
-    expect(loadLensCorrector(p, 1)).toBe(IDENTITY_CORRECTOR);
-    const p2 = writeFile(JSON.stringify({ cameras: [{ camIdx: 1, model: 'cam-001', enabled: false }] }));
-    expect(loadLensCorrector(p2, 1)).toBe(IDENTITY_CORRECTOR);
+    const p = writeFile(JSON.stringify({ cameras: [{ id: 'real-camera-2', model: 'cam-001' }] })); // enabled 없음
+    expect(loadLensCorrector(p, 'real-camera-2')).toBe(IDENTITY_CORRECTOR);
+    const p2 = writeFile(JSON.stringify({ cameras: [{ id: 'real-camera-2', model: 'cam-001', enabled: false }] }));
+    expect(loadLensCorrector(p2, 'real-camera-2')).toBe(IDENTITY_CORRECTOR);
   });
 
   it('표가 비어 있으면 항등', () => {
-    const p = writeFile(JSON.stringify({ cameras: [{ camIdx: 1, enabled: true }] }));
-    expect(loadLensCorrector(p, 1)).toBe(IDENTITY_CORRECTOR);
+    const p = writeFile(JSON.stringify({ cameras: [{ id: 'real-camera-2', enabled: true }] }));
+    expect(loadLensCorrector(p, 'real-camera-2')).toBe(IDENTITY_CORRECTOR);
   });
 
   it('깨진 JSON 이면 조용히 항등', () => {
     const p = writeFile('{ 깨진 json');
+    expect(loadLensCorrector(p, 'real-camera-2')).toBe(IDENTITY_CORRECTOR);
+  });
+
+  it('camIdx(숫자) 하위호환 매칭도 된다', () => {
+    const p = writeFile(JSON.stringify({ cameras: [{ camIdx: 2, model: 'cam-001', enabled: true }] }));
+    expect(loadLensCorrector(p, 2)).not.toBe(IDENTITY_CORRECTOR);
     expect(loadLensCorrector(p, 1)).toBe(IDENTITY_CORRECTOR);
   });
 });
@@ -92,9 +98,9 @@ describe('correctorFromCalibration — 활성 시 실제 보정', () => {
     expect(correctorFromCalibration(CameraCalibration.from(null))).toBe(IDENTITY_CORRECTOR);
   });
 
-  it('활성 표를 로드하면 실제 보정기가 나온다 (end-to-end)', () => {
-    const p = writeFile(JSON.stringify({ cameras: [{ camIdx: 1, model: 'cam-001', enabled: true }] }));
-    const corr = loadLensCorrector(p, 1);
+  it('활성 표를 id 로 로드하면 실제 보정기가 나온다 (end-to-end)', () => {
+    const p = writeFile(JSON.stringify({ cameras: [{ id: 'real-camera-2', model: 'cam-001', enabled: true }] }));
+    const corr = loadLensCorrector(p, 'real-camera-2');
     expect(corr).not.toBe(IDENTITY_CORRECTOR);
     const out = corr.correct({ x: 0.9, y: 0.5 }, 8000);
     expect(out.x).toBeGreaterThan(0.9);

@@ -7,10 +7,17 @@ import { RealPtzSource } from './RealPtzSource.js';
 import { RpcCameraSource } from './RpcCameraSource.js';
 import { CameraposSource } from './CameraposSource.js';
 import { RtspFfmpegAdapter } from '../stream/RtspFfmpegAdapter.js';
+import { loadLensCorrector } from '../calibrate/lensCorrection.js';
 
 const DEFAULT_STREAMING = {
   ffmpegPath: 'ffmpeg', rtspTransport: 'tcp' as const, fps: 5, jpegQuality: 5, startupTimeoutMs: 10_000,
 };
+
+/**
+ * 광각 렌즈 보정표 위치(설계서 20260725). 없거나 해당 카메라가 enabled:false 면 loadLensCorrector 가
+ * 항등을 돌려주므로 조준은 종전과 비트 동일하다. 카메라는 소스 id 로 매칭한다.
+ */
+const LENS_CALIB_FILE = process.env.LENS_CALIB_FILE ?? 'data/lens_calibration.json';
 
 function rtspAdapter(
   src: NonNullable<ToolsConfig['realCamera']>,
@@ -55,7 +62,7 @@ export function buildSourceRegistry(
           sources.set(src.id, new SimulatorSource(cam));
         }
       } else {
-        sources.set(src.id, new RealPtzSource(src, cfg.camera.imageTimeoutMs, rtspAdapter(src, cfg.cameraStreaming)));
+        sources.set(src.id, new RealPtzSource(src, cfg.camera.imageTimeoutMs, rtspAdapter(src, cfg.cameraStreaming), {}, loadLensCorrector(LENS_CALIB_FILE, src.id)));
       }
     }
     return sources;
@@ -66,7 +73,7 @@ export function buildSourceRegistry(
     // 리얼은 opt-in·미검증 — 미설정 시 조용한 폴백 대신 fail-fast 로 오설정을 드러낸다.
     if (!cfg.realCamera) throw new Error('리얼 카메라(realCamera) 설정이 없습니다');
     const rc = { ...cfg.realCamera, kind: 'hucoms' as const };
-    sources.set(rc.id, new RealPtzSource(rc, cfg.camera.imageTimeoutMs, rtspAdapter(rc, cfg.cameraStreaming)));
+    sources.set(rc.id, new RealPtzSource(rc, cfg.camera.imageTimeoutMs, rtspAdapter(rc, cfg.cameraStreaming), {}, loadLensCorrector(LENS_CALIB_FILE, rc.id)));
     return sources;
   }
 
