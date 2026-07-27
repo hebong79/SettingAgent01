@@ -20,6 +20,7 @@ import {
   pollPlan,
   captureUiState, // 상태→버튼/안내 UI 의도(순수, 백엔드 거부조건 대칭).
   discoverView, // /discover/status → 진행바·라벨·버튼disable·프레임폴 여부(순수, calPoll 미러).
+  lensCalibView, // /calibrate/lens/status → 진행바·라벨·버튼disable·적용버튼·폴 여부(순수, discoverView 미러).
   capFrameKey,
   clampPanelWidth,
   analyzeArtifact,
@@ -407,6 +408,7 @@ async function loadSources() {
       state.source = data.sources[0];
       state.isHucoms = state.sourceDetails[state.source]?.kind === 'hucoms';
       sel.value = state.source;
+      updateLensTarget(); // 최초 소스 확정 시점에도 캘리브레이션 대상 배지를 맞춘다.
       updatePtzControlUi();
     }
   } catch {
@@ -3042,6 +3044,160 @@ async function renderDiscResult() {
   }
 }
 
+// ── 렌즈 캘리브레이션(/calibrate/lens/*) ─────────────────────────────────────
+// discPoll 구조 미러: 폴러 타이머는 단일 변수가 소유하고, running/stopping 에서만 폴한다.
+
+let lensPollTimer = null;
+let lensLastSeq = 0;       // 서버 로그 증분 기준(폴마다 갱신).
+let lensStartedAt = 0;     // 경과시간 표시용(클라 기준 — 서버 startedAt 은 ISO 문자열).
+
+/** 모드별 대략 소요(추정치 — 격자 크기에서 유도. 실측 근거: 2026-07-26 verify ≈3분). */
+const LENS_MODE_INFO = {
+  full: { label: '초기 캘리브레이션(표 생성)', mins: '약 25~40분', confirm: true },
+  verify: { label: '검증', mins: '약 3분', confirm: false },
+  distortion: { label: '곡면율 측정', mins: '약 10~15분', confirm: true },
+};
+
+/** 대상 카메라 배지 갱신 + 실카가 아니면 시작을 미리 막는다(서버 400 을 기다리지 않는다). */
+function updateLensTarget() {
+  const id = state.source || '';
+  const detail = state.sourceDetails[id];
+  const isHucoms = detail?.kind === 'hucoms';
+  $('lens-target').textContent = id ? `대상: ${id}${isHucoms ? '' : ' (실카 아님)'}` : '대상: 없음';
+  if (!isHucoms) {
+    $('lens-start').disabled = true;
+    $('lens-msg').textContent = '시뮬레이터는 렌즈 캘리브레이션 대상이 아닙니다 — 실카(hucoms) 소스를 선택하세요.';
+  } else if (!lensPollTimer) {
+    $('lens-start').disabled = false;
+    if ($('lens-msg').textContent.startsWith('시뮬레이터는')) $('lens-msg').textContent = '';
+  }
+}
+
+async function lensStart() {
+  const mode = $('lens-mode').value;
+  const info = LENS_MODE_INFO[mode] ?? LENS_MODE_INFO.full;
+  // 카메라를 길게 점유하는 모드는 확인 1회. 어느 장비를 얼마나 잡는지 문장에 넣는다.
+  if (info.confirm && !confirm(`${state.source} 를 ${info.mins}간 점유하며 팬·틸트·줌을 반복 이동합니다.\n(소요는 추정치입니다.)\n\n진행할까요?`)) return;
+
+  $('lens-log').textContent = '';
+  $('lens-summary').textContent = '';
+  $('lens-apply').hidden = true;
+  lensLastSeq = 0;
+  lensStartedAt = Date.now();
+
+  const res = await fetch('/calibrate/lens/start', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ source: state.source, mode }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    $('lens-msg').textContent = `시작 실패: ${data.error ?? res.status}`; // 409(실행 중/타 잡 점유) 포함.
+    return;
+  }
+  $('lens-msg').textContent = `${info.label} 시작 — 샘플 ${data.total}개 예정 (${info.mins})`;
+  lensPoll();
+}
+
+async function lensStop() {
+  const res = await fetch('/calibrate/lens/stop', { method: 'POST' });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) $('lens-msg').textContent = `정지 실패: ${data.error ?? res.status}`;
+  lensPoll();
+}
+
+/** 서버가 준 증분 로그를 append. 레벨별 색만 입힌다(정본은 서버). */
+function appendLensLogs(lines) {
+  if (!lines?.length) return;
+  const box = $('lens-log');
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 24;
+  for (const l of lines) {
+    const el = document.createElement('div');
+    if (l.level !== 'info') el.className = `log-${l.level}`;
+    el.textContent = `${String(l.at).slice(11, 19)} ${l.text}`;
+    box.appendChild(el);
+  }
+  if (atBottom) box.scrollTop = box.scrollHeight; // 사용자가 위로 올려 읽는 중이면 방해하지 않는다.
+}
+
+async function lensPoll() {
+  let status = null;
+  try {
+    const res = await fetch(`/calibrate/lens/status?sinceSeq=${lensLastSeq}`, { cache: 'no-store' });
+    status = res.ok ? await res.json() : null;
+  } catch {
+    status = null;
+  }
+  const view = lensCalibView(status ?? {}); // 순수 헬퍼(core.js) — vitest 대상.
+  if (status) {
+    appendLensLogs(status.logs);
+    lensLastSeq = status.lastSeq ?? lensLastSeq;
+    if (status.logsTruncated && !$('lens-log').dataset.truncated) {
+      $('lens-log').dataset.truncated = '1';
+      appendLensLogs([{ at: '', level: 'warn', text: '(오래된 로그가 버퍼에서 밀려났습니다)' }]);
+    }
+  }
+
+  $('lens-bar').value = view.percent;
+  $('lens-label').textContent = view.label;
+  $('lens-start').disabled = view.startDisabled || state.sourceDetails[state.source]?.kind !== 'hucoms';
+  $('lens-stop').disabled = view.stopDisabled;
+  $('lens-elapsed').textContent = view.polling && lensStartedAt ? formatElapsed(Date.now() - lensStartedAt) : '';
+  if (status?.message) $('lens-msg').textContent = status.message;
+
+  if (!view.polling && status && status.state !== 'idle') {
+    renderLensSummary(status);
+    $('lens-apply').hidden = !view.applyVisible;
+    await syncPtzAfterJob(null); // 캘리브레이션이 카메라를 움직였다 → UI 기준 PTZ 재동기화(discPoll 미러).
+  }
+
+  if (lensPollTimer) {
+    clearTimeout(lensPollTimer);
+    lensPollTimer = null;
+  }
+  if (view.polling) lensPollTimer = setTimeout(lensPoll, 1000);
+}
+
+/** 완료 요약 — 모드별로 보여줄 것이 다르다. 미측정/기각은 반드시 사유와 함께. */
+function renderLensSummary(status) {
+  const r = status.result;
+  const box = $('lens-summary');
+  if (!r) {
+    box.textContent = status.state === 'error' ? `실패 — ${status.error ?? ''}` : status.state === 'aborted' ? '중지됨 — 카메라는 원 위치로 복귀했습니다.' : '';
+    return;
+  }
+  const lines = [];
+  if (r.mode === 'verify') {
+    lines.push(`판정 ${r.verdict} · 최악 잔차 ${r.worstPx ?? 'n/a'}px · 대응 ${r.usable}/${r.of}`);
+    for (const c of r.checks ?? []) lines.push(`  zoom ${c.zoom}: 잔차 ${c.residualPx}px · 적용게인 ${c.gainApplied} · 필요게인 ${c.gainNeeded ?? 'n/a'}`);
+  } else if (r.mode === 'distortion') {
+    lines.push(`A/B ${r.verdict} · 권고 ${r.recommendation}${r.reason ? ` — ${r.reason}` : ''}`);
+    for (const z of r.perZoom ?? []) lines.push(`  zoom ${z.zoom}: OFF ${z.rmsOffPx}px → ON ${z.rmsOnPx}px (${z.improvedPct}%)`);
+    if (!r.saved) lines.push('  표를 저장하지 않았습니다 — 개선이 확인되지 않았습니다(안전장치).');
+  } else {
+    lines.push(`표 생성 완료 — 화각 ${r.hfovPoints}점 · 게인 ${r.gainPoints}점 · 대응 ${r.usable}/${r.of}`);
+    for (const s of r.skipped ?? []) lines.push(`  zoom ${s.zoom} 건너뜀 — ${s.why}`);
+  }
+  for (const u of r.unmeasured ?? []) lines.push(`  zoom ${u.zoom} 미측정 — ${u.why}`);
+  if (r.saved) lines.push('저장됨(enabled:false) — [이 표 적용]을 누른 뒤 **서버를 재시작**해야 조준에 반영됩니다.');
+  box.textContent = lines.join('\n');
+}
+
+async function lensApply() {
+  const res = await fetch('/calibrate/lens/apply', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ source: state.source, enabled: true }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    $('lens-msg').textContent = `적용 실패: ${data.error ?? res.status}`;
+    return;
+  }
+  $('lens-apply').hidden = true;
+  $('lens-msg').textContent = '적용됨(enabled:true) — 조준에 반영하려면 서버를 재시작하세요.';
+}
+
 // 모드 (a): 순수 LPD 진단(기존 cap-detect-run 본문 이사). 비-LPD 오버레이 off + LPD 전용 검출.
 function runModeLpd() {
   // 바닥ROI·슬롯 육면체는 검출이 아닌 슬롯 기준 지오메트리라 유지(문맥 참조).
@@ -4064,6 +4220,7 @@ function wire() {
   $('sel-source').addEventListener('change', async (e) => {
     state.source = e.target.value;
     state.isHucoms = state.sourceDetails[state.source]?.kind === 'hucoms';
+    updateLensTarget(); // 캘리브레이션 대상 배지 = 지금 보고 있는 소스.
     updatePtzControlUi();
     await loadCameras();
     await refreshCurrentPtz({ quiet: true });
@@ -4138,6 +4295,12 @@ function wire() {
     else if (mode === 'vpd') runModeVpd();
     else if (mode === 'lpd-live') runModeLpdLive();
   });
+  // 렌즈 캘리브레이션(선택된 카메라의 화각·게인 실측). 시작 전 대상 배지·실카 여부 확인.
+  $('lens-start').addEventListener('click', lensStart);
+  $('lens-stop').addEventListener('click', lensStop);
+  $('lens-apply').addEventListener('click', lensApply);
+  updateLensTarget();
+  lensPoll(); // 새로고침 복구 — 서버에서 이미 돌고 있으면 진행바·로그를 이어받는다.
   $('lpd-db-add').addEventListener('click', saveLpdToDb); // 라이브 LPD 검출 → slot_setup.lpd 저장.
   $('occupy-build').addEventListener('click', buildOccupyRange); // DB lpd → occupy_range 결정형 재생성.
   $('roi-clear').addEventListener('click', resetOverlayDisplay); // #5: 표시 초기화 — 모든 오버레이 토글 off(데이터 보존).

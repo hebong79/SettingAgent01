@@ -17,11 +17,13 @@ import type { SqliteStore } from '../capture/SqliteStore.js';
 import { registerCaptureRoutes } from './captureRoutes.js';
 import { registerCalibrateRoutes } from './calibrateRoutes.js';
 import { registerDiscoverRoutes } from './discoverRoutes.js';
+import { registerLensCalibRoutes } from './lensCalibRoutes.js';
 import { registerSettingsRoutes } from './settingsRoutes.js';
 import { registerDbRoutes } from './dbRoutes.js';
 import { DEFAULT_SETTINGS_PATHS, type SettingsPaths } from '../config/settingsStore.js';
 import type { PtzCalibrator } from '../calibrate/PtzCalibrator.js';
 import type { PlateDiscoveryJob } from '../calibrate/PlateDiscoveryJob.js';
+import type { LensCalibrationJob } from '../calibrate/LensCalibrationJob.js';
 import type { SetupPipeline } from '../pipeline/SetupPipeline.js';
 import { registerViewerRoutes } from '../viewer/routes.js';
 import type { CameraSource } from '../viewer/CameraSource.js';
@@ -122,6 +124,10 @@ export interface ApiDeps {
   plateDiscovery?: PlateDiscoveryJob;
   /** plate_discovery.json 경로(GET /discover/result). */
   discoverOutFile?: string;
+  /** 광각 렌즈 캘리브레이션 잡(/calibrate/lens/*). 미주입 시 미등록(가산). */
+  lensCalib?: LensCalibrationJob;
+  /** 렌즈 보정표 정본 경로(POST /calibrate/lens/apply 대상) + 결과 전문 디렉터리. */
+  lensCalibPaths?: { calibFile: string; resultDir: string };
   /** 원버튼 셋업 파이프라인(옵셔널·가산). 주입 시 /capture/start autoChain 배선 + GET /capture/pipeline. */
   pipeline?: SetupPipeline;
   /** 웹 뷰어 설정. enabled=true && sources 주입 시에만 뷰어 라우트·정적 등록(헤드리스 보존). */
@@ -450,6 +456,11 @@ export function buildServer(deps: ApiDeps): FastifyInstance {
   // 번호판 탐색·확대반복·역계산(/discover/*). 센터라이징 상류 잡. 주입 시에만 등록(가산).
   if (deps.plateDiscovery && deps.discoverOutFile) {
     registerDiscoverRoutes(app, { discovery: deps.plateDiscovery, outFile: deps.discoverOutFile });
+  }
+
+  // 광각 렌즈 화각·게인·곡면율 실측(/calibrate/lens/*). 주입 시에만 등록(가산).
+  if (deps.lensCalib && deps.lensCalibPaths) {
+    registerLensCalibRoutes(app, { job: deps.lensCalib, ...deps.lensCalibPaths });
   }
 
   // 웹 옵션 페이지(/settings). 결정형 파일 I/O — 항상 등록(가산, 기존 라우트 불변).

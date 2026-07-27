@@ -160,6 +160,44 @@ export function discoverView(status) {
 }
 
 /**
+ * 렌즈 캘리브레이션 상태(/calibrate/lens/status) → UI 뷰(순수). discoverView 미러.
+ *
+ * 브라우저 DOM 자동화가 이 저장소에 없으므로 UI 판단 로직은 전부 여기로 뽑아 vitest 로 덮는다.
+ * status: { state, mode, done, total, message, error, result }.
+ *
+ * ★ stopping 을 running 과 다르게 다루는 이유: abort 직후에도 엔진이 카메라를 원위치로 되돌리는
+ *   중이라 아직 끝난 것이 아니다(폴 계속). 그 구간에는 정지 버튼도 비활성이어야 한다 — 이미 보낸
+ *   중지 요청을 또 보낼 수 있으면 사용자는 "안 먹혔다"고 오해한다.
+ */
+export function lensCalibView(status) {
+  const st = status?.state ?? 'idle';
+  const mode = status?.mode ?? null;
+  const done = status?.done ?? 0;
+  const total = status?.total ?? 0;
+  const percent = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+  const active = st === 'running' || st === 'stopping';
+
+  let label;
+  if (st === 'running') label = `running ${done}/${total} (${percent}%)`;
+  else if (st === 'stopping') label = '정지 중 — 카메라 복귀';
+  else if (st === 'done') label = `완료 ${done}/${total}`;
+  else if (st === 'aborted') label = `중지됨 ${done}/${total}`;
+  else if (st === 'error') label = `실패 — ${status?.error ?? '알 수 없는 오류'}`;
+  else label = `idle ${done}/${total}`;
+
+  return {
+    percent: st === 'done' ? 100 : percent,
+    label,
+    startDisabled: active,
+    stopDisabled: st !== 'running',
+    // 적용 버튼은 **표를 만든 모드**가 성공했을 때만. verify 는 표를 만들지 않으므로 적용할 것이 없다.
+    applyVisible: st === 'done' && (mode === 'full' || mode === 'distortion') && status?.result?.saved === true,
+    polling: active,
+    tone: st === 'error' ? 'error' : st === 'aborted' ? 'warn' : 'info',
+  };
+}
+
+/**
  * 옵션(설정) 폼 클라이언트 검증(순수). 백엔드 zod(VpdSchema/LpdSchema/LlmSchema)와 동일 규칙의 사전 검증 —
  * 저장 전에 형식 오류를 즉시 안내한다(권위 검증은 서버). form={ llm:{provider,model,baseUrl}, vpd:{endpoint,detPath}, lpd:{endpoint,detPath} }.
  * → 오류 메시지 문자열 배열(빈 배열이면 통과). URL 은 http/https 만 허용(zod .url() 근사).

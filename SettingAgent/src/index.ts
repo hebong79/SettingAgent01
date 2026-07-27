@@ -19,6 +19,7 @@ import { makeCuboidContextResolver } from './ground/cuboidContext.js';
 import { Finalizer } from './capture/Finalizer.js';
 import { PtzCalibrator } from './calibrate/PtzCalibrator.js';
 import { PlateDiscoveryJob } from './calibrate/PlateDiscoveryJob.js';
+import { LensCalibrationJob } from './calibrate/LensCalibrationJob.js';
 import { SetupPipeline } from './pipeline/SetupPipeline.js';
 import { CRpcClient } from './clients/CRpcClient.js';
 import { loadExpectedFaces } from './setup/mapTargets.js';
@@ -104,6 +105,26 @@ async function main(): Promise<void> {
   // 파이프라인 조립(dep 완비 후). captureJob/calibrator/plateDiscovery 의 완료콜백이 위 클로저로 이 인스턴스에 회귀한다.
   pipeline = new SetupPipeline({ job: captureJob, finalizer, discovery: plateDiscovery, calibrator, store: sqlite });
 
+  // 광각 렌즈 캘리브레이션(/calibrate/lens/*). 화각·게인·곡면율 실측 → data/lens_calibration.json.
+  // ★ 이 잡은 카메라를 수십 분 점유하므로 다른 잡이 도는 중에는 시작을 거부한다(양쪽 오염 방지).
+  //   다른 잡의 클래스를 알 필요는 없으므로 상태 조회 클로저만 주입한다(의존 역전).
+  const lensCalibPaths = {
+    calibFile: process.env.LENS_CALIB_FILE ?? 'data/lens_calibration.json',
+    resultDir: tools.store.dataDir,
+  };
+  const lensCalib = new LensCalibrationJob({
+    sources: tools.cameraSources ?? [],
+    ...lensCalibPaths,
+    isBusy: () => {
+      const running = [
+        ['정밀수집', captureJob.getStatus().state],
+        ['센터라이징', calibrator.getStatus().state],
+        ['번호판 탐색', plateDiscovery.getStatus().state],
+      ].find(([, s]) => s === 'running' || s === 'stopping' || s === 'finalizing');
+      return running ? { busy: true, who: running[0] as string } : { busy: false };
+    },
+  });
+
   const app = buildServer({
     orchestrator, repo, camera, vpd, lpd, brain, mapFiles: tools.map, discovery: tools.discovery,
     presetProvider, refreshOnRun: tools.presetProvider.refreshOnRun,
@@ -113,6 +134,7 @@ async function main(): Promise<void> {
     ground: tools.ground,
     calibrator, calibrate: tools.calibrate,
     plateDiscovery, discoverOutFile,
+    lensCalib, lensCalibPaths,
     pipeline,
     viewer: tools.viewer, sources, rpc, cameraCfg: tools.camera,
     dbFile: tools.capture.dbFile,

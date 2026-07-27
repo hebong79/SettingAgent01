@@ -1138,6 +1138,46 @@ body.resizing {
   align-items: end;
 }
 
+/* 대상 카메라 배지(렌즈 캘리브레이션) — "지금 무엇을 점유하려는가"를 클릭 전에 보여준다. */
+.op-target {
+  margin-left: auto;
+  align-self: center;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* 잡 진행 로그(렌즈 캘리브레이션). 길어지므로 자체 스크롤 — 패널 전체가 늘어나지 않게. */
+.op-log {
+  max-height: 220px;
+  overflow: auto;
+  margin: 8px 0 0;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.25);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.op-log:empty {
+  display: none;
+}
+
+.op-log .log-warn {
+  color: var(--warn);
+}
+
+.op-log .log-error {
+  color: #ff9a9a;
+}
+
 .operation-actions .field {
   flex: 1 1 210px;
 }

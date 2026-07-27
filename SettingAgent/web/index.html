@@ -251,6 +251,39 @@
             <div id="disc-msg" class="cap-msg"></div>
           </section>
 
+          <!-- 광각 렌즈 캘리브레이션(/calibrate/lens/*). 선택된 카메라의 화각·게인 표를 실측 생성한다.
+               실행 중 카메라를 독점하며, 완료·중지·실패 어느 경로로 끝나도 원 PTZ 로 복귀한다. -->
+          <section id="lens-box" class="precise-stage precise-operation-card lens-calib-stage" aria-labelledby="lens-stage-title">
+            <div class="operation-head">
+              <div>
+                <h4 id="lens-stage-title">렌즈 캘리브레이션</h4>
+                <p>선택된 카메라의 광각 렌즈 화각·게인을 실측해 클릭 조준 보정표를 만듭니다.
+                  <span>실행 중 카메라를 점유하며, 끝나면 원래 위치로 돌아옵니다.</span></p>
+              </div>
+              <span id="lens-target" class="op-target">대상 확인 중…</span>
+            </div>
+            <div class="cap-actions toolbar operation-actions">
+              <label class="field" title="초기 캘리브레이션=화각·게인 표를 새로 실측(오래 걸림) / 검증=현재 표가 이 개체에 맞는지 짧게 확인 / 곡면율=방사왜곡 측정(A/B 통과 시에만 채택)">종류
+                <select id="lens-mode">
+                  <option value="full" selected>초기 캘리브레이션(표 생성)</option>
+                  <option value="verify">검증(현재 표가 맞나)</option>
+                  <option value="distortion">곡면율 측정</option>
+                </select>
+              </label>
+              <button id="lens-start" class="primary">캘리브레이션 시작</button>
+              <button id="lens-stop">정지</button>
+              <button id="lens-apply" hidden title="방금 만든 표를 이 카메라의 클릭 조준에 적용(enabled:true). 반영은 서버 재시작 후">이 표 적용</button>
+            </div>
+            <div class="cap-progress operation-progress">
+              <progress id="lens-bar" max="100" value="0"></progress>
+              <span id="lens-label">idle 0/0</span>
+              <span id="lens-elapsed" class="cap-elapsed"></span>
+            </div>
+            <div id="lens-msg" class="cap-msg"></div>
+            <pre id="lens-log" class="op-log" aria-live="polite"></pre>
+            <div id="lens-summary" class="cap-advisory"></div>
+          </section>
+
           <!-- [기능3] 주차면 자동보정(이동+스케일, sharp 상호상관). 회전·원근 미보정. -->
           <section id="align-box" class="precise-stage precise-operation-card align-stage" aria-labelledby="align-stage-title">
             <div class="operation-head">

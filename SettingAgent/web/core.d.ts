@@ -75,6 +75,27 @@ export function discoverView(status: { state?: string; done?: number; total?: nu
   runDisabled: boolean;
   polling: boolean;
 };
+export function lensCalibView(
+  status:
+    | {
+        state?: string;
+        mode?: string | null;
+        done?: number;
+        total?: number;
+        error?: string;
+        result?: { saved?: boolean } | null;
+      }
+    | null
+    | undefined,
+): {
+  percent: number;
+  label: string;
+  startDisabled: boolean;
+  stopDisabled: boolean;
+  applyVisible: boolean;
+  polling: boolean;
+  tone: 'info' | 'warn' | 'error';
+};
 export function alignProtocolToKind(
   kind: 'sim' | 'hucoms',
   protocol: 'unity-rpc' | 'unity-rest' | 'hucoms-v1.22' | undefined,

@@ -28,6 +28,7 @@ const MOVES_CAMERA: Record<string, string> = {
   '/capture/detect': 'detectPipeline:332 미귀속 차량마다 requestImage(확대 ptz) — ★복귀 없음',
   '/capture/start-precise': '정밀수집 파이프라인(discovering=앵커 loop LPD / calibrating=센터라이징) 발화',
   '/capture/pipeline': '자동체인(discovering=앵커 loop LPD / calibrating=센터라이징)',
+  '/calibrate/lens/start': 'CalibrationRunner 스윕 — goPtz/setCenter 로 카메라를 수십 분 점유(종료·중지·실패 모두 원 PTZ 복귀)',
   '/move': '수동 PTZ 이동',
 };
 
@@ -37,6 +38,10 @@ const MOVES_CAMERA: Record<string, string> = {
  */
 const NO_MOVE: Record<string, string> = {
   '/calibrate/frame': '진행 프레임 조회(GET)',
+  '/calibrate/lens/apply': '보정표 enabled 토글(파일 IO — 반영은 서버 재시작)',
+  '/calibrate/lens/result': '산출물 조회',
+  '/calibrate/lens/status': '상태·로그 조회',
+  '/calibrate/lens/stop': '중지 신호(카메라 복귀는 엔진 finally 소유 — 이 요청 자체는 이동 명령이 아니다)',
   '/calibrate/result': '산출물 조회',
   '/calibrate/status': '상태 조회',
   '/camera/login': '자격증명',
@@ -128,6 +133,7 @@ describe('수정 14 — 뷰어 PTZ 동기화 커버리지', () => {
     '/calibrate/point': 'calPointCenter',
     '/calibrate/ptz': 'calPoll',
     '/discover/ptz': 'discPoll',
+    '/calibrate/lens/start': 'lensPoll',
     '/capture/start': 'capPoll',
     '/capture/detect': 'runLiveDetect',
     '/capture/pipeline': 'pollPipeline',
