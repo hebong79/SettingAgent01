@@ -47,7 +47,6 @@ const rm = {
   frozen: false, // 그리기용으로 프레임을 고정했는가
   drag: null, // { idx, vertex, last:{nx,ny} }
   cursor: null, // 고무줄 미리보기용 커서 위치(정규화)
-  loaded: false,
 };
 
 let frame = null;
@@ -158,7 +157,6 @@ async function loadRoi() {
     // 파일이 프리셋별 번호를 쓰고 있었다면 버퍼가 파일과 **전 프리셋에서** 다르다 → 전부 저장 대상.
     // (일부만 저장하면 파일이 혼합 번호 상태가 되어 다음 로드에서 전역번호가 밀린다 — 라이브 실측 결함.)
     if (norm.changed) rm.state = markAllDirty(rm.state);
-    rm.loaded = true;
     setMsg(
       norm.changed
         ? '전역번호를 재부여했습니다(파일이 프리셋별 번호 사용) — 저장하면 전 프리셋이 함께 기록됩니다'
@@ -624,7 +622,14 @@ async function enter() {
     await loadSources();
     await loadCameras();
   }
-  if (!rm.loaded) await loadRoi();
+  // 탭에 들어올 때마다 정본을 **다시 읽는다** — 정밀수집 탭·지면격자 등이 그 사이 파일을 바꿨을 수 있다
+  // (마스터 실측 버그 2026-07-28: 한쪽에서 주차면을 추가해도 다른 쪽에 안 보인다).
+  // ★ 미저장 편집이 있으면 덮어쓰지 않는다 — 그리던 작업을 조용히 버리지 않는다.
+  if (rm.state.dirtyKeys.length) {
+    setMsg("미저장 편집이 있어 새로고침하지 않았습니다 — '저장' 또는 '되돌리기' 후 최신 정본을 읽습니다", 'warn');
+  } else {
+    await loadRoi();
+  }
   await gotoPreset(); // 탭 진입 시점에도 화면이 선택 프리셋과 일치해야 한다(스트림만 열면 물리 위치가 나온다).
   render();
 }
@@ -653,7 +658,7 @@ function wire() {
   $('rm-add').addEventListener('click', onAdd);
   $('rm-delete').addEventListener('click', onDelete);
   $('rm-save').addEventListener('click', onSave);
-  $('rm-reload').addEventListener('click', () => { rm.loaded = false; void loadRoi(); });
+  $('rm-reload').addEventListener('click', () => { void loadRoi(); }); // 미저장 편집을 버리고 정본 재조회.
 
   // 소스·카메라·프리셋 선택은 전부 retarget() 으로 모은다 → 카메라를 실제로 그 프리셋으로 이동시킨다.
   $('rm-source').addEventListener('change', async (e) => {

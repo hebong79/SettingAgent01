@@ -1050,11 +1050,20 @@ async function loadGroundModel() {
 }
 
 /**
- * 파일 기반 바닥 ROI(PtzCamRoi.json) 1회 로드. precise 탭 진입 시 호출(중복 로드 가드).
+ * 파일 기반 바닥 ROI(PtzCamRoi.json) 로드. precise 탭 진입 시 호출.
  * GET /capture/place-roi → normalizePtzCamRoi → state.placeRoi. 실패(404/네트워크)는 조용히 미표시.
+ *
+ * refresh=true 면 1회 로드 가드를 넘어 **서버에서 다시 읽는다**(탭 진입 시 사용).
+ * ★ 이유: ROI 편집 탭이 정본 파일을 바꿔도 이 화면의 state.placeRoi 는 세션 1회 로드라 낡은 채로 남았다
+ *   (마스터 실측 버그 2026-07-28 — 한쪽에서 주차면을 추가해도 다른 쪽에 안 보인다).
+ * ★ 단, **미저장 편집(placeRoiDirty)이 있으면 덮어쓰지 않는다** — 사용자의 작업을 조용히 버리지 않는다.
  */
-async function loadPlaceRoi() {
-  if (state.placeRoiLoaded) return; // 1회 로드 가드.
+async function loadPlaceRoi(refresh = false) {
+  if (state.placeRoiLoaded && !refresh) return; // 1회 로드 가드.
+  if (state.placeRoiLoaded && refresh && state.placeRoiDirty) {
+    setPlaceMsg("미저장 편집이 있어 새로고침하지 않았습니다 — '저장' 후 다시 열면 최신 정본을 읽습니다");
+    return;
+  }
   state.placeRoiLoaded = true; // 재시도 폭주 방지(실패해도 세션 1회).
   try {
     const res = await fetch('/capture/place-roi', { cache: 'no-store' });
@@ -4648,7 +4657,9 @@ function setTab(tab) {
   if (roimaker) stopLive();
   // 결선은 roimaker.js 가 이 이벤트로 받는다(app.js ↔ roimaker.js 직접 의존 없음 — 모듈 격리).
   document.dispatchEvent(new CustomEvent('sv:tab', { detail: { tab } }));
-  if (tab === 'precise') { capPoll(); calPoll(); loadPlaceRoi(); loadGroundModel(); void loadParkingSlots().then(() => drawRoiOverlay()); }
+  // 탭 진입 시 파일 ROI 를 **다시 읽는다**(refresh=true) — ROI 편집 탭이 정본을 바꿨을 수 있다.
+  // 미저장 편집이 있으면 loadPlaceRoi 가 스스로 건너뛰고 안내한다(사용자 작업 보호).
+  if (tab === 'precise') { capPoll(); calPoll(); void loadPlaceRoi(true).then(() => drawRoiOverlay()); loadGroundModel(); void loadParkingSlots().then(() => drawRoiOverlay()); }
   if (analyze) renderAnalysis();
   if (options) { loadSettings(); loadRpcCatalog(); loadLlmModels(); }
   if (db) loadDbTables();

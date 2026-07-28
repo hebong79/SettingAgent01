@@ -159,6 +159,42 @@ describe('ROIMaker — 상호작용 계약', () => {
   });
 });
 
+describe('ROIMaker ↔ 정밀수집 — 정본 양방향 갱신(마스터 실측 버그 2026-07-28)', () => {
+  // 증상: 한쪽 페이지에서 주차면을 추가해도 다른 쪽에 안 보인다.
+  // 원인: 두 페이지가 각자 메모리 버퍼를 들고 **세션 1회만** 로드했다.
+  // 해법: 탭에 들어올 때마다 서버 정본을 다시 읽는다. 단 미저장 편집이 있으면 덮어쓰지 않는다.
+
+  it('ROIMaker 진입 시 정본을 다시 읽는다(1회 로드 가드 제거)', () => {
+    const body = rm.slice(rm.indexOf('async function enter('), rm.indexOf('function leave('));
+    expect(body).toContain('await loadRoi()');
+    expect(body).not.toContain('rm.loaded'); // 1회 로드 가드가 남아 있으면 갱신이 또 막힌다.
+  });
+
+  it('ROIMaker 는 미저장 편집이 있으면 새로고침하지 않고 안내한다(작업 보호)', () => {
+    const body = rm.slice(rm.indexOf('async function enter('), rm.indexOf('function leave('));
+    expect(body).toContain('rm.state.dirtyKeys.length');
+    expect(body).toContain('미저장 편집');
+  });
+
+  it('rm.loaded 상태가 코드에서 완전히 사라졌다(고아 상태 잔존 금지)', () => {
+    expect(rm).not.toContain('rm.loaded');
+  });
+
+  it('정밀수집 탭 진입은 loadPlaceRoi(true) 로 정본을 다시 읽는다', () => {
+    const i = app.indexOf("if (tab === 'precise')");
+    expect(i).toBeGreaterThan(-1);
+    expect(app.slice(i, i + 260)).toContain('loadPlaceRoi(true)');
+  });
+
+  it('loadPlaceRoi 는 refresh 여도 미저장 편집(placeRoiDirty)이면 덮어쓰지 않는다', () => {
+    const i = app.indexOf('async function loadPlaceRoi(');
+    const body = app.slice(i, app.indexOf('\n}', i));
+    expect(body).toContain('refresh = false');
+    expect(body).toContain('state.placeRoiLoaded && !refresh');
+    expect(body).toContain('state.placeRoiDirty');
+  });
+});
+
 describe('ROIMaker — 카메라/프리셋 선택 시 실제 이동(마스터 요청 2026-07-28)', () => {
   it('소스·카메라·프리셋 change 가 전부 retarget() 을 탄다', () => {
     for (const id of ['rm-source', 'rm-cam', 'rm-preset']) {
