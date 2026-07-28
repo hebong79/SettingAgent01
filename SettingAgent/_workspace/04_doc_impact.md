@@ -1,125 +1,81 @@
-# 04 영향도 분석 — 3fps 폴링 폴백 제거 + 스트림 자동 재시도
+# 04 영향도 분석 — 그리기 렌더 결함 수정 + ROI 초기화/전체삭제
 
-작성: 2026-07-24 22:54 / 문서화·영향도 분석가(documenter) / 근거: 00~03 산출물 + 실제 코드(`web/core.js`,`web/core.d.ts`,`web/app.js`,`web/index.html`,`web/app.css`,`src/viewer/routes.ts`)
-
-최종 문서: `SettingAgent/docs/20260724_225404_라이브스트림_폴링폴백제거_자동재시도.md`
+작성: 2026-07-28 14:08 / 문서화(documenter)
+최종 문서: `SettingAgent/docs/20260728_140851_그리기렌더수정_ROI초기화_전체삭제.md`
 
 ---
 
-## 1. web/ 자산 간 의존 파급
+## 1. 변경/신규 파일과 파급
 
+| 파일 | 구분 | 파급 대상 |
+|---|---|---|
+| `web/app.js` | 수정(범위 큼) | 렌더 결함 수정(3점 닫힘 예고) · `ensureFloorVisible` 신규+4곳 배선 · 초기화/전체삭제/되돌리기 함수 신규 · `state.placeRoiUndo` 필드 · `renderPlaceSelectionInfo` disabled 동기화 · `savePlaceRoi` 스냅샷 소진 1줄 · `wire()` 결선. 아래 §2 참조 |
+| `web/index.html` | 수정(가산) | `.roi-edit-bar` 2행 분리 + 버튼 3개(`place-clear`·`place-clear-preset`·`place-undo`) 추가. 기존 id·속성·순서 무변경 → 기존 결선·CSS 셀렉터 영향 없음 |
+| `web/placeDraw.js` | 수정 | `clearPresetSpaces` 신규(순수함수). `core.js`의 `removePlaceSpace`를 **호출만** 함 — `core.js` 자체는 무수정 |
+| `web/placeDraw.d.ts` | 수정 | `clearPresetSpaces` 타입 선언 추가. `tsc --noEmit` 0에러 유지 확인됨 |
+| `test/placeDraw.test.ts` | 수정 | `clearPresetSpaces` 순수 테스트(랜덤 500케이스 포함) 추가 — 테스트 전용, 런타임 영향 없음 |
+| `test/placeDrawWiring.test.ts` | 수정 | S1~S4 렌더/순서/결선 소스텍스트 봉인 describe 추가(+19건) — 테스트 전용 |
+
+### 무변경 확인(보호 파일) — `git diff --numstat` 재확인 결과
 ```
-web/core.js (순수 로직, DOM/타이머 미참조)
-   ├─ export nextStreamRetryDelay, streamRetryLabel   (신규)
-   ├─ export createSnapshotFetcher  ← 개명(구 createStreamLoop, start/setTimer/clearTimer 삭제)
-   └─ export moveRenderDirective    (본문 무변경, 인자 union만 축소)
-        │  타입 재수출
-        ▼
-web/core.d.ts
-   ├─ SnapshotFetcherDeps ← StreamLoopDeps (setTimer?/clearTimer? 삭제)
-   ├─ SnapshotFetcher{tick,abort} ← StreamLoop{start,stop,tick}
-   ├─ createSnapshotFetcher 선언 ← createStreamLoop
-   ├─ nextStreamRetryDelay/streamRetryLabel 신규 선언
-   └─ moveRenderDirective 인자 'off'|'stream' (구 +'poll' 제거)
-        │  import
-        ▼
-web/app.js
-   ├─ import 교체: createStreamLoop→createSnapshotFetcher, +nextStreamRetryDelay/streamRetryLabel
-   ├─ const snapshot = createSnapshotFetcher({...})  (구 loop)
-   ├─ liveMode 'off'|'stream'(구 +'poll'), fallbackToPolling() 삭제
-   ├─ 신규: cancelStreamRetry/onStreamLoad/onStreamError/connectStream
-   ├─ startLive/stopLive/reconnectLiveIfActive 재구현(connectStream 경유)
-   ├─ move() else 분기: loop.tick() → snapshot.tick()
-   └─ DOM 참조: $('fps') 삭제, $('live-status') 신규
-        │  DOM 결선 대상
-        ▼
-web/index.html
-   ├─ 삭제: <input id="fps">
-   └─ 신규: <span id="live-status" aria-live="polite">
-        │  스타일
-        ▼
-web/app.css
-   └─ 신규: #live-status 규칙 3줄 (#ptz-control-status 패턴 차용, 기존 .field.compact input 등 무변경)
+groundModel.ts · project.ts · ground/types.ts · floorRoi.ts · web/core.js ·
+Finalizer.ts · SqliteStore.ts · roiDbLoad.ts
 ```
+문서화 시점 재확인 결과, `web/core.js`·`project.ts`·`ground/types.ts`·`floorRoi.ts`·`Finalizer.ts`·`SqliteStore.ts`·`roiDbLoad.ts` **7개는 이번 라운드 완전 무변경**이다. `groundModel.ts`는 `git status`상 diff가 있으나 리더·검증자가 mtime(11:36, 이번 라운드 편집창 13:35~13:44보다 이전)으로 **이전 라운드(지면격자) 산물임을 이미 확인**한 것을 재인용한다 — 이번 라운드가 만든 변경이 아니다. `web/app.css`도 이번 라운드 무변경(diff는 직전 그리기 도구 라운드 누적분).
 
-**개명(`createStreamLoop → createSnapshotFetcher`)의 파급 범위는 4개 지점으로 닫혀 있다**: `core.js`(정의) · `core.d.ts`(타입) · `app.js`(호출 4곳: 생성/두 stop 지점/tick 지점) · `test/viewerCore.test.ts`(describe 제목·it 이름 갱신, 신규 `test/liveStreamRetry.test.ts`는 새 이름으로 작성). `grep -rn "createStreamLoop|fpsToInterval|StreamLoop"` 를 `test/ src/ web/` 전체에 돌려 잔존 참조 0건을 확인했다(구현자 §2 로그). **`src/`(서버) 는 이 개명·삭제와 무관** — `CameraSource`/`SimulatorSource`/`RealPtzSource`의 `streamMjpeg`는 서버측 별도 심볼로 이름이 겹치지 않는다.
-
----
-
-## 2. 서버측(`src/`) 영향 — 무변경 확인
-
-### 2.1 `/viewer/api/stream`, `/viewer/api/snapshot`
-`src/viewer/routes.ts`는 이번 작업에서 **한 줄도 수정되지 않았다**(구현자 §1, grep 결과로 확증). `handleStream`(라우트 242~313행)·`handleSnapshot`·`StreamQuery`/`SnapshotQuery`(zod) 전부 그대로.
-
-### 2.2 `StreamQuery`의 `_r` strip
-```ts
-const StreamQuery = z.object({
-  source: z.string().optional(),
-  cam: z.coerce.number().int().positive(),
-  preset: z.coerce.number().int().positive(),
-  pan: z.coerce.number().optional(),
-  tilt: z.coerce.number().optional(),
-  zoom: z.coerce.number().optional(),
-});
-```
-`z.object(...)`는 기본이 **strip 모드**(strict/passthrough 미지정)라, 재시도 URL에 붙는 미지의 키 `_r=<timestamp>`는 파싱 시 조용히 제거된다. 스키마 변경이 전혀 필요 없었다는 설계·구현 판단을 코드로 직접 확인했다.
-
-### 2.3 `MAX_STREAMS=4` 와 재시도의 상호작용 (위험 평가)
-`routes.ts:38` `const MAX_STREAMS = 4;`, 카운터는 `handleStream`의 `streamState.active`(등록기 지역, 전체 소스 공유 — 소스별이 아님). 증가 시점은 **"실제 연결 성립 후"**(292행 `streamState.active++`)로, 첫 프레임 `await it.next()`가 실패(501/502/503)하면 카운터는 **증가하지 않는다**. 감소는 `finally`에서 무조건 실행(310행).
-
-- **재시도가 슬롯을 고갈시킬 위험: 낮음.** 실패한 연결 시도는 카운터를 건드리지 않으므로, 스트림이 죽어 있는 소스에 대해 여러 탭이 반복 재시도해도 `streamState.active`는 0에 머문다 — "좀비 슬롯 점유"가 발생할 수 없는 구조다.
-- 정상 시나리오(스트림이 살아있고 탭 4개 이상 동시 시청)에서의 상한 초과는 **이번 변경과 무관하게 기존에도 존재하던 제약**이다(5번째 연결 503). 재시도 로직은 이 한계를 새로 만들지도, 완화하지도 않는다.
-- **오히려 개선된 지점**: 구 폴백은 실패 시 `/viewer/api/snapshot`(스트림 카운터 밖의 경로)으로 333ms마다 계속 요청했다. 신 설계는 `/viewer/api/stream` 재시도이지만 지수 백오프(최대 30초 간격)로 요청 자체가 200배 줄어, 실패 상태에서의 서버 부하는 구 폴백보다 크게 감소했다.
-- **확인 필요(미검증)**: 다수 탭이 동시에 같은 실패 소스에 재시도를 걸 때 재시도 타이머가 우연히 동기화(thundering herd)될 가능성은 이론상 존재하나, 지수 백오프 상한(30s)과 탭별 독립 상태(모듈 전역이 탭=페이지 단위)로 완화되며 이번 범위의 검증 대상은 아니었다.
+서버(`src/**`)는 이번 라운드 **완전 무변경**이다.
 
 ---
 
-## 3. 비범위 경로 — 영향받지 않음 근거
+## 2. 기존 기능 영향
 
-| 경로 | 근거 |
-|------|------|
-| 정밀수집 500ms 프레임 폴(`capFrameTimer`, `startCapFramePolling`) | 이 함수는 기존부터 `stopLive()`를 호출해 라이브 스트림/재시도를 정지시킨 뒤 자신의 별도 타이머로 진행 표시를 갱신한다. `stopLive()`가 `cancelStreamRetry()`를 포함하도록 확장됐을 뿐 **호출부 코드는 0줄 변경**(설계 §2.3 표, 구현 §1.3 "해당 3곳 코드 변경 0"). |
-| 센터라이징 500ms 프레임 폴(`calFrameTimer`, `startCalFramePolling`) | 상동 — `stopLive()` 상속. |
-| 번호판 탐색 500ms 프레임 폴(`discFrameTimer`, `startDiscFramePolling`) | 상동 — `stopLive()` 상속. |
-| `CaptureJob`(`src/capture/CaptureJob.ts`) | 서버측 정밀수집 잡 파이프라인. `web/` 변경과 레이어가 다르고 이번 diff에 포함되지 않음(파일 미수정). |
-| `CameraSourceClient.pollSnapshots`(서버측, 스트림 미지원 소스 폴백) | `src/`(서버) 무변경 확인(§2.1)에 포함 — RealPtzSource(Hucoms) 등 `streamMjpeg` 미구현 소스에 대한 **서버측** 폴백 경로로, 이번에 제거된 것은 **프론트(`web/app.js`)의 폴링 폴백**과는 다른 계층. 명칭 유사성으로 혼동하기 쉬우나 코드 경로가 분리되어 있어 무영향. |
-| `/viewer/api/snapshot` 라우트 자체 | §2.1에서 무변경 확인. `mode=manual`(수동 PTZ 오버라이드 1회 스냅샷), `gotoPreset()`의 프리셋 스냅샷 폴백 등 소비처는 계속 이 라우트를 쓴다 — `snapshot.tick()`(구 `loop.tick()`)이 여전히 호출. |
+### 2-1. 캔버스 렌더/편집 (그리기 오프 상태)
+- 검증자가 배포 원문 `drawPlaceDrawOverlay`를 직접 실행해 그리기 off 3케이스(정점편집 on/off, 선택 유무 조합) 전부 **발행 캔버스 명령 0건**을 확인 — 회귀 0이 구조가 아니라 실행으로 증명됐다.
+- 1점·2점·2점+커서 렌더 시퀀스는 baseline과 **바이트 단위 동일**(추가된 것은 3점 단계 점선 하나뿐).
 
-**검증 근거**: qa 03 §4-4 "정밀수집/센터라이징/탐색의 500ms 프레임 폴 3경로는 무변경 비범위로, 전용 신규 케이스는 작성하지 않았고 전체 스위트 2751 통과로만 회귀 확인을 갈음했다" — 즉 이 3경로에 대한 **전용 회귀 테스트는 없다**(확인 필요 항목으로 남김. 전체 스위트 통과가 간접 증거이나, 라이브 브라우저 상에서 잡 시작 시 스트림이 실제로 멈추는지는 §5 "라이브 스모크 미수행"과 동일하게 실측 필요).
+### 2-2. `#roi-floor` 토글 — 부수효과 고지
+`ensureFloorVisible()`은 사용자 명시 조작(그리기 시작/커밋/정점편집 ON/목록 선택) 직후에만 호출되며, 자동 폴링·렌더 루프(`drawRoiOverlay`·`drawFileFloorRoi`·`loadPlaceRoi`)에는 존재하지 않음을 테스트로 봉인했다. 이 토글을 켜면 **artifact 슬롯의 floor 히트테스트(`layers.floor`)도 함께 켜지는 부수효과**가 있으나, 이는 `#roi-floor` 기본값(checked, `index.html` 초기 상태)과 동일한 동작으로 되돌리는 것뿐이라 신규 동작이 아니다.
 
----
+### 2-3. `#slot-list` 목록 UI
+`renderSlotList` 자체는 이번 라운드 변경 0(직전 라운드 D-2 병기 분기 유지, 봉인 테스트 green). 다만 `#place-clear-preset` disabled 동기화를 카메라 전환(`sel-cam`) 경로에는 넣지 않았다 — 이유는 그 경로가 기존부터 `renderSlotList()`를 호출하지 않아, 넣었다면 카메라 전환 후 버튼이 "잘못 잠긴 채 굳는" 새 무반응 결함이 생기기 때문(검증자가 코드로 확인·승인). 대신 버튼은 항상 활성으로 두고 클릭 시점에 빈 프리셋 안내로 방어한다 — 파괴는 `confirm` 이후에만 일어나 안전성 손실은 없다.
 
-## 4. 공유 도메인 타입(SlotState/ParkingEvent 등) 영향
+### 2-4. `PUT /capture/place-roi` 및 파일(`PtzCamRoi.json`)
+- 초기화·전체삭제·되돌리기 세 함수 모두 `fetch` 0줄 — **파일 접촉 없음**을 코드 확인 + `PtzCamRoi.json` mtime(변경 전 상태 유지)으로 재확인했다.
+- 전체삭제가 저장 시 만드는 "빈 배열 PUT"은 **기존 서버 스키마가 이미 허용**하는 입력이라 서버측 계약 변경이 없다(`PlaceRoiPutSchema.spaces`는 min 없는 배열). `applyPlaceRoiUpdateEx`가 대상 프리셋을 통째 교체하는 기존 동작 그대로다.
+- 전체삭제는 **다른 프리셋의 전역 idx도 이동시킨다**(`removePlaceSpace` 전역 재압축 특성 — 기존 '삭제' 버튼과 동일 성질, 새 위험 등급이 아님). 저장 후 `slot_ptz.json`·DB(`slot_setup`)·artifact `globalIndex`와의 정합은 기존 'ROI 파일 로딩'(runLoadRoiToDb) 재구성 절차로 수렴해야 한다 — 확인문에 명시했고, 신규 절차를 만들지는 않았다.
+- 전체삭제로 어느 프리셋이 파일상 면 0개가 되면, 다음 로드 시 `placeRoiFileKeys`에서 빠져 `needsPlaceSkeleton=true`가 된다 — 그 프리셋에 다시 그려 저장하려면 **라이브 프레임이 먼저 필요**하다(기존 신규 주차장 경로와 동일 조건, 실패 메시지도 기존 것 재사용).
 
-**해당 없음.** 이번 변경은 SettingAgent 웹 뷰어의 라이브 스트림 UI 상태(`liveMode` 등 로컬 변수)와 `web/core.js`의 순수 함수에 국한되며, `@parkagent/types`의 공유 도메인 타입이나 `SlotState`/`ParkingEvent` 류 스키마를 전혀 건드리지 않았다. ActionAgent/DMAgent로의 전파도 없다.
+### 2-5. 전역 idx 의존 (`slot_ptz.json`·센터링·artifact `globalIndex`)
+`clearPresetSpaces`는 기존 `removePlaceSpace`(전역 재압축)를 그대로 위임하므로 idx 계약을 새로 만들지 않는다. 랜덤 500케이스 검증으로 결과가 항상 1..N 순열임을 확인했다. 다만 전체삭제 후 idx가 이동한 신규 상태에 대해 센터링·`slot_ptz.json` 갱신은 **이번 작업 범위 밖**(기존 절차로 별도 필요) — §2-4와 동일한 한계다.
 
----
-
-## 5. 20260709 문서와의 관계
-
-`docs/20260709_141227_SettingAgent_MJPEG연속스트리밍_전환.md`가 도입한 "MJPEG 실패 시 폴링(`fallbackToPolling`/`loop.start(fps)`)으로 폴백"(동 문서 §5 다이어그램 최하단, §7 루프2 L2-3, §9 변경 파일 표)은 이번 작업으로 **폐지되어 더 이상 코드와 일치하지 않는다**. 해당 문서는 과거 시점 기록물이므로 **수정하지 않았다** — 이 사실의 갱신은 본 세션이 새로 작성한 문서(`docs/20260724_225404_*.md` §1.2 "존치" 각주 및 본 파일)에서만 기록한다.
-
-부수 확인 필요 항목(설계자 §6 언급, 미해결): `docs/20260625_182819_SettingViewer_구현문서.md`가 `core.js` 함수 목록에 `fpsToInterval`을 언급하고 있을 수 있다 — 이번 세션에서는 열람·정정하지 않았다(리더 판단 대상으로 남김, **확인 필요**).
+### 2-6. `state.placeRoiBackup`(자동보정 전용)
+신규 `state.placeRoiUndo`와 **완전히 분리**되어 있다(교차 참조 0, 버튼 id 별개 `#place-undo`/`#align-undo`, 소진 지점도 각각 `savePlaceRoi`/`alignApply`). 자동보정(`alignApply`/`alignUndo`) 흐름에는 영향 없음.
 
 ---
 
-## 6. 테스트 근거 (사실 인용, 위장 없음)
+## 3. 테스트
 
-- `npx vitest run` 전체 — **235 files / 2751 tests 전부 통과**(qa 03 §0).
-- 신규 `test/liveStreamRetry.test.ts` — **33 tests 통과**(A~E + E′ 9케이스 포함).
-- `npx tsc -p tsconfig.json --noEmit` — **exit 0**.
-- **미수행**: 계획 §5 F21~23 라이브 스모크(Unity 기동/정지 상태의 실브라우저 관찰) — qa 03 §4-1에 한계로 명시, 리더/사용자 실측 필요.
-- **미검증**: 브라우저 `multipart/x-mixed-replace` onload semantics, 동일 URL 재대입 시 재요청 생략 여부(§3.3 보정의 전제) — node 유닛 재현 불가로 qa 03 §4-3에 한계로 명시.
+- 신규/수정 테스트: `test/placeDraw.test.ts`(`clearPresetSpaces` 순수 테스트, 랜덤 500케이스 포함) · `test/placeDrawWiring.test.ts`(S1~S4 렌더/순서/결선 봉인 +19건).
+- 전량 회귀: `tsc --noEmit` **0에러**, `vitest run` **256파일 / 3079테스트 green**(구현자·검증자 실행 수치 일치), L3 골든 해시(`test/groundGrid.test.ts`) green.
+- 검증자가 추가로 수행한 것은 vitest가 아니라 **배포 소스 원문을 직접 잘라 실행하는 별도 하네스**(`qa_render.mjs`·`qa_clear.mjs`·`qa_off.mjs`, scratchpad에서 실행 후 저장소 무오염 확인)였다 — "테스트 통과"와 "실제 발행되는 캔버스 명령"을 구분하기 위함.
 
 ---
 
-## 7. 요약
+## 4. 운영 유의
 
-| 항목 | 결론 |
-|------|------|
-| web/ 자산 파급 | core.js→core.d.ts→app.js→index.html/app.css 4단 연쇄, 개명 참조 4개 지점으로 닫힘. grep 전수 확인 0건 잔존 |
-| 서버(`src/`) | 무변경. `StreamQuery`가 `_r` strip, 스키마 변경 불필요 |
-| MAX_STREAMS=4 상호작용 | 낮은 위험 — 카운터가 연결 성립 후에만 증가해 실패 재시도가 슬롯을 점유하지 않음. 트래픽은 오히려 최대 200배 감소 |
-| 비범위 경로(정밀수집/센터라이징/탐색, CaptureJob, CameraSourceClient.pollSnapshots) | 코드 변경 0, `stopLive()` 상속으로 무영향. 단 이 3경로 전용 회귀 테스트는 없어(전체 스위트로 갈음) 라이브 실측 확인 필요 항목으로 남김 |
-| 20260709 문서 | 폴백 기술이 구식화됨을 본 문서에서 기록, 원문은 미수정 |
-| 공유 도메인 타입 | 영향 없음(웹 뷰어 로컬 상태·순수함수 국한) |
+- **되돌리기는 1단계 한정**이다. 초기화·전체삭제 각각 1회분만 복구 가능하며, 그 이후 다른 편집(새 면 추가·번호 수정 등)이 있으면 되돌리기 시 그 편집까지 함께 사라진다 — 이 경우에만(지문 불일치 시에만) 추가 확인이 뜬다.
+- **저장 전에는 파일이 절대 바뀌지 않는다** — 초기화/전체삭제/되돌리기는 메모리 조작뿐이고, 반영은 기존 '저장' 버튼 클릭 시 1회 PUT으로만 일어난다.
+- **`place-delete`(기존 개별 삭제 버튼)로 지운 면은 이번 라운드로도 복구되지 않는다** — 되돌리기는 초기화·전체삭제 경로에만 연결되어 있다.
+- 전체삭제로 어떤 프리셋이 파일상 0면이 되면, 다음에 그 프리셋에 다시 그려 저장하려면 **라이브 프레임을 먼저 시작**해야 한다(§2-4).
+- **브라우저 실렌더는 여전히 미확인**이다 — 아래 후속 권고 참조.
+
+---
+
+## 5. 후속 권고 (우선순위)
+
+1. **[최상위] 마스터 브라우저 육안 확인** — `#roi-floor`가 꺼진 상태에서 그리기를 시작/커밋했을 때 초록 파일 ROI가 실제로 보이는지, 3점 단계 점선 닫힘 예고가 시인성 있게 보이는지, `confirm()` 모달과 2행 레이아웃이 정상 렌더되는지. 이번 라운드는 전부 "코드 경로 확인"까지이며 실제 픽셀은 누구도 보지 못했다.
+2. 전체삭제 → 저장 → `ROI 파일 로딩`(DB 재구성) 종단 흐름을 실서버로 1회 재현 — 현재는 코드 직접 실행(`applyPlaceRoiUpdateEx`/`normalizePtzCamRoi`)까지만 확인됨, HTTP 계층·파일 I/O는 미검증.
+3. F-1 잔여 갭 처리 방침 결정 — 기존 `place-delete`(개별 삭제) 경로도 되돌리기로 복구할지 여부(리더 요구는 "초기화·전체삭제 양쪽"이었고 이번 범위는 그 둘까지만).
+4. F-5(되돌리기 버튼 문구 중복 `#place-undo`/`#align-undo`) 문구 구분 — 정보 등급, 다음 라운드 판단.
+5. 별건: 실카 자동ROI 격자 스케일 의심(`auto cam1 p01 8/10`) — 이번 라운드는 지시대로 손대지 않음, 그리기 정상화 확인 후 별도 확인 필요.
+6. 이월 항목(변경 없음): R2(단일 quad `focalFromVPs` f²≤0) 근본 해결 · `normalizePtzCamRoi` 조용한 탈락 · `allowNew` UI 미노출 · Unity 튜닝값.
