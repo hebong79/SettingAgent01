@@ -52,6 +52,10 @@ SettingAgent/logs/
 # 세션 워크트리(transient — 워크트리 기본 정책이 .claude/worktrees/ 아래 생성)
 .claude/worktrees/
 
+# 하네스 설정 백업(예: settings.json.bak_20260728). 과거 allow 목록에 평문 자격증명이
+# 섞여 있어 절대 커밋되면 안 된다.
+.claude/*.bak_*
+
 # DB 수동 백업본(예: setting.sqlite.bak-presetinfo-20260724_145745[-wal|-shm]).
 # 위의 *.sqlite* 패턴은 확장자로 끝나는 이름만 잡아 .bak-<태그> 형태를 놓친다(WAL 이 3MB 급이라 반드시 제외).
 *.sqlite.bak-*
