@@ -22,6 +22,12 @@ export class RpcClientError extends Error {
 export interface CRpcClientConfig {
   baseUrl: string;
   timeoutMs: number;
+  /**
+   * 모든 요청에 실을 추가 헤더(옵셔널·가산). SettingAgent 자기 RPC(13020 `/rpc`)를 호출할 때
+   * `x-viewer-token` 을 주입하기 위해 도입했다 — `viewer.controlToken` 이 설정된 서버에서
+   * 변이 메서드가 403 으로 막히는 것을 막는다. 미지정이면 기존 동작 그대로(Unity 호출자 무영향).
+   */
+  headers?: Record<string, string>;
 }
 
 /**
@@ -50,7 +56,11 @@ export class CRpcClient {
     try {
       res = await fetchWithTimeout(
         `${this.baseUrl}/rpc`,
-        { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) },
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', ...(this.cfg.headers ?? {}) },
+          body: JSON.stringify(payload),
+        },
         timeoutMs ?? this.cfg.timeoutMs,
         method,
       );
@@ -89,7 +99,7 @@ export class CRpcClient {
     try {
       res = await fetchWithTimeout(
         `${this.baseUrl}/rpc/catalog`,
-        { method: 'GET' },
+        { method: 'GET', ...(this.cfg.headers ? { headers: this.cfg.headers } : {}) },
         this.cfg.timeoutMs,
         'catalog',
       );
