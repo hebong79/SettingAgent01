@@ -345,7 +345,7 @@ describe('경계면 교차 — web/app.js buildSlotCuboids ↔ POST /capture/slo
   });
 
   it('요청 URL·메서드·바디(heightM) 가 라우트 계약과 일치', () => {
-    expect(body).toContain(`fetch('/capture/slots/cuboid'`);
+    expect(body).toContain(`mutFetch('/capture/slots/cuboid'`); // 변이 요청 = 토큰 부착 헬퍼 경유.
     expect(body).toContain(`method: 'POST'`);
     expect(body).toContain('heightM: cuboidHeight()');
     expect(appJs).toMatch(/function cuboidHeight\s*\(/); // 슬라이더 높이 소스 존재.

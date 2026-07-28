@@ -1,404 +1,625 @@
-# 03 검증 보고 — 그리기 렌더 결함 수정 + ROI 초기화/전체삭제
+# 03 검증 보고 — 4건 서버 정본화 + 웹 껍데기화 (독립 검증)
 
-작성: 2026-07-28 / 입력: `00_leader_context.md` · `01_architect_plan.md` · `02_developer_changes.md` + 배포 소스
-검증자 원칙: **구현자·설계자 주장을 액면 그대로 믿지 않고 전부 독립 재현**했다. 못 한 것은 §7 에 못 했다고 적었다.
+작성: 2026-07-28 · 워크트리 `.claude/worktrees/feat-server-promote-4/SettingAgent`
+입력: `00_leader_decisions.md` · `01_architect_plan.md` · `02/02b/02c/02d_developer_changes*.md` + 실코드
+원칙: **구현자·설계자 주장을 액면 그대로 믿지 않고 전부 독립 재현**했다. 못 한 것은 §5 에 못 했다고 적었다.
+프로브 파일 6개는 측정 후 **전부 삭제**했고 변이 17건은 **전부 원복**했다(§1.2 재측정으로 증명).
+(이전 라운드 보고는 `_workspace_prev_20260728_placedrawfix/03_qa_report.md` 에 보존돼 있다.)
+
+> **§7 추가(리더 지시 후속)** — D-2 의 판별력 구멍 6건을 **파리티 테스트에 영구 편입**하고,
+> 그 영구 파일 위에서 변이 6건을 재주입해 **전부 FAIL** 함을 실증했다. §7 참조.
 
 ---
 
 ## 0. 한 줄 결론
 
-**본체 수정(`#roi-floor` 강제 ON)은 코드 경로 전수 확인으로 "게이트가 그 하나뿐"임이 확정됐고, 3점 닫힘 예고와
-전역 idx 정합은 실행으로 증명됐다. 그러나 "실제로 화면에 초록 면이 뜬다"는 여전히 미증명이다(브라우저 없음).**
-추가로 **결함 2건(중 1 / 하 1)** 과 잔여 갭 2건을 찾았다. 회귀는 발견되지 않았다.
+**7개 항목 중 6개 통과, 1개(파리티 판별력) 결함.** 구현 자체에서 **오동작은 하나도 발견되지 않았다** —
+내가 만든 모든 프로브 케이스에서 web↔src 값이 일치했고, 토큰 게이트는 87개 라우트 전수에서 구멍이 0이었으며,
+파일 md5 는 30개 거부·dryRun 경로 전부에서 불변이었고, DB 쓰기 호출은 0건이었다.
+
+**그러나 봉인(파리티 테스트)의 판별력에 실측된 구멍 6개가 있다.** 지금 코드는 맞지만, 앞으로 누가
+그 6개 자리를 깨뜨려도 **테스트가 green 인 채로 통과한다.** 특히 `groundBandRatio 오버라이드` 테스트는
+**그 오버라이드가 무시돼도 통과한다**(공허한 테스트). 추가로 결함 **7건**(중 2 / 하 4 / 정보 1)을 보고한다.
 
 ---
 
-## 1. Requirements 판정표
+## 1. 재현한 기준선 실측치
 
-| # | 요구 | 판정 | 근거 |
-|---|---|---|---|
-| R-1 | 기존 동작 회귀 0 — 그리기 off 면 캔버스 완전 동일 | ✅ **실행 증명** | 배포 원문 실행: 그리기 off 3케이스 전부 **발행 명령 0건**(§5-E) |
-| R-1b | 목록 UI 포함(D-2 재발 금지) | ✅ | `renderSlotList` 병기 분기(app.js:1319-1321) 무변경 + 봉인 테스트 green |
-| R-2 | 저장은 명시적 트리거 — 초기화·전체삭제가 파일 무접촉 | ✅ | 세 함수 본문 `fetch` 0(코드 확인) + `data/Place01/PtzCamRoi.json` mtime `13:16:30` = 라운드 편집(13:35~) **이전**, 해시 `67a09455b07e48e7a5fb78c494a0c63c` |
-| R-3 | 신규 면 idx 보장 · 결정론 · round5/stringify5 · throw 금지 · 순회 순서 고정 | ✅ **실행 증명** | 랜덤 500 케이스 전부 1..N 순열 유지, throw 0(§5-C) |
-| R-4 | 무변경 목표 8파일 | ⚠️ **7/8 무변경, `groundModel.ts` 는 이전 라운드분** | 아래 별도 판정 |
-| R-5 | L3 골든 해시 포함 기존 테스트 유지 · tsc 0 · vitest 전량 | ✅ | `tsc --noEmit` exit 0 · **256 files / 3075 tests passed** · 골든 해시 개별 green |
-| R-6 | 범위 밖 리팩토링 금지 | ✅ | `core.js` 무수정(호출만), `app.css` 무수정, `src/**` 무수정 |
-| R-7 | CLAUDE.md 5대 규칙 | ⚠️ 규칙3(동작 확인)만 미충족 — 브라우저 실렌더 미확인(§7) | |
-
-### R-4 상세 — `groundModel.ts` 는 이번 라운드 변경이 아니다(구현자 주장 검증 결과: **사실**)
-
-`git status` 만 보면 `groundModel.ts`·`app.css`·`captureRoutes.ts`·`placeRoi.ts` 등이 변경으로 나오지만
-**전부 이전 라운드 미커밋분**이다. 두 가지 독립 근거로 확인했다.
-
-1. **내용**: `groundModel.ts` 의 diff 는 `MIN_EDGE_PX`/`MIN_AREA_PX` 를 `export` 로 바꾼 것뿐(**값 불변**),
-   `app.css` 는 `.gg-warn`/`.gg-help`/`#overlay.place-drawing` — 전부 지면격자·그리기 라운드 산물. 이번 주제와 무관.
-2. **시각**: 이번 라운드 편집 파일 mtime 은 13:35~13:44 인데, 위 파일들은 11:36~12:14 다.
-
-```
-placeDraw.js 13:35:39 / index.html 13:36:02 / placeDraw.test.ts 13:38:10 / app.js 13:44:02 / placeDrawWiring.test.ts 13:44:14
---- 경계 ---
-groundModel.ts 11:36:50 / placeRoi.ts 11:37:33 / app.css 11:39:46 / captureRoutes.ts 12:14:59 / core.js 07-27 13:16
-```
-
-무변경 목표 중 `project.ts`·`ground/types.ts`·`floorRoi.ts`·**`web/core.js`**·`Finalizer.ts`·`SqliteStore.ts`·`roiDbLoad.ts`
-**7개는 git 상 완전 무변경**이다. `web/app.css` 도 이번 라운드 무수정.
-
----
-
-## 2. (A) ★ 본체 수정이 실제로 성립하는가 — `#roi-floor` 강제 ON
-
-구현자가 **1순위 미확인**으로 신고한 항목. **코드로는 전수 확인했고, 화면으로는 확인 못 했다.**
-
-### A-1. `drawFileFloorRoi` 의 게이트가 정말 첫 줄 하나뿐인가 — **사실상 그렇다(게이트 2개, 두 번째는 죽은 조건)**
-
-```js
-614 function drawFileFloorRoi(ctx) {
-615   if (!$('roi-floor').checked) return;   // 게이트 1
-616   if (FLOOR_ROI_USE_LLM) return;         // 게이트 2 ← const FLOOR_ROI_USE_LLM = false (app.js:96) → 항상 통과
-617   const key = currentFrameKey();
-618   const { polygons } = selectFloorRoi({ useLlm:false, placeRoi: state.placeRoi, key });
-624   for (const poly of polygons) { … fill/stroke/fillText … }   // 조건 분기 없음
-```
-
-- **617 이후에는 초록 면을 막는 조건이 하나도 없다.** `selectFloorRoi`(core.js:542-554)는 필터링을 하지 않고
-  `placeRoi[key]` 를 그대로 매핑한다(리더·설계자 진술 **독립 확인**).
-- **호출 위치도 안전**: `drawRoiOverlay` 는 447행에서 `drawFileFloorRoi` 를 부르고, `state.roiHidden || !state.mapping`
-  조기 return 은 **457행**이다 → 수집 중·artifact 없음에도 초록 면은 그려진다.
-- **`resetOverlayDisplay`(app.js:175-189)가 `#roi-floor` 를 끄지 않는다**는 것도 확인(S5-T2 봉인과 일치).
-  즉 강제 ON 이 직후에 되꺼지는 경로가 없다.
-
-→ **"토글만 켜지면 반드시 그려진다"는 코드 수준에서 확정.** 남은 미지수는 오직 브라우저 실렌더(§7).
-
-### A-2. 세 진입점 전부에 들어갔는가 — **3/3 확인**
-
-| 진입점 | 위치 | 상태 |
-|---|---|---|
-| 그리기 시작 `togglePlaceDraw` | app.js:2428 | ✅ |
-| 커밋 `placeDrawClick` | app.js:2468 | ✅ |
-| 정점편집 ON `place-edit-vertex` change | app.js:5037 (`if (e.target?.checked)`) | ✅ |
-
-`ensureFloorVisible`(2399-2402)는 `el.checked = true` 만 하고 change 이벤트를 쏘지 않는다. `#roi-floor` 의
-change 리스너는 `drawRoiOverlay` 하나뿐(app.js:4973)이고 세 호출자가 모두 직접 `drawRoiOverlay()` 를 부르므로
-**누락 없음**.
-
-### A-3. 토글 설정이 렌더보다 먼저인가 — **3/3 먼저**
-
-```
-togglePlaceDraw : ensureFloorVisible(2428)  <  drawRoiOverlay(2433)          ✅
-placeDrawClick  : state.placeRoi=(2459) < ensureFloorVisible(2468) < endPlaceDraw(2469→drawRoiOverlay)  ✅
-place-edit-vertex: ensureFloorVisible(5037) < drawRoiOverlay(5038)           ✅
-```
-
-**1프레임 지연 경로 없음.**
-
-### A-4. ★ 잔여 갭 — **네 번째 진입점이 비어 있다**(결함 F-3, 하)
-
-`selectPlaceSpace`(app.js:2275-2287, 목록 행 클릭)에는 `ensureFloorVisible` 이 **없다**.
-바닥 토글이 꺼진 상태에서 목록에서 면을 선택하면 하이라이트도 정점 핸들도 나오지 않아 **여전히 "조용한 무반응"** 이다.
-리더 지시는 3개 진입점이었으므로 **요구 위반은 아니지만, 이번 라운드가 제거하려는 결함 부류가 한 곳 남아 있다.**
-
----
-
-## 3. (B) 3점 닫힘 예고 + 4점 경로 도달성 — 독립 재현 완료
-
-구현자 방식을 그대로 믿지 않고 **별도 하네스**를 새로 짜서 배포 원문 `drawPlaceDrawOverlay`(60줄)를
-`new Function` 으로 실행하고, **변경 전 baseline(추가 블록만 제거한 재구성본)** 과 명령 시퀀스를 대조했다.
-
-실행 명령: `node qa_render.mjs`
-
-```
-1점 시퀀스 동일: YES(회귀0)
-2점 시퀀스 동일: YES(회귀0)
-2점+커서 시퀀스 동일: YES(회귀0)
-3점 닫힘예고 setLineDash([4,4]) 발행: YES
-3점 moveTo(p3)→lineTo(p1)→stroke 발행: YES
-3점 예고선이 save/restore 로 감싸짐(누설 0): YES
-4점 closePath+fill 발행(방어 코드): YES
-3점 예고선 좌표: setLineDash([4,4]) → beginPath() → moveTo(300,100) → lineTo(100,100) → stroke()
-```
-
-3점 실제 시퀀스(원문):
-
-```
-save → strokeStyle=#ffd60a → lineWidth=2 → beginPath → moveTo(100,100) → lineTo(200,150) → lineTo(300,100) → stroke
-→ save → setLineDash([4,4]) → beginPath → moveTo(300,100) → lineTo(100,100) → stroke → restore
-→ [점 원 3개 + 번호 1,2,3] → restore
-```
-
-- **p3(300,100) → p1(100,100)** 로 정확히 되돌아간다 = 닫힘 예고 성립.
-- `save/restore` 짝이 맞아 `setLineDash` 가 뒤 레이어로 새지 않는다.
-- **1점·2점·2점+커서 시퀀스가 baseline 과 바이트 단위로 동일** → 회귀 0.
-
-### 4점 경로 도달성 — **도달 불가 확정(리더 정정 사항 독립 확인)**
-
-```
-app.js:4660  overlay mousedown → if (state.placeDraw) { placeDrawClick(e); return; }
-app.js:2449  const { draw, full } = addPlaceDrawPoint(...);  full=true 면
-app.js:2456-2469  같은 동기 블록에서 appendPlaceSpace → … → endPlaceDraw()  (state.placeDraw = null)
-app.js:4760  overlay mousemove → if (!state.placeDraw) return;
-```
-
-`placeDrawClick` 은 `state.placeDraw` 가 있을 때만 호출되고, 4점째 분기에는 **`drawRoiOverlay()` 호출이 없다**
-(`if (!full)` 분기에만 있다). 커밋과 null 화가 같은 동기 블록 안이라 그 사이에 렌더가 끼어들 수 없다.
-→ **`pts.length === 4` 분기는 실행되지 않는다.** `closePath()`/채움은 방어 코드이며, 실제 화면 변화는
-**3점 예고선 하나뿐**이라는 설계자·구현자 진술이 맞다. 코드 주석에도 이 사실이 박혀 있다(app.js:664-666).
-
----
-
-## 4. (C) 초기화 / 전체삭제
-
-### C-1 초기화(`#place-clear`) — 우선순위·위임 ✅
-
-```js
-2323 function clearPlaceDrawing() {
-2324   if (state.placeDraw) { … beginPlaceDraw(state.placeDraw.key) … return; }  // ① 비파괴 우선
-2331   if (state.selectedPlaceIdx != null) { deletePlaceSpace(); return; }       // ② 위임
-2335   setPlaceMsg('지울 점도, 선택된 주차면도 없습니다');
-```
-
-- **우선순위 그리는 중 > 선택 면** ✅ (첫 분기가 `state.placeDraw`)
-- **그리기 모드 유지** ✅ (`endPlaceDraw` 미호출, `beginPlaceDraw` 로 0점 재개, `state.placeRoi` 대입 없음)
-- **구현 중복 0** ✅ — 면 삭제는 `deletePlaceSpace()` 호출 한 줄. 본문에 `removePlaceSpace`·`fetch` 없음.
-
-### C-2 전체삭제(`#place-clear-preset`) — 범위·확인·문구 ✅
-
-- 범위 = `currentFrameKey()` (app.js:2345) — `drawFileFloorRoi`(617)와 **같은 기준** ✅
-- `if (!ok) return;`(2361)이 **모든 변경보다 앞** → confirm 취소 시 상태 변화 0 ✅
-- 버튼 문구 `이 프리셋 전체삭제` · title `…다른 프리셋·다른 카메라는 그대로…` · 확인문에 범위/미저장/되돌리기/재번호 전부 명시 ✅
-- **다른 프리셋이 안 지워지는지** → 실행 확인(아래 C-3) ✅
-
-### C-3 ★ 전역 idx 정합 — **실행으로 증명**
-
-실행 명령: `node qa_clear.mjs` (`web/placeDraw.js` · `web/core.js` 직접 import)
-
-```
-입력 : 1:1=[1,2,3] 1:2=[4,5] 2:1=[6,7,8]
-출력 : 1:1=[1,2,3] 1:2=[]    2:1=[4,5,6]
-
-PASS  대상 키가 빈 배열로 남는다
-PASS  남은 idx 가 1..N 순열
-PASS  normalizeGlobalIdx.changed === false(재부여 불필요)
-PASS  원본 미변형
-PASS  다른 프리셋 좌표 불변
-PASS  좌표↔번호 대응 유지(원 idx6,7,8 → 새 4,5,6)
-PASS  없는 키 → throw 0, 내용 동일
-PASS  null / undefined 입력 → throw 0
-PASS  idx 없는 원소 혼입 → throw 0
-PASS  유일 프리셋 전체삭제 → 전 맵 비고 키 유지
-PASS  랜덤 500 케이스 전부 1..N 순열 유지 + 대상키 비움 (실패 0)
-총 실패: 0
-```
-
-**"큰 idx 부터 접는다"가 실제로 필수인지도 대조 실험으로 확인**했다 — 작은 idx 부터 접으면 깨진다:
-
-```
-[대조] 작은 idx부터 접었을 때: 1:1=[1,2,3] 1:2=[4] 2:1=[5,6] → 대상키 비움? false
-```
-
-즉 `sort((a,b) => b - a)` 는 장식이 아니라 **정확성 조건**이다. 설계 근거가 실증됐다.
-
-### C-4 되돌리기 — **전체삭제만 복구된다. 초기화는 복구되지 않는다** ⚠️ (결함 F-1)
-
-| | 스냅샷 저장 | 되돌리기 복구 |
-|---|---|---|
-| 전체삭제 `clearCurrentPresetSpaces` | ✅ `state.placeRoiUndo`(전체 맵 깊은 복사, 변경 **앞**) | ✅ |
-| 초기화 — 그리는 중 분기 | 불필요(비파괴) | — |
-| **초기화 — 선택 면 삭제 분기** | ❌ **없음**(`deletePlaceSpace` 는 스냅샷을 남기지 않는다) | ❌ **복구 불가** |
-
-QA 과제 (C)의 "1단계 스냅샷이 초기화·전체삭제 **양쪽 모두** 복구하는가" → **아니오.** 상세는 §6 F-1.
-
-**`placeRoiBackup` 과의 분리는 ✅**: `undoPlaceRoi`(2377-2389)는 `placeRoiUndo` 만, `alignUndo`(2723-2733)는
-`placeRoiBackup` 만 만진다. 교차 참조 0. 버튼도 `#place-undo` / `#align-undo` 로 별개이며 index.html id 중복 0.
-소진 지점도 분리: `savePlaceRoi`(2581) → `placeRoiUndo=null`, `alignApply`(2752) → `placeRoiBackup=null`.
-
-`#place-undo` disabled 동기화(2253-2254)는 `renderPlaceSelectionInfo` **조기 return 위**에 있고,
-`renderSlotList` 의 **도달 가능한 모든 return 경로가 그것을 호출**함을 확인했다
-(1325행 `if (!state.mapping) return;` 은 `fileMode` 계산상 도달 불가 — `FLOOR_ROI_USE_LLM=false` 이므로
-`fileMode=false` 가 되려면 `state.mapping` 이 truthy 여야 한다). → **stale 없음.**
-
-### C-5 저장 전 파일 무변경 ✅ + 저장 왕복 성립(구현자 §5-3 미검증분 **해소**)
-
-- 세 함수(`clearPlaceDrawing`·`clearCurrentPresetSpaces`·`undoPlaceRoi`) 본문에 `fetch` 0.
-- `data/Place01/PtzCamRoi.json` mtime `2026-07-28 13:16:30` — 라운드 코드 편집(13:35~)·본 검증(13:48~) **이전**. 무변경.
-
-구현자가 "서버 왕복이라 미검증"이라 한 부분을 **임시 테스트로 실행 확인**했다(검증 후 삭제 완료):
-
-```
-✓ 빈 배열 PUT 이 적용되고 대상 프리셋만 비고 다른 프리셋은 남는다   (applied === true)
-✓ savePlaceRoi 순회 전체 PUT 후 재로딩 결과가 1..N 정합
-  [QA] 재로딩 byPreset keys = [ '1:2' ]  idx = [ 1 ]
-```
-
-- `PlaceRoiPutSchema.spaces` 는 `z.array(...)`(min 없음) → **빈 배열 통과** ✅ (설계 F7 확인)
-- `applyPlaceRoiUpdateEx` 는 대상 preset 매칭 시 `applied = true` 를 세우므로 **빈 배열도 적용된다** ✅
-- **R3 이월 사실도 실행으로 확정**: 면 0개가 된 프리셋은 재로딩 시 `byPreset` 에서 **빠진다**(`keys=['1:2']`).
-  → 그 프리셋에 다시 그려 저장할 때 `needsPlaceSkeleton=true` → **라이브 프레임 필요**. 문서화 필수.
-
----
-
-## 5. (D) 구현자 자가신고 판정
-
-### D-1. `#place-clear-preset` disabled 동기화 생략 — **사유는 사실. 대안도 안전하다. 승인.**
-
-주장 검증(코드 원문):
-
-```js
-4940 $('sel-cam').addEventListener('change', (e) => {
-       … renderDetectSelection(); renderPresetSelect(); drawRoiOverlay();
-         renderSelectionInfo(); gotoPreset(); reconnectLiveIfActive();   ← renderSlotList() 없음
-4952 $('sel-preset').addEventListener('change', (e) => {
-       … renderSlotList(); …                                            ← 있음
-```
-
-**구현자 진술 그대로다.** `#place-clear-preset` 의 활성 조건은 `currentFrameKey()` 파생인데
-카메라 전환 경로에 `renderSlotList()` 가 없으므로, disabled 동기화를 넣었다면 카메라 전환 후 버튼이
-**잘못 잠긴 채 굳는다** — 이번 라운드가 고치는 "조용한 무반응"과 정확히 같은 부류다.
-
-대안(항상 활성 + 클릭 시점 안내)의 안전성:
-- 빈 프리셋이면 `confirm` 이전에 안내 문구만 내고 **return**(2348-2351) → 파괴 0
-- 파괴는 `confirm` **뒤에만**(2361 `if (!ok) return;`) → 오조작 방어는 disabled 없이도 성립
-→ **안전. 판정 승인.** (`sel-cam` 에 `renderSlotList()` 를 넣는 범위 밖 수정을 피한 것도 타당.)
-
-### D-2. 테스트 앵커 `lastIndexOf` — **봉인 약화 아님. 오히려 fail-safe.**
-
-`placeDrawClick` 본문에 `endPlaceDraw()` 가 2회(취소 가드 2444 / 커밋 2469) 나오므로 `indexOf` 는 취소 가드를
-집어 순서 검사가 무의미해진다. `lastIndexOf` 는 커밋 분기를 정확히 집는다. 약화 시나리오를 역으로 점검했다:
-
-- 커밋 분기의 `endPlaceDraw()` 가 사라지면 → `end` 가 취소 가드(앞쪽) 인덱스로 떨어져 `ensure < end` **FAIL** ✅
-- `ensureFloorVisible()` 이 커밋 분기에서 빠지고 앞쪽으로 가면 → `assign < ensure` **FAIL** ✅
-
-**두 방향 모두 red 로 떨어진다.** 봉인 유지.
-
----
-
-## 6. 발견 결함
-
-### F-1 [중] `초기화` 가 선택 면을 **confirm 없이 즉시 삭제**하고 **되돌릴 수 없다**
-
-- 재현: 그리기 모드 아님 + 목록에서 면 선택 → `초기화` 클릭 → `deletePlaceSpace()` 즉시 실행
-  (app.js:2331-2333). 스냅샷을 남기지 않으므로 바로 옆 `되돌리기` 버튼을 눌러도
-  `'되돌릴 전체삭제 내역이 없습니다'` 만 뜬다.
-- 기대: '초기화'라는 비파괴적 이름과 "되돌리기 버튼이 바로 옆에 있다"는 배치가 복구 가능성을 암시한다.
-- 실제: 복구 불가(파일 저장 전이므로 세션 재로딩으로는 복구되나, 그러면 다른 미저장 편집이 전부 날아간다).
-- 심각도 **중** — 데이터 파괴가 무확인·무복구로 일어난다. 다만 기존 `삭제` 버튼과 **동일 성질**이라
-  회귀는 아니고, 설계·리더 결정(판단 2: `deletePlaceSpace` 위임)을 그대로 따른 결과다.
-- 권고(택1, 전부 소규모): ⓐ `deletePlaceSpace` 진입 시에도 `placeRoiUndo` 스냅샷을 남긴다(되돌리기 일원화),
-  ⓑ 초기화의 면 삭제 분기에만 confirm 을 붙인다, ⓒ 최소 조치로 title/문구에 "되돌릴 수 없습니다" 명시.
-
-### F-2 [하] `되돌리기` 가 전체삭제 **이후의 편집까지 조용히 되감는다**
-
-- 재현: 전체삭제 → 다른 프리셋에 면을 새로 그림(또는 번호 수정) → `되돌리기`.
-- `state.placeRoi = snap.placeRoi`(2383)가 **전체 맵 통째 교체**라 그 사이 편집이 경고 없이 사라진다.
-- 1단계 전체 맵 undo 의 구조적 성질이며 설계 판단 4(리더 승인)의 범위 안이지만,
-  **버튼 title·복원 메시지 어디에도 이 사실이 없다.** 심각도 **하** — 문구 보강 권고.
-
-### F-3 [하] `#roi-floor` 강제 ON 의 **네 번째 진입점 누락** — 목록에서 면 선택
-
-- `selectPlaceSpace`(2275-2287)에 `ensureFloorVisible` 없음. 바닥 토글이 꺼진 상태에서 목록 행을 클릭하면
-  선택 하이라이트·정점 핸들이 **전부 안 보인다**(표시 644 · 히트테스트 1396 둘 다 `#roi-floor` 요구).
-- 리더 지시는 3개 진입점이므로 **요구 위반 아님**. 다만 이번 라운드가 제거하려는 결함 부류가 한 곳 남았다.
-
-### F-4 [정보] 코너케이스 — idx 없는 원소가 섞이면 전체삭제가 그 프리셋을 완전히 비우지 못한다
-
-```
-입력  1:1=[{idx 없음}, {idx:1}]  1:2=[{idx:2}]   → clearPresetSpaces(_, '1:1')
-출력  1:1=[1]  1:2=[2]      ← idx 없는 원소가 살아남아 재번호로 idx 1 을 받는다
-```
-
-`clearPresetSpaces` 가 `Number.isInteger(idx)` 로 필터하기 때문. **실현 가능성은 사실상 0**이다 —
-`normalizePtzCamRoi` 가 idx 없는 면을 로드 단계에서 떨구고, `savePlaceRoi`(2519-2525)에 idx 가드도 있다.
-throw 0·미붕괴는 확인됐으므로 **결함이 아니라 기록**으로 남긴다.
-
-### F-5 [정보] `되돌리기` 라벨 중복
-
-`#place-undo`(주차면 목록·편집)와 `#align-undo`(자동보정, index.html:339)가 **같은 문구 "되돌리기"** 다.
-섹션이 달라 id 충돌·동작 혼선은 없지만 화면에 같은 이름 버튼이 둘이다. 문구 구분 권고(정보).
-
----
-
-## 7. (E) 회귀 — 그리기 off 시 완전 동일
-
-실행 명령: `node qa_off.mjs` (배포 원문 `drawPlaceDrawOverlay` 실행, 캔버스 명령 계수)
-
-```
-그리기off + 정점편집off                    : 발행 명령 0건 (캔버스 변화 0)
-그리기off + 정점편집on + 선택없음          : 발행 명령 0건 (캔버스 변화 0)
-그리기off + 정점편집on + 선택있음(바닥off) : 발행 명령 0건 (캔버스 변화 0)
-```
-
-- **캔버스 경로**: `mousedown` 은 `if (state.placeDraw) { placeDrawClick(e); return; }`(4660) 한 줄이 앞에 붙었을 뿐
-  null 이면 아래 기존 코드가 원문 그대로 실행된다. `mousemove` 는 `if (!state.placeDraw) return;`(4760)로 시작하는
-  **별도 리스너**라 기존 `window` mousemove(`if (!dragState) return;`)와 간섭 0. `mouseup` 미변경.
-  (※ 이 두 줄은 **이전 라운드** 산물이며 이번 라운드는 손대지 않았다.)
-- **목록 UI**: `renderSlotList`(1284-1335) 이번 라운드 변경 0. 병기 분기(1321) 유지 + 봉인 테스트 green.
-- **`git diff --numstat` 독립 확인**: 무변경 목표 7/8 완전 무변경, `groundModel.ts` 는 이전 라운드분(§1 R-4),
-  `app.css` 이번 라운드 무수정, `src/**` 이번 라운드 무수정.
-
----
-
-## 8. (F) 회귀 테스트 — 직접 실행 결과 원문
+### 1.1 시작 기준선 (검증 착수 직후)
 
 ```
 $ npx tsc --noEmit
-(출력 없음) exit 0
-
+TSC_EXIT=0
+```
+```
 $ npx vitest run
- Test Files  256 passed (256)
-      Tests  3075 passed (3075)
-   Start at  13:48:47
-   Duration  14.82s (transform 8.74s, collect 47.03s, tests 29.37s, prepare 24.84s)
+ Test Files  2 failed | 272 passed (274)
+      Tests  2 failed | 3436 passed (3438)
+   Duration  19.69s
 
-$ npx vitest run test/groundGrid.test.ts test/placeDraw.test.ts test/placeDrawWiring.test.ts test/viewerDisplayReset.test.ts
- ✓ test/viewerDisplayReset.test.ts (8 tests)     ← S5-T2(resetOverlayDisplay 에 roi-floor 없음) green
- ✓ test/placeDrawWiring.test.ts (36 tests)
- ✓ test/placeDraw.test.ts (15 tests)
- ✓ test/groundGrid.test.ts (13 tests)
- Test Files  4 passed (4)
-      Tests  72 passed (72)
+FAIL test/placeRoiRuntimeInvariants.test.ts > 런타임 PtzCamRoi.json — 구조 불변식(값 불단정) > 모든 주차면: 4점 + 유한 좌표
+AssertionError: expected [] to have a length of 4 but got +0   (test/placeRoiRuntimeInvariants.test.ts:30:27)
 
-$ npx vitest run test/groundGrid.test.ts -t "골든"
- ✓ test/groundGrid.test.ts > 골든 해시 (결정론 CI 봉인) > 실데이터 cam1 preset1 격자+quad 의 sha256(stringify5) 고정
- Tests  1 passed | 12 skipped (13)
+FAIL test/roiDbLoad.test.ts > loadRoiIntoDb — 정상 로딩(실제 data/Place01/PtzCamRoi.json) > preset_slotidx 는 프리셋별 1-based 연속, slot_roi 는 4점 정규화(프레임 밖 점은 보존·issues 보고)
+AssertionError: expected [] to have a length of 4 but got +0   (test/roiDbLoad.test.ts:104:21)
+```
+→ **리더 제시 수치(0 / 2 failed·3436 passed)와 정확히 일치.** 사전 실패 2건은 지시대로 **무접촉**했다.
+
+### 1.2 종료 기준선 (변이 원복 + 프로브 삭제 후 재측정)
+
+```
+$ npx tsc --noEmit
+TSC_EXIT=0
+$ npx vitest run
+ Test Files  2 failed | 272 passed (274)
+      Tests  2 failed | 3436 passed (3438)
+   Duration  17.78s
+```
+→ **시작 기준선과 동일.** 내 검증이 저장소에 남긴 부작용은 0이다
+(`git status` 로 `test/_qa*.ts` 6개 부재 · `src/**` diff 불변 확인. 신규 3파일 md5 도 변이 전후 동일).
+
+---
+
+## 2. 항목별 판정
+
+| # | 항목 | 판정 | 근거 요약 |
+|---|---|---|---|
+| 1 | 파리티가 진짜인가 | **결함**(구현 정상 / **봉인 구멍 6**) | 변이 17건 중 **10 검출 / 7 미검출**. 미검출 7건 중 **6건은 진짜 테스트 구멍**(프로브가 전부 잡음), 1건만 의미상 등가 |
+| 2 | 웹이 정말 껍데기인가 | **통과** | 4건 전부 호출 그래프에서 소멸. `web/occupancy.js`·`occupancyRegion.js` 는 런타임 import 0 |
+| 3 | 토큰 게이트의 구멍 | **통과** | 등록 라우트 **87개 전수 타격** → 403 아닌 변이 라우트 **0건**(면제 5 + `/rpc` 자체게이트만) · 잘못 막힌 읽기 **0건** |
+| 4 | 파일 무변경 보장 | **통과** | md5 불변 **30 케이스**(dryRun·409·404·400·검증실패 × REST/뷰어/RPC) + 음성 대조 |
+| 5 | DB 파괴 경로 부재 | **통과** | 신규 6파일 DB 심볼 0. diff 전체에서 DB 쓰기 호출 0(읽기 `getSlotSetup` 1건뿐) |
+| 6 | RPC 규약 무결성 | **통과** | 카탈로그 **76** · 신규 6 전부 `http` 위임 · 오류코드 5종 실응답 확인 |
+| 7 | 경계면 교차 비교 | **통과** | `frames[]` ↔ `occComputeByKey` shape 일치 · 1-based 보존 · `stringify5` 적용(`0.123456789 → 0.12346`) |
+
+---
+
+### 항목 1 — 파리티가 진짜인가 ★결함
+
+구현은 정확하다. 내가 새로 만든 7개 프로브 케이스(다중카메라 · 다중 preset 키 · centering 부분 null ·
+presetSlotIdx 혼재 · 2단계 폴백 사영 · groundBandRatio 민감 기하)에서 **web↔src 가 전부 일치**했다.
+
+문제는 **봉인의 판별력**이다. 상세는 §3.
+
+W2(투어링)는 `touringPlanParity` 에 **변이를 한 건도 넣지 않았다**(`02b` 에 그런 표가 없다 —
+`viewerPtzSyncCoverage` 정규식 변이만 있다). 즉 이번에 내가 처음 측정했다.
+
+### 항목 2 — 웹이 정말 껍데기인가 ★통과
+
+호출 그래프 추적 결과:
+
+| 승격된 로직 | `web/core.js` 정의 | app.js/roimaker.js import | 런타임 호출 | 판정 |
+|---|---|---|---|---|
+| `buildTouringPlan` | :1683 존치 | **없음**(app.js:3-71 import 블록에 부재) | 0 | 존치·미호출 ✅ |
+| `computeOccupancy` | :577 존치 | 없음 | core.js 내부 호출 0 · `occupancy.js:17` 만 참조 | 존치·미호출 ✅ |
+| `nextSlotId`/`insertSlotAt`/`removeSlot`/`rebuildGlobalIndex` | :799~:870 존치 | 없음(app.js:30 에 승격 주석) | `removeSlot`→`rebuildGlobalIndex` 내부 호출뿐 | 존치·미호출 ✅ |
+| `OccupancyJudge`(occupancy.js) | 존치 | **모듈 자체가 import 되지 않음** | 0 | 존치·미호출 ✅ |
+| `computeOccupancyRegions`(occupancyRegion.js) | 존치 | 모듈 자체 미 import | 0 | 존치·미호출 ✅ |
+
+`web/index.html` 의 `<script type="module">` 진입점은 `app.js`(:695)·`roimaker.js`(:696) 둘뿐이고,
+두 진입점에서 도달 가능한 모듈은 `core.js`·`placeDraw.js`·`roimakerCore.js`·`token.js` 다.
+**`occupancy.js`·`occupancyRegion.js` 는 어느 진입점에서도 도달하지 않는다** — 테스트 전용 기준변으로 완전 격리됐다.
+
+실제 대체 경로도 확인했다:
+- `addSlot`(app.js:1484) → `mutFetch('/viewer/api/mapping/slot/add', {artifact: state.mapping, dryRun:true})` → `state.mapping = data.artifact`
+- `deleteSelectedSlot`(:1521) → 동일 관용구
+- `runTouringTest`(:1938) → `mutFetch('/capture/tour/start')` + 1초 `GET /capture/tour/status` 폴링. **웹에 순회 for 루프가 없다**
+- `refreshOccupancy`(:526) → `mutFetch('/capture/slots/judge-occupancy', {frames, regions:true})`. `drawRoiOverlay`(:445)·`renderSlotList` 의 판정 호출은 **제거됨**(사유 주석 명시)
+- `markDirty()` 가 살아 있어 **2단계 UX(추가 → Ctrl+드래그 배치 → 저장) 보존** 확인
+
+### 항목 3 — 토큰 게이트의 구멍 ★통과
+
+`controlToken:'T'` 로 **모든 옵셔널 의존성을 주입한** `buildServer` 를 띄우고 `printRoutes` 로 수집한
+**126개 엔트리(HEAD 39 제외 → 87개)** 전부를 무토큰으로 타격했다.
+
+```
+총 라우트: 87
+■ 무토큰인데 403 이 아닌 변이 라우트:
+POST /capture/slots/judge-occupancy → 400
+POST /capture/place-roi/validate → 400
+POST /capture/autocorrect → 400
+POST /capture/ground-grid/bootstrap → 400
+POST /capture/detect → 400
+POST /rpc → 200
+■ 잘못 막힌 읽기 라우트:
+(없음)
+```
+→ 403 이 아닌 6개는 **정확히 `READONLY_POST_PATHS` 5개 + `SELF_GATED_PATHS`(`/rpc`)** 다.
+선언 밖의 누출은 **0건**. `deny-by-default` 가 실제로 작동한다.
+(수집 파서 정확성은 신규 6라우트 + `GET /capture/tour/status` + `judge-occupancy` 가 목록에 실제로
+들어 있음을 `toContain` 으로 별도 단정해 확인했다 — 파서가 라우트를 놓쳐서 "구멍 없음"이 된 것이 아니다.)
+
+이번 신규 6개 변이 라우트 직접 타격(뷰어 컨텍스트 포함):
+```
+POST /capture/tour/start             → 무토큰 403 / 토큰 404
+POST /capture/tour/stop              → 무토큰 403 / 토큰 200
+POST /mapping/slot/add               → 무토큰 403 / 토큰 400
+POST /mapping/slot/delete            → 무토큰 403 / 토큰 400
+POST /viewer/api/mapping/slot/add    → 무토큰 403 / 토큰 400
+POST /viewer/api/mapping/slot/delete → 무토큰 403 / 토큰 400
+GET  /capture/tour/status            → 무토큰 200 (읽기 정상 통과)
+```
+RPC 평면(메서드별 자체 게이트):
+```
+capture.tour.start  무토큰 → -32006 invalid token
+capture.tour.stop   무토큰 → -32006 invalid token
+setup.slot.add      무토큰 → -32006 invalid token
+setup.slot.delete   무토큰 → -32006 invalid token
+capture.tour.status(읽기)     무토큰 → OK
+slot.occupancy.evaluate(읽기) 무토큰 → OK
+```
+회귀 확인: `controlToken:''` → **403 인 변이 라우트 0건**(훅 미등록 = 현행 동작 100% 보존).
+
+훅 등록 순서도 확인했다 — `registerControlTokenGate(app, deps.viewer)` 가 `server.ts:203` 으로
+모든 라우트 등록(`:593`, `:652`, `:684` 의 `app.register` 뷰어 캡슐 포함)보다 **앞**이다.
+Fastify 는 이후 생성되는 자식 컨텍스트에 부모 훅을 상속하므로 뷰어 캡슐까지 덮인다(실측이 이를 확증).
+
+> ⚠ 리더 지시문의 "알려진 예외는 `/capture/detect` 하나뿐"은 **사실과 다르다** → 결함 **D-3**.
+
+### 항목 4 — 파일 무변경 보장 ★통과
+
+**실제 `Repository`(진짜 파일 IO)** 로 `data/setup_artifact.json` 의 md5 를 직접 비교했다.
+8개 시나리오 × 3개 표면(헤드리스 REST / 뷰어 컨텍스트 / RPC) + 개별 4건 = **30 케이스 전부 통과**.
+
+| 시나리오 | 상태코드 | md5 |
+|---|---|---|
+| `dryRun:true` add | 200 | 불변 |
+| `dryRun:true` delete | 200 | 불변 |
+| `dryRun:true` + 호출자 버퍼 add | 200 | 불변 |
+| 없는 slotId 삭제(**가드 거부**) | **409** | 불변 |
+| zod 실패(`camIdx:0`) | 400 | 불변 |
+| zod 실패(`slotId:''`) | 400 | 불변 |
+| 검증 실패(망가진 버퍼) | 400 | 불변 |
+| coverage mismatch(globalIndex 결손 버퍼) | 400 | 불변 |
+| artifact 파일 부재 | 404 | **파일 생성조차 안 함** |
+
+**공허한 통과 방지(음성 대조)**: `dryRun` 미지정(기본 커밋) → md5 **변경됨** + `saved:true`.
+즉 위의 "불변" 단정들은 "원래 아무것도 안 쓰는 코드라 당연히 불변"이 아니다.
+
+**부분기록 없음** 확인: `slotAddHandler`(server.ts:504)/`slotDeleteHandler`(:551)는
+`zod → 편집 → validateArtifactBody → (dryRun 아니면) saveArtifact` 순서이고,
+모든 거부가 `saveArtifact` **도달 전**이다(`return v.body` 가 그 앞).
+
+`stringify5` 적용도 실측했다 — `rect.x = 0.123456789` 입력 → 디스크에 `"x": 0.12346`.
+
+> 단, `artifact` 버퍼의 **사정거리**가 문서화되지 않았다 → 결함 **D-1**.
+
+### 항목 5 — DB 파괴 경로 부재 ★통과
+
+정적 확인 2단계:
+
+1. **신규 6파일 전수 grep**(`sqlite|store\.|replaceSlotSetup|upsert|writeSetupResultFiles|saveArtifact|writeFileSync|repo\.`)
+   → `touringPlan.ts` · `artifactSlotEdit.ts` · `occupancyJudge.ts` · `TourJob.ts` · `tourRoutes.ts` · `controlGate.ts` **전부 0건**.
+2. **`git diff main -- src/` 의 추가된 줄 전수 grep**(DELETE+INSERT 계열 9개 API 명 + 파일 writer)
+   → 매칭 4건이 전부이며 내용은:
+   - `const dbSlotCount = deps.sqlite ? deps.sqlite.getSlotSetup().length : null;` — **읽기 1건**(warnings 용)
+   - `if (dryRun !== true) deps.repo.saveArtifact(v.artifact);` × 2 — artifact 파일만
+   - 나머지 1건은 주석
+
+`replaceSlotSetup` · `insertSlotSetupRows` · `clearSlotSetupEnrichment` · `upsertSlot*` · `upsertPlace/Camera/PresetInfo` ·
+`writeSetupResultFiles` **호출 0건**. 설계 R12("파괴 경로에 아예 진입하지 않는다")는 **DB 에 한해 사실**이다.
+(파일 쪽은 D-1 참조 — R12 의 문구가 파일까지 커버하는 것처럼 읽힌다.)
+
+### 항목 6 — RPC 규약 무결성 ★통과
+
+```
+GET /rpc/catalog → count = 76, methods.length = 76
+```
+신규 6개 전부 `http` 위임(**로직 0줄**) — `methods.ts` diff 확인. `handler` 신설 0건.
+`setup.slot.delete` 만 `requireConfirm` + `omit(p,['confirm'])` 전처리가 있는데 이는 기존 관용구다.
+(설계 §4.2 가 명시한 `requireFields(p,['camIdx','presetIdx'])` 는 `setup.slot.add` 에서 생략됐다 —
+라우트 zod 가 400 → `-32602` 로 같은 결과를 내므로 무해한 이탈. 실측으로 확인.)
+
+**오류코드 실응답 실측**(내 프로브, `app.inject` 경유):
+```
+capture.tour.start (setup_result 없음)        → -32002 {"message":"no setup_result","data":{"httpStatus":404}}
+capture.tour.start (중복 시작)                 → -32001 {"message":"tour already running","data":{"httpStatus":409}}
+capture.tour.start (isBusy=렌즈 캘리브레이션)   → -32001 {"message":"카메라 점유 중(렌즈 캘리브레이션) — 잠시 후 재시도하세요"}
+setup.slot.delete (slotId 부재)               → -32005 {"message":"slotId 없음: nope — 파일 무변경","data":{"httpStatus":409}}
+setup.slot.add    (artifact 파일 없음)         → -32002 {"message":"no setup artifact","data":{"httpStatus":404}}
+capture.tour.start/stop/status (tourJob 미주입) → -32004 {"message":"Not Found" / "Route ... not found"}
+capture.tour.start(dwellMs:-1) · setup.slot.add(camIdx:0) → -32602
+```
+**REST 직접 호출 최종 방어선(설계 R5)도 실증**:
+```
+POST /capture/tour/start (isBusy true, dispatch 미경유) → 409 {"error":"busy — 다른 잡이 카메라를 사용 중입니다 (렌즈 캘리브레이션)"}
+```
+`test/rpcParity.test.ts` 의 양방향 고정은 살아 있다 — `known` 정적 목록(+tour 3줄)과
+**T4 동적 등록 교차검사**(완전 배선 `buildServer` 에 전 위임 URL 주입 후 `isRouteNotRegistered` 판정) 둘 다 green.
+
+### 항목 7 — 경계면 교차 비교 ★통과
+
+| 경계 | 서버가 내는 것 | 웹이 읽는 것 | 판정 |
+|---|---|---|---|
+| `judge-occupancy` 응답 | `{byKey:{[key]:{rows, regions?:[{idx,scale,polygon}], overlapPairs?}}}` | `out.rows`·`out.regions`·`out.overlapPairs`(app.js:552-575) | ✅ |
+| `occComputeByKey` 적재 | — | `{spaces:[{id,occupied,source,center,vehicleRect,region}]}` | 구 `updateLogicOccupancy`(main:518-547)와 **키 구성 동일** ✅ |
+| 소비처 1 | — | `drawOccupancyOverlay`: `sp.occupied`·`sp.region`·`sp.center` | 무변경 ✅ |
+| 소비처 2 | — | `buildFlatSlotRows({occByKey})`(core.js:701): `occByKey[key].spaces` → `Map(o.id → o.occupied)` | 무변경 ✅ |
+| **1-based 인덱스** | `rows[].idx` = 입력 `floorPolygons[].idx` 그대로 통과 | `idx: Number(p.label)`, `p.label = String(sp.idx)`(PtzCamRoi 전역 1-based) | 왕복 보존 ✅ |
+| `frames[]` 조립 | — | 바닥 ROI 없는 키 제외(구 `if(!floorPolys.length) return` 과 동형 · 이전 값 보존) | ✅ |
+| 소수점 5자리 | `Repository.saveArtifact` → `stringify5` | — | `0.123456789 → 0.12346` 실측 ✅ |
+| base64 | 이번 4건에 base64 경계 **없음** | — | 해당 없음 |
+
+---
+
+## 3. ★ 음성 대조 결과표 (변이 17건 · 내가 직접 주입·원복)
+
+방식: 구현에 1줄 변이 주입 → 해당 파리티 테스트만 실행 → 결과 기록 → `finally` 로 원복.
+구현자가 이미 쓴 변이(W3 4건 / W4 A~F)와 **겹치지 않는 것만** 골랐다.
+
+### 3.1 `touringPlanParity` (W2 는 이 파리티에 변이를 넣은 적이 없다 — 판별력 최초 측정)
+
+| # | 주입한 변이 | 결과 | 미검출 사유 / 판정 |
+|---|---|---|---|
+| T1 | 정렬키 순서 뒤바꿈 `camId ↔ presetId` | **DETECTED** | fixture 가 2대(cam 1·2)라 잡힌다 |
+| T2 | `presetSlotIdx ?? null` → `?? 0` (1-based 규약 드리프트) | **DETECTED** | `presetSlotIdx:null` 케이스가 있다 |
+| T3 | `c.zoom != null` → `c.zoom !== undefined` | **미검출** | ❌ **구멍**. `centering:{pan:1,tilt:1,zoom:null}`(부분 null) 케이스가 없다. 프로브로 즉시 검출됨 |
+| T4 | 그룹키 `` `${camId}:${presetId}` `` → `` `${camId}` `` | **DETECTED** | preset 스텝 발행 시점이 갈린다 |
+| T5 | 정렬 기본값 `(presetSlotIdx ?? 0)` → `?? 999` | **미검출** | ❌ **구멍**. null 과 숫자가 **섞인** 그룹이 없다(있는 건 둘 다 null). 프로브로 즉시 검출됨 |
+
+### 3.2 `artifactSlotEditParity`
+
+| # | 주입한 변이 | 결과 | 미검출 사유 / 판정 |
+|---|---|---|---|
+| S1 | `globalIdx: i + 1` → `i` (**1-based → 0-based**) | **DETECTED** | |
+| S2 | clamp 상한 `base.length + 1` → `base.length` (**off-by-one**) | **DETECTED** | W4-B 는 하한만 봤다 — 상한도 봉인돼 있다 |
+| S3 | `splice(pos, 0, …)` → `splice(pos, 1, …)` | **DETECTED** | |
+| S4 | preset 정렬 `camIdx ↔ presetIdx` 순서 뒤바꿈 | **미검출** | ❌ **구멍**. `sampleArtifact()` 가 **단일 카메라**(1:1, 1:2)라 두 정렬이 같은 답을 낸다. 프로브(cam1p2 + cam2p1)로 즉시 검출됨 |
+| S5 | `nextSlotId` 시작값 `max + 1` → `max` | **DETECTED** | "프리셋 슬롯 0개" 케이스가 `c2p5s0` 을 잡는다 |
+| S6 | `roiByPreset` 키 `[0]` → `.at(-1)` | **미검출** | ❌ **구멍**. 테스트의 신규 슬롯 `roiByPreset` 이 **항상 키 1개**다. 프로브(키 2개)로 즉시 검출됨 |
+
+### 3.3 `occupancyJudgeParity`
+
+| # | 주입한 변이 | 결과 | 미검출 사유 / 판정 |
+|---|---|---|---|
+| O1 | 2단계 폴백 사영 제거 `rows[openPos[k]]` → `rows[k]` | **미검출** | ❌ **구멍(최중요)**. 모든 케이스에서 `openPos` 가 **항등 사영**이다 — 1단계가 **앞** 슬롯을 점유하고 2단계가 **뒤** 슬롯을 채우는 조합이 없다. 프로브(bbox=slot1 + standalone plate=slot2)로 즉시 검출됨 |
+| O2 | 임계 `>= minBandOverlap` → `>` | **미검출** | ✅ **의미상 등가**. 부동소수 ratio 가 임계와 **정확히** 같아지는 입력이 없고 실측상 발생 확률 0. web·src 가 같은 식이라 갈릴 수 없다(구현자 tie-break 발견과 동류) |
+| O3 | 슬롯당 argmax 제거(`!prev \|\| bestRatio > prev.ratio` → `!prev`) | **DETECTED** | T8 이 잡는다 |
+| O4 | `groundBand(rect, groundBandRatio)` → `groundBand(rect)` (**cfg 오버라이드 무시**) | **미검출** | ❌ **구멍(악질)**. `groundBandRatio 오버라이드` 라는 **이름의 테스트가 3개** 있는데 전부 폴리곤이 rect 의 y 범위를 **완전히 덮어** ratio 가 결과에 영향을 주지 않는 기하다. 즉 **그 테스트는 오버라이드가 무시돼도 통과한다.** 프로브(폴리곤이 y 0.30~0.40 만 덮음)로 즉시 검출됨 |
+| O5 | `computeOccupancy` 의 `cands.find` → `findLast`(첫 매칭 규약) | **DETECTED** | |
+| O6 | 판정행 초기값 `source: null` 키 제거 | **DETECTED** | `toEqual` 이 키 존재를 본다 |
+
+### 3.4 집계 및 "구멍"의 실증
+
+- **17건 중 10 검출 / 7 미검출.**
+- 미검출 7건 중 **6건이 진짜 테스트 구멍**이다(O2 만 의미상 등가).
+- 판별 방법: 각 미검출 변이를 겨냥한 **최소 프로브 케이스**를 만들어 ①무변이 상태에서 web↔src 일치
+  (= **구현은 정상**)를 확인하고 ②변이를 다시 넣었을 때 **6건 전부 DETECTED** 됨을 실행으로 확인했다.
+
+```
+T3 zoom != null → !== undefined              | 프로브: DETECTED
+T5 (presetSlotIdx ?? 0) → ?? 999             | 프로브: DETECTED
+S4 preset 정렬 camIdx↔presetIdx              | 프로브: DETECTED
+S6 roiByPreset 키 [0] → at(-1)               | 프로브: DETECTED
+O1 rows[openPos[k]] → rows[k]                | 프로브: DETECTED
+O4 groundBand(rect, ratio) → groundBand(rect)| 프로브: DETECTED
 ```
 
-**L3 골든 해시 green 명시.** 구현자 보고 수치(256/3075)와 일치.
+즉 **"둘 다 같은 버그라서 통과"가 아니라 "그 자리를 건드리는 입력이 없어서 통과"** 였다.
+구현은 옳고 봉인만 얕다.
 
 ---
 
-## 9. ★ 못 한 검증 (정직하게)
+## 4. 발견한 결함 목록
 
-1. **브라우저 실렌더 — 못 했다.** 이번 라운드의 **본체**가 그것이다. 내가 댄 근거는
-   "게이트가 `#roi-floor` 하나뿐이고, 그 뒤에 초록 면을 막는 조건이 없으며, 강제 ON 이 렌더보다 먼저다"
-   라는 **코드 전수 확인**까지다. 실제 픽셀은 보지 못했다. → **마스터 육안 1순위 유지.**
-2. **3점 예고 점선이 사용자 눈에 "닫힘"으로 읽히는가** — 캔버스 명령 발행은 증명했지만
-   시인성(점선 4/4px, 노랑 #ffd60a, 배경 대비)은 화면 없이 판단 불가.
-3. **`confirm()` 다이얼로그 실동작 · 버튼 클릭 · 2행 레이아웃 줄바꿈** — DOM 없이 실행 불가. 미검증.
-   (id 중복 0 · 결선 존재 · title/문구는 텍스트로 확인.)
-4. **실서버 왕복(PUT → 파일 쓰기 → GET 재로딩)** — 서버를 띄우지 않았다.
-   대신 `applyPlaceRoiUpdateEx` + `normalizePtzCamRoi` 를 **직접 실행**해 빈 배열 PUT 성립과
-   재로딩 정합·R3 이월 사실까지 확인했다(§4 C-5). HTTP 계층·파일 I/O 는 미검증.
-5. **별건 관찰(실카 자동ROI 격자 스케일)** — 지시대로 손대지 않았다.
+### D-1 (중) `setup.slot.add`/`delete` 의 `artifact` 버퍼가 **파일 전체를 대체**한다 — 미고지
+
+**재현(실행 출력 그대로)**
+```
+파일 슬롯 수: 2 → 2 (status 200, warnings=["DB slot_setup(0) 과 artifact(2) 의 슬롯 수가 다르다 — …"])
+```
+파일에 슬롯 2개(`c1p1s1`,`c1p1s2`)가 있는 상태에서
+`POST /mapping/slot/add {camIdx:1, presetIdx:1, artifact:<c1p1s1 만 든 버퍼>}` (dryRun 미지정)
+→ 기대는 3개(2+1), 실제는 **2개**. **파일의 `c1p1s2` 가 조용히 사라졌다.**
+별도 케이스: `{...ARTIFACT, createdAt:'TAMPERED'}` 를 버퍼로 넣으면 디스크의 `createdAt` 이 `TAMPERED` 가 된다.
+
+**성격**: 리더 결정 Q3 의 설계 그대로다(`artifact` 호출자 버퍼 + `dryRun`). **코딩 버그가 아니다.**
+문제는 **사정거리가 어디에도 적혀 있지 않다**는 것이다:
+- 메서드 이름은 "셋업 산출물에 슬롯 엔트리 **1개 추가**"
+- 카탈로그 `note` 는 "`setup_artifact.json` 만 바꾼다" — 참이지만 "**통째로** 바꿀 수 있다"는 말이 없다
+- `warnings[]` 는 DB 개수 불일치만 알린다. **파일이 N슬롯 → 버퍼 M슬롯으로 대체됐다는 사실은 침묵**
+- 설계서 R12 는 "이번 4건은 파괴 경로에 아예 진입하지 않는다"고 쓰여 있는데, 이는 **DB 에 한해서만** 참이다
+
+**영향**: 웹은 항상 `dryRun:true` 라 안전하다. 위험한 건 **외부 RPC 호출자**다 —
+오래된/부분적인 버퍼를 들고 `setup.slot.add` 를 부르면 그 사이의 편집이 전부 소실된다.
+07-28 "검출·센터링 23→0 wipe" 와 **같은 계열의 사고**가 파일 쪽에 열려 있다.
+(토큰 게이트가 켜져 있으면 무인증 호출은 막히므로 **완화되지만 제거되지는 않는다**.)
+
+**수정 여부**: **안 함**(사양 판단 필요 — 리더 결정 Q3 의 범위).
+**권고**: ①카탈로그 `note` 에 "`artifact` 를 주면 그 버퍼가 파일을 **대체**한다(부분 병합 아님)" 명시
+②`warnings[]` 에 `파일(N슬롯)을 호출자 버퍼(M슬롯)로 대체했다` 추가(개수가 다를 때)
+③문서화 단계에서 R12 문구를 "DB 는 구조적 무위험 / 파일은 호출자 버퍼 책임"으로 정정.
+
+### D-2 (중) 파리티 봉인의 판별력 구멍 6건 — §3 상세
+
+지금 코드는 옳지만 그 6개 자리는 **깨져도 green 이다.** 특히 O4 는 테스트 이름이 검증한다고
+주장하는 것을 실제로는 검증하지 않는다(공허한 테스트).
+
+**수정 여부**: **안 함**(테스트 추가는 "명백한 버그 수정"이 아니라고 판단 — 저장소를 시작 상태로 되돌렸다).
+**권고**: 아래 6개 케이스를 각 파리티 파일에 추가하면 6건 전부 봉인된다. 전부 무변이 상태에서 green 임을 확인했고,
+각 변이를 다시 넣으면 실패함도 확인했다.
+
+```ts
+// ── test/occupancyJudgeParity.test.ts 에 추가 ──────────────────────────
+// O1: 1단계가 앞 슬롯을 먹고 2단계 폴백이 뒤 슬롯을 채운다 → openPos 사영이 항등이 아니다.
+it('1단계 bbox=slot1 + 2단계 plate=slot2 (openPos 사영 봉인)', () => {
+  const rows = parity(FLOORS, { plates: [plateAt(0.6, 0.2)], vehicles: [{ rect: R_IN_S1 }] });
+  expect(rows.map((r) => r.source)).toEqual(['bbox', 'plate']); // 사영이 무너지면 여기서 갈린다
+});
+
+// O4: 폴리곤이 rect 의 y 범위를 **부분만** 덮어야 groundBandRatio 가 결과를 바꾼다.
+//     기존 3개 오버라이드 테스트는 폴리곤이 y 를 전부 덮어 ratio 에 둔감했다.
+describe('groundBandRatio 가 실제로 결과를 바꾸는 기하', () => {
+  const PARTIAL = [{ idx: 1, quad: floorQuad(0.0, 0.30, 0.4, 0.40) }];
+  const R = { x: 0.05, y: 0.0, w: 0.25, h: 0.35 };
+  it('ratio 1.0 과 기본값이 서로 다른 답을 낸다(민감도 자체 확인)', () => {
+    expect(srvJudge(PARTIAL, { vehicles: [{ rect: R }] }, { groundBandRatio: 1.0 })[0].occupied)
+      .not.toBe(srvJudge(PARTIAL, { vehicles: [{ rect: R }] })[0].occupied);
+  });
+  it('web ↔ src 일치(ratio 1.0)', () => {
+    parity(PARTIAL, { vehicles: [{ rect: R }] }, { groundBandRatio: 1.0 });
+  });
+});
+
+// ── test/touringPlanParity.test.ts 에 추가 ────────────────────────────
+it('centering 내부 값만 null(부분 결손)', () => {                                   // T3
+  const input = { slots: [{ slotId: 1, camId: 1, presetId: 1, presetSlotIdx: 1,
+    centering: { pan: 1, tilt: 1, zoom: null } }] };
+  expectParity(input);
+  expect(srcPlan(input).skipped).toBe(1);
+});
+it('presetSlotIdx 가 null 과 숫자로 섞인 그룹(정렬 기본값 봉인)', () => {            // T5
+  const input = { slots: [
+    { slotId: 1, camId: 1, presetId: 1, presetSlotIdx: 5,    centering: { pan: 1, tilt: 1, zoom: 1 } },
+    { slotId: 2, camId: 1, presetId: 1, presetSlotIdx: null, centering: { pan: 2, tilt: 2, zoom: 2 } },
+  ] };
+  expectParity(input);
+  expect(srcPlan(input).steps.filter((x) => x.kind === 'slot').map((x) => x.slotId)).toEqual([2, 1]);
+});
+
+// ── test/artifactSlotEditParity.test.ts 에 추가 ───────────────────────
+it('다중 카메라 — preset 정렬은 camIdx 가 우선(cam1p2 < cam2p1)', () => {            // S4
+  const slots = [
+    { slotId: 'c1p2s1', zone: 'cam1', roiByPreset: { '1:2': { x: .1, y: .1, w: .2, h: .2 } } },
+    { slotId: 'c2p1s1', zone: 'cam2', roiByPreset: { '2:1': { x: .1, y: .1, w: .2, h: .2 } } },
+  ] as ParkingSlot[];
+  const presets = [
+    { camIdx: 1, presetIdx: 2, label: '1:2', coveredSlotIds: ['c1p2s1'] },
+    { camIdx: 2, presetIdx: 1, label: '2:1', coveredSlotIds: ['c2p1s1'] },
+  ] as Preset[];
+  const s = srcRebuildGlobalIndex(slots, presets);
+  expect(s).toEqual(webRebuildGlobalIndex(slots as never, presets as never));
+  expect(s.map((g) => g.slotId)).toEqual(['c1p2s1', 'c2p1s1']);
+});
+it('roiByPreset 키가 2개인 슬롯 → **첫** 키로 preset 귀속', () => {                  // S6
+  const dual = { slotId: 'c1p1s3', zone: 'cam1', roiByPreset: {
+    '1:1': { x: .4, y: .4, w: .1, h: .1 }, '2:7': { x: .5, y: .5, w: .1, h: .1 } } } as ParkingSlot;
+  const [w, s] = pair((a) => webInsertSlotAt(a, 2, dual as never), (a) => srcInsertSlotAt(a, 2, dual));
+  expect(s).toEqual(w);
+  expect(s.globalIndex!.find((g) => g.slotId === 'c1p1s3'))
+    .toEqual({ globalIdx: 2, slotId: 'c1p1s3', camIdx: 1, presetIdx: 1 });
+});
+```
+
+### D-3 (하) 무인증 카메라 이동 라우트는 **1개가 아니라 2개**다 — 고지 누락
+
+리더 지시문 · 설계서 §7 Q1 · `controlGate.ts:20-24` 주석은 전부 **`POST /capture/detect` 하나**만
+"읽기 선언인데 카메라를 물리 이동시킨다"는 모순으로 적고 있다. 실제로는 하나 더 있다:
+
+```
+src/rpc/methods.ts:236-244   place.align.estimate   mutating:false, requiresCamera:true
+src/api/captureRoutes.ts:1113   const cur = await camera.requestImage(cam, preset);   // ← 프리셋 적용 = 물리 이동
+```
+`POST /capture/autocorrect` 는 `READONLY_POST_PATHS` 에 있어 **무토큰으로 카메라를 돌릴 수 있다.**
+(나머지 면제 2개는 확인 결과 실제로 부작용 0 — `/capture/place-roi/validate` 는 순수 판정,
+`/capture/ground-grid/bootstrap` 은 파일 읽기 + `planAutoRoi` 계산뿐이고 파일을 쓰지 않는다.)
+
+**성격**: 이번 변경이 만든 것이 아니라 **사전 존재 계약**이다(카탈로그 `mutating:false`).
+리더 Q1(a) "현행 유지"의 범위에 이것도 포함되지만, **명시되지 않아 은닉처럼 보인다.**
+**수정 여부**: **안 함**(카탈로그 계약 변경은 범위 밖 — Q1(a) 결정 그대로).
+**권고**: `controlGate.ts` 주석과 문서의 "알려진 한계"에 `/capture/autocorrect` 를 **함께** 적을 것.
+
+### D-4 (하) `config/tools.config.json` 에 라이브 테스트 값이 남아 있다
+
+```diff
+-    "port": 13020,          →  "port": 13021,
+-    "controlToken": ""      →  "controlToken": "LIVETEST"
+```
+워킹트리에 커밋되지 않은 채 남아 있다(**검증 착수 시점부터 존재** — 내가 만든 것이 아니다).
+이대로 커밋되면 **배포에 토큰이 켜진 채로 나간다.** MCP(`src/mcp/server.ts:34`)는 같은 config 를
+읽으므로 값이 맞으면 동작하지만, 다른 config 를 읽는 호출자는 전부 403 이 된다(설계 R4 경고 그대로).
+**수정 여부**: **안 함**(마스터 소유 파일 — 판단 요청). 커밋 전 원복 여부를 결정할 것.
+
+### D-5 (하) 순수 판정 라우트가 capture 잡 의존성에 묶여 있다
+
+`POST /capture/slots/judge-occupancy` 는 카메라·DB·파일을 전혀 만지지 않는 순수 계산인데
+`registerSlotRoutes`(captureRoutes.ts:490) → `registerCaptureRoutes` 안에 있어,
+`captureJob && finalizer && sqlite && capture` **4개가 전부 주입돼야** 등록된다.
+최소 헤드리스 구성에서 `slot.occupancy.evaluate` 가 `-32004 UNAVAILABLE` 로 나온다(내 프로브에서 실제 재현).
+`src/index.ts` 는 항상 4개를 주입하므로 **실운영 영향은 0**이다. 설계 일관성 관점의 기록.
+**수정 여부**: **안 함**(외과적 변경 원칙 — 라우트 이동은 `rpcParity` `known` 목록·T4 검사에 파급).
+
+### D-6 (하·표시) `addSlot` 의 warnings 표시가 직전 문구에 이어붙는다
+
+```js
+// web/app.js:1512
+if (msg && (data.warnings ?? []).length) msg.textContent = `${msg.textContent} — ${data.warnings.join(' / ')}`;
+```
+성공 시 `#map-msg` 에 새 문구를 설정하지 않으므로, `msg.textContent` 는 **직전에 남아 있던 아무 문구**다
+(예: `"표시된 산출물 없음 — DB slot_setup(0) 과 …"`). 반복 호출 시 계속 길어진다.
+**수정 여부**: **안 함**(문구는 UX 판단 — 마스터/설계자 소유). 1줄 수정으로 해소 가능(`msg.textContent = data.warnings.join(' / ')`).
+
+### D-7 (정보) 테스트 부산물 `x.json` 이 워크트리 루트에 생성된다
+
+`npx vitest run` 마다 워크트리 루트에 `x.json`(`{"createdAt":"T","items":[]}`)이 생긴다.
+출처는 `test/jobFrameReset.test.ts:38,110` 의 `outFile: 'x.json'`(상대경로 → cwd).
+**사전 존재**이며 이번 변경과 무관. 삭제해도 다음 실행에 재생성된다. `.gitignore` 대상 후보.
 
 ---
 
-## 10. 최종 판정
+## 5. 검증하지 못한 항목 (정직 기록)
 
-| 항목 | 판정 |
-|---|---|
-| (A) `#roi-floor` 강제 ON 본체 | **코드로 성립 확정 / 화면 미확인** — 게이트 1개, 3진입점 전부, 순서 전부 선행 |
-| (B) 3점 닫힘 예고 · 4점 도달 불가 | ✅ **독립 실행 재현 완료**, 1·2점 회귀 0 |
-| (C) 초기화 / 전체삭제 / idx 정합 | ✅ 실행 증명(랜덤 500 포함). 단 **되돌리기는 전체삭제만 복구**(F-1) |
-| (D) 자가신고 D-1 · D-2 | ✅ **둘 다 사실. 승인** |
-| (E) 회귀 | ✅ 캔버스 0건 · 목록 UI 무변경 · 무변경 목표 7/8 + 1건은 이전 라운드분 |
-| (F) tsc / vitest / 골든 해시 | ✅ 0 에러 · 256 files / 3075 tests · 골든 green |
+1. **라이브 브라우저 육안 확인 미수행.** 서버를 띄워 실제 버튼을 눌러보지 않았다. 따라서 다음은 **미검증**이다:
+   - `localStorage['pa.viewerToken']` 실제 영속 + `#viewer-token` 입력 반응 (정적 문자열 단정으로만 확인)
+   - 순회 중 화면이 프리셋을 따라가는지(`syncTouringPreset`), 완료 모달 문구
+   - 점유 오버레이 원·사다리꼴·뱃지가 서버 판정으로도 **픽셀 동일**한지
+   - 슬롯 추가 → Ctrl+드래그 배치 → 저장 2단계 UX 의 실제 체감
+   대체 검증: shape 교차비교(§항목7) + 정적 봉인 + `app.inject` 상태코드. **육안이 최종 확정이다.**
 
-**병합 가능 판정: 조건부 승인.** 기능·정합·회귀는 통과했다. 남은 것은
-(ㄱ) **마스터 육안으로 초록 면 표시 확인**(본체), (ㄴ) **F-1 처리 방침 결정**(문구 보강만으로도 가능),
-(ㄷ) F-2·F-3·R3 을 문서에 명시. F-1~F-3 은 모두 **이번 라운드가 만든 새 위험이 아니라 기존 성질의 노출**이다.
+2. **실제 카메라/VPD/LPD 연동 스모크 미수행.** 전부 fake 주입이다.
+   `TourJob` 이 실제 PTZ 장비에서 의도한 위치로 가는지, `requestImage` 프리셋 폴백이 실기에서 동작하는지 미확정.
 
-### 검증에 쓴 임시 산출물
+3. **동시성 미검증.** 순회 중 다른 잡 시작, 웹 다중 탭 동시 슬롯편집(**D-1 이 현실화되는 시나리오**),
+   `dryRun` 버퍼와 파일의 경쟁 갱신 — 전부 단일 순차 호출로만 확인했다.
 
-- `qa_render.mjs` · `qa_clear.mjs` · `qa_off.mjs` — scratchpad(프로젝트 외부). 저장소 무오염.
-- `test/__qa_tmp_emptyput.test.ts` — 검증 후 **삭제 완료**(`git status -- SettingAgent/test` 로 잔존 0 확인).
-- `data/` **무접촉** — `PtzCamRoi.json` mtime `13:16:30` 불변, md5 `67a09455b07e48e7a5fb78c494a0c63c`.
+4. **성능(설계 R7) 미측정.** "리드로 → 데이터 변경점"으로 호출을 줄인 효과와
+   `frames[]` 배치 왕복 지연을 실측하지 않았다. 프리셋 수가 많을 때의 체감은 라이브에서만 나온다.
+
+5. **사전 실패 2건 무접촉.** `roiDbLoad`·`placeRoiRuntimeInvariants` 는 지시대로 읽지도 고치지도 않았다.
+   상태 변화 없음(§1.1 = §1.2).
+
+6. **파리티 변이는 17건이 전부다.** 전수 변이(mutation testing 완전판)를 돌린 것이 아니므로,
+   §3 에서 "DETECTED" 로 나온 자리 외에도 봉인이 얕은 곳이 더 있을 수 있다.
+   측정한 범위에서 6개 구멍이 나왔다는 사실 자체가 **더 있을 가능성**을 시사한다.
+
+7. **`TourJob` 의 실패 흡수·stop 경합은 구현자 테스트(`tourJob.test.ts`)에 의존했다.**
+   내가 독립 재현한 것은 라우트·RPC 표면(상태코드·오류코드)까지이고, 잡 내부 상태머신은 재검증하지 않았다.
+
+---
+
+## 6. 구현자·문서화 인계
+
+- **구현자에게 재실행 요청 없음** — 실패한 테스트도, 고쳐야 할 명백한 버그도 발견하지 못했다.
+  D-1·D-2 는 **리더/설계자 판단 사항**이라 반려하지 않고 보고만 한다.
+- **문서화(04)에 반드시 반영할 것**:
+  - D-1 의 `artifact` 버퍼 사정거리(문서에 "슬롯 1개 추가"로만 적으면 사고가 난다)
+  - D-3 의 무인증 카메라 이동 라우트 **2개**(`/capture/detect` + `/capture/autocorrect`) — 은닉 금지
+  - 설계서 R12 문구를 "DB 무위험 / artifact 파일은 호출자 버퍼 책임"으로 정정
+  - `GET /rpc/catalog` **70 → 76** 확정(실측 `count = 76`)
+- **커밋 전 확인**: D-4(`config/tools.config.json` 의 `controlToken:"LIVETEST"` · `port:13021`).
+
+---
+
+# 7. 봉인 영구 편입 (리더 지시 후속 · 2026-07-28)
+
+**지시**: D-2 의 구멍 6건을 임시 프로브로 버리지 말고 대응 파리티 파일에 정식 케이스로 추가하고,
+영구 파일 위에서 변이를 재주입해 FAIL 을 실증할 것. 기존 케이스 무수정. 의미상 등가 1건(O2)은 제외.
+
+## 7.1 추가한 케이스 목록 (기존 케이스 **무수정** · 추가만)
+
+| 파일 | 추가한 describe / it | 잡는 변이 | 왜 기존 케이스로는 못 잡았나 |
+|---|---|---|---|
+| `test/touringPlanParity.test.ts` | `봉인 강화(음성 대조로 발견한 구멍)` → **`centering 내부 값만 null(부분 결손) — null 과 undefined 를 구분한다`** | `c.pan/tilt/zoom != null` → `!== undefined` | 기존 `부분 결손(zoom 누락)` 은 zoom 이 **undefined** 라 두 식이 같은 답을 낸다. **명시적 null** 이어야 갈린다 |
+| 〃 | **`presetSlotIdx 가 null 과 숫자로 섞인 그룹 — 정렬 기본값(0)이 순서를 결정한다`** | 정렬 tie-break `(presetSlotIdx ?? 0)` 의 기본값 변경 | 기존 `presetSlotIdx=null 동률` 은 **둘 다 null** 이라 기본값이 무엇이든 순서가 같다 |
+| `test/artifactSlotEditParity.test.ts` | `봉인 강화(음성 대조로 발견한 구멍)` → **`다중 카메라 — preset 정렬은 camIdx 가 presetIdx 보다 우선(cam1p2 < cam2p1)`** | `rebuildGlobalIndex` 의 preset 정렬 `camIdx → presetIdx` 순서 뒤바꿈 | `sampleArtifact()` 가 **단일 카메라**(1:1, 1:2)라 두 정렬이 같은 답을 낸다 |
+| 〃 | **`roiByPreset 키가 2개인 슬롯 — 첫 키로 preset 을 귀속한다`** | `insertSlotAt` 의 `Object.keys(roiByPreset)[0]` → 다른 키 선택 | 기존 신규 슬롯의 `roiByPreset` 키가 **항상 1개**(또는 0개)라 어느 키를 골라도 같다 |
+| `test/occupancyJudgeParity.test.ts` | `봉인 강화(음성 대조로 발견한 구멍)` → **`1단계 bbox=slot1 + 2단계 plate=slot2 — openPos 사영이 항등이 아닌 조합`** | 2단계 폴백 사영 `rows[openPos[k]]` → `rows[k]` | T1~T9 는 전부 `openPos` 가 **항등 사영**이었다(1단계 점유가 없거나, 점유가 뒤 슬롯이라 `openPos[0]===0`) |
+| 〃 | `groundBandRatio 가 실제로 결과를 바꾸는 기하(폴리곤이 rect y범위를 부분만 덮음)` → **`민감도 자체 확인 — ratio 1.0 과 기본값(0.25)이 서로 다른 답을 낸다`** + **`web ↔ src 일치(ratio 1.0 / 0.05 / 기본값)`** | `groundBand(rect, groundBandRatio)` → `groundBand(rect)` (cfg 오버라이드 무시) | 기존 `cfg 오버라이드` 3건은 **폴리곤이 rect 의 y 범위를 전부 덮어** 밴드의 y 위치·높이가 겹침 비율에 영향을 주지 않는 기하다 — **ratio 가 무시돼도 같은 답이 나온다** |
+
+**합계 +7 케이스**(it 기준): touringPlan +2 · artifactSlotEdit +2 · occupancyJudge +3.
+모든 it 에 **"잡는 변이"를 주석 1~2줄로 명시**했다(§9.2 규약 — 다음 사람이 이 케이스를 지워도 되는지 판단할 근거).
+각 describe 머리말에 "지우면 그 변이가 green 으로 통과하게 된다"를 못 박았다.
+
+### O4 를 별도로 다룬 이유 (리더 요건 4)
+
+기존 3개 케이스는 이름이 `groundBandRatio 오버라이드` 인데 **그 오버라이드가 무시돼도 통과**했다 —
+**이름이 거짓말을 하는 테스트**다. 지시대로 **기존 3개는 지우지 않고** 새 describe 를 추가했으며,
+새 기하가 진짜로 ratio 에 민감한지를 **테스트 안에서 스스로 단정**하게 만들었다:
+
+```ts
+it('민감도 자체 확인 — ratio 1.0 과 기본값(0.25)이 서로 다른 답을 낸다', () => {
+  // 이 단정이 깨지면 아래 파리티 케이스가 다시 "ratio 에 둔감한 기하"로 퇴화한 것이다.
+  const wide = srvJudge(PARTIAL, { vehicles: [{ rect: R }] }, { groundBandRatio: 1.0 });
+  const base = srvJudge(PARTIAL, { vehicles: [{ rect: R }] });
+  expect(wide[0].occupied).not.toBe(base[0].occupied);
+});
+```
+`PARTIAL` = 폴리곤이 y `0.30~0.40` 만 덮음 / `R` = rect y `0~0.35`.
+→ ratio 1.0 이면 밴드 y `0~0.35`, 기본 0.25 면 밴드 y `0.2625~0.35` 라 겹침 비율이 실제로 갈린다.
+**이 가드가 있으면 "둔감한 기하로 퇴화" 자체가 다시는 조용히 일어날 수 없다.**
+
+## 7.2 ★ 재주입 FAIL 실증 (영구 파일 위에서 · 실행 출력 그대로)
+
+```
+T3 `c.zoom != null` → `c.zoom !== undefined`   | FAIL 1건 | centering 내부 값만 null(부분 결손) — null 과 undefined 를 구분한다
+T5 정렬 기본값 `(presetSlotIdx ?? 0)` → `?? 999` | FAIL 1건 | presetSlotIdx 가 null 과 숫자로 섞인 그룹 — 정렬 기본값(0)이 순서를 결정한다
+S4 preset 정렬 `camIdx↔presetIdx` 뒤바꿈        | FAIL 1건 | 다중 카메라 — preset 정렬은 camIdx 가 presetIdx 보다 우선(cam1p2 < cam2p1)
+S6 roiByPreset 키 `[0]` → `.at(-1)`            | FAIL 1건 | roiByPreset 키가 2개인 슬롯 — **첫** 키로 preset 을 귀속한다
+O1 폴백 사영 `rows[openPos[k]]` → `rows[k]`     | FAIL 1건 | 1단계 bbox=slot1 + 2단계 plate=slot2 — openPos 사영이 항등이 아닌 조합
+O4 `groundBand(rect, ratio)` → `groundBand(rect)` | FAIL 2건 | groundBandRatio 가 실제로 결과를 바꾸는 기하 > 민감도 자체 확인 — ratio 1.0 과 기본값(0.25)이 서로 다른 답을 낸다
+                                                            / groundBandRatio 가 실제로 결과를 바꾸는 기하 > web ↔ src 일치(ratio 1.0 / 0.05 / 기본값)
+```
+
+**6건 전부 FAIL.** 그리고 결정적으로 — **실패한 it 이름이 전부 이번에 추가한 케이스다.**
+기존 케이스는 단 하나도 실패하지 않았다. 즉 "새 케이스가 실제로 잡는 주체"임이 이름 단위로 증명됐다
+(기존 케이스가 우연히 같이 잡은 것이 아니다).
+
+O4 만 2건인 이유: 민감도 가드와 파리티 케이스가 **둘 다** 걸린다 — 오버라이드가 무시되면
+①두 ratio 가 같은 답을 내서 민감도 단정이 깨지고 ②web(오버라이드 반영) vs src(무시)가 갈린다.
+
+**변이 원복 확인**(구현 3파일 md5 — 변이 주입 전 기록값과 동일):
+```
+5c28bf09e6df2c665c75eee711ca9414  src/setup/touringPlan.ts
+fa2c69736933a06e0dcdb28313b5cdc4  src/setup/artifactSlotEdit.ts
+7be80e71cc6edf6918cff3c07bc92a0d  src/domain/occupancyJudge.ts
+```
+
+## 7.3 회귀 확인
+
+```
+$ npx tsc --noEmit
+TSC_EXIT=0
+
+$ npx vitest run          (연속 2회 — 동일)
+ Test Files  2 failed | 272 passed (274)
+      Tests  2 failed | 3452 passed (3454)
+```
+- 사전 실패는 **여전히 2건**(`placeRoiRuntimeInvariants` · `roiDbLoad`) — 무접촉 유지.
+- **회귀 0.** 실패한 테스트 파일이 늘지 않았고, 기존 단정값을 하나도 수정하지 않았다.
+- 파리티 3파일 개별 실행: `touringPlanParity 19` · `artifactSlotEditParity 21` · `occupancyJudgeParity 35` = **75 passed**.
+
+**테스트 수 증가 회계** — 기준선 3436 → **3452 (+16)**
+| 출처 | 증가 | 비고 |
+|---|---|---|
+| **내 봉인 편입** | **+7** | touringPlan +2 · artifactSlotEdit +2 · occupancyJudge +3 |
+| W4 의 D-1 가드 회귀 테스트 | +9 | `mappingSlotRoutes.test.ts` 27건 등. 리더가 별도 지시한 동시 작업 — 내가 만든 것이 아니다 |
+
+> ⚠ 검증 중 한 번 `3 failed / 3451 passed` 가 관측됐으나 **일시적 현상**이었다.
+> W4 가 `src/api/server.ts`·`test/mappingSlotRoutes.test.ts` 를 **쓰는 도중**에 내 전체 실행이 겹친 것이다.
+> W4 편집 완료 후 **연속 2회 모두 `2 failed / 3452 passed`** 로 안정. 내 편입과 무관함을 확인했다.
+
+## 7.4 제외한 1건과 그 근거 (지시대로 추가하지 않음)
+
+**O2 — 임계 경계 `bestRatio >= minBandOverlap` → `>`.**
+추가하지 않았다. 이유:
+- 이 변이가 답을 바꾸려면 `convexIntersectionArea(corners, quad) / bandArea` 가 임계값
+  (기본 `ON_PLACE_MIN_OVERLAP = 0.15`)과 **비트 단위로 정확히** 같아야 한다.
+- 그 값은 클리핑 다각형 면적 나눗셈의 결과라 **입력을 역산해 정확한 동률을 만들 수 없다**
+  (구현자가 `R_STRADDLE_TIE` 로 시도했으나 두 슬롯의 클리핑 경로가 달라 비트동일이 나오지 않았다 — `02c` 기록).
+- 설령 만든다 해도 **web·src 가 같은 식**이라 두 구현이 갈릴 수 없다. 파리티(=web↔src 동일성)로는
+  원리적으로 검출 불가능한 자리다.
+- 즉 **통과할 수 없는 케이스를 만드는 셈**이며, 억지로 만들면 부동소수 우연에 기대는 취약한 테스트가 된다.
+
+기존 `occupancyJudge.test.ts:97` 의 주석("부동소수상 정확 동률은 실측 발생 확률 0")과 같은 판단이며,
+구현자가 `02c` 에서 tie-break `>`/`>=` 를 미검출로 정직 기록한 것과 **동일 계열**이다.
+
+## 7.5 §3 결과표 갱신
+
+§3 의 "미검출 7건" 중 **6건은 이제 봉인됐다.** 갱신된 상태:
+
+| 변이 | §3 당시 | 현재 |
+|---|---|---|
+| T3 · T5 · S4 · S6 · O1 · O4 | 미검출(구멍) | **DETECTED**(영구 케이스로 봉인, §7.2 실증) |
+| O2 | 미검출(의미상 등가) | 그대로 — **원리적 검출 불가**(§7.4) |
+| 나머지 10건 | DETECTED | 그대로 |
+
+→ **파리티 3종의 판별력: 17건 중 16 검출 / 1 원리적 불가.**
+"구현은 옳고 봉인만 얕다"였던 상태에서 **봉인도 옳은 상태**로 올라왔다.
+
+## 7.6 이번 후속 작업에서 하지 않은 것 (중복 방지 · 리더 지시대로)
+
+- **D-1 가드 구현·회귀 테스트**: W4 담당(내 재현 케이스 인계 완료). 확인 결과 `server.ts:508-525` 에
+  `rejectBufferCommit`(= `artifact` 를 `dryRun:true` 없이 주면 409)이 들어와 있고 `mappingSlotRoutes` 27건 green.
+  **내가 다시 검증하지 않았다** — 리더 지시(중복 금지). 독립 재검증이 필요하면 별도 지시를 달라.
+- **D-3 문서·주석 명시**: 문서화 담당. 코드 변경 없음(Q1 일관성).
+- **D-4 config 원복**: 리더 본인이 처리.

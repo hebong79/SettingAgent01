@@ -14,24 +14,28 @@ import type { ToolsConfig } from '../config/toolsConfig.js';
 import type { CaptureJob } from '../capture/CaptureJob.js';
 import type { Finalizer } from '../capture/Finalizer.js';
 import type { SqliteStore } from '../capture/SqliteStore.js';
+import { registerControlTokenGate } from './controlGate.js';
 import { registerCaptureRoutes } from './captureRoutes.js';
 import { registerCalibrateRoutes } from './calibrateRoutes.js';
 import { registerGroundGridRoutes } from './groundGridRoutes.js';
 import { registerDiscoverRoutes } from './discoverRoutes.js';
 import { registerLensCalibRoutes } from './lensCalibRoutes.js';
+import { registerTourRoutes } from './tourRoutes.js';
 import { registerSettingsRoutes } from './settingsRoutes.js';
 import { registerDbRoutes } from './dbRoutes.js';
 import { DEFAULT_SETTINGS_PATHS, type SettingsPaths } from '../config/settingsStore.js';
 import type { PtzCalibrator } from '../calibrate/PtzCalibrator.js';
 import type { PlateDiscoveryJob } from '../calibrate/PlateDiscoveryJob.js';
 import type { LensCalibrationJob } from '../calibrate/LensCalibrationJob.js';
+import type { TourJob } from '../capture/TourJob.js';
 import type { SetupPipeline } from '../pipeline/SetupPipeline.js';
 import { registerViewerRoutes } from '../viewer/routes.js';
 import { registerRpcRoutes } from '../rpc/routes.js';
 import type { CameraSource } from '../viewer/CameraSource.js';
 import { validateArtifactBody } from './artifactSchema.js';
 import { buildArtifactFromSlotSetup } from '../setup/artifactFromSlotSetup.js';
-import type { SetupArtifact } from '../domain/types.js';
+import { insertSlotAt, nextSlotId, removeSlot } from '../setup/artifactSlotEdit.js';
+import type { ParkingSlot, SetupArtifact } from '../domain/types.js';
 import type { SaveStore } from '../store/SaveStore.js';
 import type { CRpcClient } from '../clients/CRpcClient.js';
 import { validateRenumberMapping } from '../setup/renumberMapping.js';
@@ -72,6 +76,40 @@ const PlacementBodySchema = z.object({
     )
     .min(1),
 });
+
+/**
+ * 슬롯편집 본문(POST /mapping/slot/add · /mapping/slot/delete).
+ *
+ * `artifact` = **호출자 버퍼**(웹의 메모리 편집본). 미제공이면 서버가 data/setup_artifact.json 을 읽는다.
+ * `dryRun` = true 면 편집 결과만 반환하고 **파일을 절대 쓰지 않는다**(웹의 "추가 → 배치 → 저장" 2단계 UX 보존).
+ * 기본은 false — 외부 RPC 호출자는 한 번의 호출로 커밋된다.
+ *
+ * ★ `artifact` 는 **계산 전용**이다 — `dryRun:true` 없이 주면 409 로 거부한다(`rejectBufferCommit`, D-1).
+ *   버퍼를 받아 저장까지 하면 "슬롯 1개 추가"가 실제로는 파일 전체 교체가 되기 때문이다.
+ *
+ * 버퍼의 구조 검증은 여기서 하지 않는다("객체인가"만 본다) — 최종 판정은 편집 **후** `validateArtifactBody`
+ * 하나가 소유한다(스키마를 두 벌 쓰지 않는다).
+ */
+const CallerArtifactSchema = z.object({}).passthrough();
+
+const SlotAddBodySchema = z.object({
+  camIdx: z.number().int().positive(),
+  presetIdx: z.number().int().positive(),
+  at: z.number().int().positive().optional(),
+  rect: z.object({ x: z.number(), y: z.number(), w: z.number(), h: z.number() }).optional(),
+  zone: z.string().optional(),
+  artifact: CallerArtifactSchema.optional(),
+  dryRun: z.boolean().optional(),
+});
+
+const SlotDeleteBodySchema = z.object({
+  slotId: z.string().min(1),
+  artifact: CallerArtifactSchema.optional(),
+  dryRun: z.boolean().optional(),
+});
+
+/** 신규 슬롯 기본 rect(화면 중앙 소형) — web/app.js:addSlot 이 갖고 있던 값을 **서버가 소유**한다. */
+const DEFAULT_SLOT_RECT = { x: 0.45, y: 0.45, w: 0.1, h: 0.1 } as const;
 
 /**
  * PUT /mapping 공유 핸들러(헤드리스·뷰어 동일 로직).
@@ -132,6 +170,8 @@ export interface ApiDeps {
   lensCalib?: LensCalibrationJob;
   /** 렌즈 보정표 정본 경로(POST /calibrate/lens/apply 대상) + 결과 전문 디렉터리. */
   lensCalibPaths?: { calibFile: string; resultDir: string };
+  /** 셋업 결과 순회 잡(/capture/tour/*). 미주입 시 미등록(가산 → RPC 는 -32004 UNAVAILABLE). */
+  tourJob?: TourJob;
   /** 원버튼 셋업 파이프라인(옵셔널·가산). 주입 시 /capture/start autoChain 배선 + GET /capture/pipeline. */
   pipeline?: SetupPipeline;
   /** 웹 뷰어 설정. enabled=true && sources 주입 시에만 뷰어 라우트·정적 등록(헤드리스 보존). */
@@ -160,6 +200,10 @@ export interface ApiDeps {
  */
 export function buildServer(deps: ApiDeps): FastifyInstance {
   const app = Fastify({ logger: false });
+
+  // 변이 게이트(전역 onRequest) — 이후 등록되는 capture/calibrate/discover/rpc/뷰어 캡슐 전부에 적용된다.
+  // controlToken 이 빈 값이면 훅 자체가 달리지 않는다(현행 동작 보존).
+  registerControlTokenGate(app, deps.viewer);
 
   /**
    * 매핑 소스 결정: 파일에 slots 가 있으면 파일 우선(수동 PUT /mapping 편집 보존),
@@ -428,6 +472,160 @@ export function buildServer(deps: ApiDeps): FastifyInstance {
 
   app.post('/mapping/placement', async (req, reply) => placementHandler(req.body, reply));
 
+  /**
+   * 슬롯편집 공통 부가정보. `deps.sqlite` 는 **읽기(getSlotSetup)만** 쓴다 — 쓰기 API 호출 0(R12).
+   *
+   * ★ R10: `POST /mapping/renumber`·`/mapping/placement` 는 artifact 를 `buildArtifactFromSlotSetup(DB)` 로
+   *   통째 재생성한다(위 두 핸들러). 그래서 여기서 추가한 슬롯은 그 호출 이후 **사라진다**.
+   *   코드로 막지 않는다(막으면 renumber 가 못 돈다) — 대신 개수 불일치를 warnings 로 알린다.
+   */
+  function slotEditMeta(edited: SetupArtifact, newPresetKey: string | null): { warnings: string[]; dbSlotCount: number | null } {
+    const warnings: string[] = [];
+    if (newPresetKey) {
+      warnings.push(`preset ${newPresetKey} 을 새로 만들었다(PTZ 없음) — 순회·센터라이징 대상이 아니다`);
+    }
+    const dbSlotCount = deps.sqlite ? deps.sqlite.getSlotSetup().length : null;
+    if (dbSlotCount !== null && dbSlotCount !== edited.slots.length) {
+      warnings.push(
+        `DB slot_setup(${dbSlotCount}) 과 artifact(${edited.slots.length}) 의 슬롯 수가 다르다 — ` +
+          'slot.renumber / slot.placement.update 를 호출하면 이 편집은 DB 기준으로 되돌아간다',
+      );
+    }
+    return { warnings, dbSlotCount };
+  }
+
+  /** 편집 대상 artifact 결정: 호출자 버퍼 우선 → 없으면 파일 정본. `resolveMapping()` 은 쓰지 않는다 — DB 폴백 결과를 저장하면 DB 를 파일로 승격시켜 버린다. */
+  function baseArtifact(caller: unknown): SetupArtifact | null {
+    return (caller as SetupArtifact | undefined) ?? deps.repo.loadArtifact();
+  }
+
+  /**
+   * ★ D-1 가드 — `artifact`(호출자 버퍼) + 커밋 조합을 **거부**한다(리더 지시, 2026-07-28).
+   *
+   * 왜: 이 API 는 이름상 "슬롯 1개 추가"지만, 버퍼를 받아 저장까지 하면 실제 사정거리는
+   * **파일 전체 교체**다 — 디스크에 있던 다른 슬롯이 조용히 사라지고 호출자가 준 임의 필드가 그대로 안착한다
+   * (QA 실측: 파일 2슬롯 + 1슬롯 버퍼로 커밋 → 파일이 2슬롯이 되고 `c1p1s2` 소실).
+   * `artifact` 의 존재 이유는 "웹이 미저장 버퍼로 계산만 위임"뿐이고 그건 **항상 dryRun:true** 다.
+   * "버퍼를 편집해 파일에 통째로 쓴다"는 정당한 사용처가 없으며, 있다 해도 그건 artifact 저장 API(`PUT /mapping`)의 일이다.
+   * → 이 조합을 막아도 **기능 손실 0**, 위험만 사라진다.
+   *
+   * 거부는 409(BUSY 단어 미포함) → RPC `-32005 CONFLICT`. 편집·저장 이전 단계라 **파일 무변경**이다.
+   */
+  function rejectBufferCommit(
+    caller: unknown,
+    dryRun: boolean | undefined,
+    reply: { code: (c: number) => void },
+  ): { error: string } | null {
+    if (caller === undefined || dryRun === true) return null;
+    reply.code(409);
+    return {
+      error:
+        'artifact(호출자 버퍼)는 계산 전용이다 — dryRun:true 와 함께만 쓸 수 있다. ' +
+        '파일에 커밋하려면 artifact 를 빼고 호출하라(서버가 디스크 정본을 읽는다). 파일 무변경',
+    };
+  }
+
+  /**
+   * 셋업 산출물에 슬롯 엔트리 1개 추가(web/app.js:addSlot 의 서버 정본).
+   * ★ 이것은 **artifact 편집**이지 주차면(공간) 추가가 아니다 — 실제 주차면 추가는
+   *   `place.space.add`(PtzCamRoi.json) + `slot.roi.sync`(DB 차등 UPDATE) 경로다.
+   * 처리 순서: zod → 편집 → **검증** → (dryRun 아니면) 저장. 검증 실패 시 saveArtifact 미도달 = 파일 무변경(R11).
+   */
+  function slotAddHandler(body: unknown, reply: { code: (c: number) => void }): unknown {
+    const parsed = SlotAddBodySchema.safeParse(body);
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: 'invalid body', detail: parsed.error.flatten() };
+    }
+    const { camIdx, presetIdx, rect, zone, dryRun } = parsed.data;
+    const guard = rejectBufferCommit(parsed.data.artifact, dryRun, reply);
+    if (guard) return guard; // ★ 편집 이전에 끊는다 = 파일 무변경(D-1)
+    const base = baseArtifact(parsed.data.artifact);
+    if (!base) {
+      reply.code(404);
+      return { error: 'no setup artifact' };
+    }
+
+    const key = `${camIdx}:${presetIdx}`;
+    const slotId = nextSlotId(base, camIdx, presetIdx);
+    const newSlot: ParkingSlot = {
+      slotId,
+      zone: zone ?? `cam${camIdx}`,
+      roiByPreset: { [key]: rect ?? { ...DEFAULT_SLOT_RECT } },
+    };
+    const at = parsed.data.at ?? (base.globalIndex?.length ?? 0) + 1; // 미지정 = 맨 끝(insertSlotAt 이 [1,N+1] clamp).
+    const presetExisted = (base.presets ?? []).some((p) => p.camIdx === camIdx && p.presetIdx === presetIdx);
+    const edited = insertSlotAt(base, at, newSlot);
+
+    const v = validateArtifactBody(edited);
+    if (!v.ok) {
+      reply.code(v.code);
+      return v.body; // ★ 파일 무변경
+    }
+    if (dryRun !== true) deps.repo.saveArtifact(v.artifact);
+
+    const meta = slotEditMeta(v.artifact, presetExisted ? null : key);
+    return {
+      ok: true,
+      slotId,
+      globalIdx: v.artifact.globalIndex.find((g) => g.slotId === slotId)?.globalIdx ?? null,
+      slots: v.artifact.slots.length,
+      globalCount: v.artifact.globalIndex.length,
+      saved: dryRun !== true,
+      warnings: meta.warnings,
+      dbSlotCount: meta.dbSlotCount,
+      artifact: v.artifact,
+    };
+  }
+
+  /**
+   * 셋업 산출물에서 슬롯 엔트리 1개 삭제(web/app.js:deleteSelectedSlot 의 서버 정본).
+   * `removeSlot` 은 없는 id 에도 조용히 통과하므로 **사전 존재 확인이 필수**다 → 부재 시 409(파일 무변경).
+   * DB·ROI 정본(PtzCamRoi.json)은 건드리지 않는다.
+   */
+  function slotDeleteHandler(body: unknown, reply: { code: (c: number) => void }): unknown {
+    const parsed = SlotDeleteBodySchema.safeParse(body);
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: 'invalid body', detail: parsed.error.flatten() };
+    }
+    const { slotId, dryRun } = parsed.data;
+    const guard = rejectBufferCommit(parsed.data.artifact, dryRun, reply);
+    if (guard) return guard; // ★ 동일 규약(D-1)
+    const base = baseArtifact(parsed.data.artifact);
+    if (!base) {
+      reply.code(404);
+      return { error: 'no setup artifact' };
+    }
+    if (!(base.slots ?? []).some((s) => s.slotId === slotId)) {
+      reply.code(409); // BUSY 단어 미포함 → RPC CONFLICT(-32005).
+      return { error: `slotId 없음: ${slotId} — 파일 무변경` };
+    }
+
+    const edited = removeSlot(base, slotId);
+    const v = validateArtifactBody(edited);
+    if (!v.ok) {
+      reply.code(v.code);
+      return v.body; // ★ 파일 무변경
+    }
+    if (dryRun !== true) deps.repo.saveArtifact(v.artifact);
+
+    const meta = slotEditMeta(v.artifact, null);
+    return {
+      ok: true,
+      slotId,
+      slots: v.artifact.slots.length,
+      globalCount: v.artifact.globalIndex.length,
+      saved: dryRun !== true,
+      warnings: meta.warnings,
+      dbSlotCount: meta.dbSlotCount,
+      artifact: v.artifact,
+    };
+  }
+
+  app.post('/mapping/slot/add', async (req, reply) => slotAddHandler(req.body, reply));
+  app.post('/mapping/slot/delete', async (req, reply) => slotDeleteHandler(req.body, reply));
+
   // 장기 관측·반복 수집(/capture/*). 의존성 주입 시에만 등록(가산, 기존 라우트 불변).
   if (deps.captureJob && deps.finalizer && deps.sqlite && deps.capture) {
     registerCaptureRoutes(app, {
@@ -482,6 +680,16 @@ export function buildServer(deps: ApiDeps): FastifyInstance {
     registerLensCalibRoutes(app, { job: deps.lensCalib, ...deps.lensCalibPaths });
   }
 
+  // 셋업 결과 순회(/capture/tour/*). 주입 시에만 등록(가산). isBusy 는 라우트 직접 호출의 최종 방어선(R5).
+  if (deps.tourJob) {
+    registerTourRoutes(app, {
+      job: deps.tourJob,
+      sources: deps.sources,
+      cameraCfg: deps.cameraCfg,
+      isBusy: deps.isBusy,
+    });
+  }
+
   // 웹 옵션 페이지(/settings). 결정형 파일 I/O — 항상 등록(가산, 기존 라우트 불변).
   registerSettingsRoutes(app, deps.settingsPaths ?? DEFAULT_SETTINGS_PATHS);
 
@@ -525,6 +733,10 @@ export function buildServer(deps: ApiDeps): FastifyInstance {
       instance.post('/viewer/api/mapping/renumber', async (req, reply) => renumberHandler(req.body, reply));
       // 슬롯 배치 수동 변경(뷰어 컨텍스트). 헤드리스 POST /mapping/placement 와 동일 closure 핸들러 공유.
       instance.post('/viewer/api/mapping/placement', async (req, reply) => placementHandler(req.body, reply));
+      // 슬롯 엔트리 추가·삭제(뷰어 컨텍스트). 헤드리스 POST /mapping/slot/* 와 동일 closure 핸들러 공유
+      // — 웹은 dryRun:true 로 계산만 받고, 영속화는 기존 '저장'(PUT /mapping)이 계속 소유한다.
+      instance.post('/viewer/api/mapping/slot/add', async (req, reply) => slotAddHandler(req.body, reply));
+      instance.post('/viewer/api/mapping/slot/delete', async (req, reply) => slotDeleteHandler(req.body, reply));
       // 카메라 라우트 + 정적 SPA(와일드카드는 내부에서 API 라우트 뒤에 register).
       // rpc(Unity 프록시)·llm(모델 선택기=brain)은 주입 시에만 해당 라우트 등록(가산).
       await registerViewerRoutes(instance, {

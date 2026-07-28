@@ -74,7 +74,8 @@ describe('ROIMaker — 파괴 경로 차단 봉인', () => {
   });
 
   it('roimaker.js 의 DB 반영 경로는 sync-roi 뿐이다', () => {
-    const dbCalls = [...rm.matchAll(/fetch\('(\/capture\/[a-z/-]+)'/g)].map((m) => m[1]!);
+    // 변이 호출은 mutFetch(토큰 부착) 경유이므로 대문자 F 도 함께 센다.
+    const dbCalls = [...rm.matchAll(/[Ff]etch\('(\/capture\/[a-z/-]+)'/g)].map((m) => m[1]!);
     expect(new Set(dbCalls)).toEqual(new Set(['/capture/place-roi', '/capture/slots/sync-roi']));
   });
 

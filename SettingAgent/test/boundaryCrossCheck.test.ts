@@ -136,7 +136,7 @@ describe('경계면 #2: getSlotSetup(SlotSetupView) ↔ 뷰어 buildFlatSlotRows
     const parkingSlotsByKey: Record<string, ReturnType<typeof store.getSlotSetup>> = {};
     for (const r of store.getSlotSetup()) (parkingSlotsByKey[r.presetKey] ??= []).push(r);
 
-    const rows = buildFlatSlotRows({ placeRoi, detectByKey: {}, parkingSlotsByKey });
+    const rows = buildFlatSlotRows({ placeRoi, parkingSlotsByKey });
     // globalIdx 오름차순 1..2(1-based).
     expect(rows.map((r) => r.globalIdx)).toEqual([1, 2]);
     // slot_setup 은 occupied 를 저장하지 않는다 → 뷰어는 vpd 유무로 점유 표시(경계 규약).

@@ -1,248 +1,149 @@
-# 02 구현 결과 — 그리기 렌더 결함 수정 + ROI 초기화/전체삭제
+# 02 구현 변경 내역 — W1(fixture 이관 + 인증 토큰 서버/웹)
 
-작성: 2026-07-28 / 입력: `_workspace/01_architect_plan.md` + `_workspace/00_leader_context.md`(리더 결정 우선)
-검증: `npx tsc --noEmit` **0 에러** · `npx vitest run` **256 파일 / 3075 테스트 전량 통과**(L3 골든 해시 포함)
+작성: 2026-07-28 · 워크트리 `.claude/worktrees/feat-server-promote-4/SettingAgent`
+입력: `_workspace/00_leader_decisions.md`(우선) · `_workspace/01_architect_plan.md` §0·§1·§5(단계1~3)·§6(R1·R2·R4)
+범위: **W1 만**. 투어링(W2)·점유판정(W3)·슬롯편집(W4)은 **한 줄도 건드리지 않았다.**
+(이전 라운드 산출물은 `_workspace_prev_20260728_placedrawfix/02_developer_changes.md` 로 보존돼 있다 — 이 파일은 W1 내용으로 대체.)
 
 ---
 
-## 0. 먼저 — 무엇이 실제로 화면에 그려지는지의 근거
+## 1. 변경 파일 목록
 
-리더 지시대로 "테스트 통과"를 동작 증명으로 삼지 않았다. **배포 소스(`web/app.js`)의 미리보기 렌더 구간을
-문자열로 잘라 그대로 실행**하고, 캔버스 컨텍스트를 기록기로 바꿔 **실제 발행되는 드로잉 명령 시퀀스**를 찍었다
-(복사본이 아니라 shipped 원문 48줄을 `new Function` 으로 실행).
+### 신규(5)
+| 파일 | 내용 |
+|---|---|
+| `test/fixtures/setupResult.23slots.json` | 실데이터 23슬롯 고정입력(원본 `메인폴더/save/setup_result.json` 사본, 18,608B). 원본은 **읽기만** 했다 |
+| `src/api/controlGate.ts` | 전역 변이 게이트(면제목록 + 순수판정 + onRequest 훅 등록) |
+| `test/controlGate.test.ts` | 게이트 19테스트(판정표·무동작·403/200·RPC·드리프트) |
+| `web/token.js` | 토큰 localStorage 보관 + `authHeaders` + `mutFetch` |
+| `test/webTokenWiring.test.ts` | 웹 변이 fetch 정적 봉인 8테스트 |
 
-| 점 수 | 실제 발행된 명령(폴리곤 구간) | 판정 |
+### 수정(6)
+| 파일 | 무엇을 | 왜 |
 |---|---|---|
-| 1점 | `save → beginPath → arc → fill → stroke → fillText("1")` | 변경 전과 **동일**(회귀 0) |
-| 2점 | `beginPath → moveTo → lineTo → stroke` + 점 원 2개 | 변경 전과 **동일**(열린 선 유지) |
-| **3점** | `beginPath → moveTo → lineTo → lineTo → stroke` → **`save → setLineDash([4,4]) → beginPath → moveTo(p3) → lineTo(p1) → stroke → restore`** | **닫힘 예고 점선이 실제로 발행된다** ← 사용자가 체감할 유일한 시각 변화 |
-| 4점 | `... → lineTo → closePath → fill → stroke` | closePath/채움 발행 확인. 다만 **이 경로는 실행 도달 불가**(아래) |
-| 2점+커서 | `setLineDash([5,4]) → moveTo(마지막점) → lineTo(커서) → stroke → setLineDash([])` | 고무줄선 **그대로**(회귀 0) |
+| `test/buildTouringPlan.test.ts` | 읽기 경로 `save/setup_result.json` → `test/fixtures/setupResult.23slots.json`(+사유 주석 2줄) | `save/` 는 `.gitignore` 런타임 산출물 → 워크트리·CI 에서 collect 단계 ENOENT |
+| `src/api/server.ts` | import 1줄 + `buildServer` 최상단 `registerControlTokenGate(app, deps.viewer)` 1줄(주석 2줄) | 훅은 인스턴스 전역 → 이후 등록되는 capture/calibrate/discover/rpc/뷰어 캡슐 전부에 적용 |
+| `web/app.js` | ①`token.js` import ②변이 fetch **32곳** → `mutFetch` ③`tokenHeaders(...)` 4곳 → 평범한 헤더(토큰은 mutFetch 가 붙임) ④지역 `tokenHeaders` 정의 **삭제**(내 변경으로 고아) ⑤`wireControlToken()` 신설 + `init()` 결선 | 게이트를 켠 순간 죽는 31개 버튼을 살린다(R1) |
+| `web/roimaker.js` | import 1줄 + 변이 fetch **3곳** → `mutFetch` | 동일 |
+| `test/roimakerUi.test.ts` | DB 호출 수집 정규식 `fetch\('` → `[Ff]etch\('` (1줄) | `mutFetch` 는 대문자 F — 내 치환이 깨뜨린 정적 단정을 같은 의미로 복구 |
+| `test/slotCuboidRoutes.test.ts` | `fetch('/capture/slots/cuboid'` → `mutFetch('/capture/slots/cuboid'` (1줄) | 동일. 이제 "변이는 토큰 헬퍼 경유"까지 함께 단정한다 |
 
-즉 **이번 수정으로 화면이 실제로 바뀌는 지점은 두 개뿐**이다:
-1. **3점째 점선 닫힘 예고**(위 표에서 실행으로 확인)
-2. **`#roi-floor` 강제 ON 으로 초록 파일 ROI 가 보이게 되는 것** — 이건 실행으로 확인 **못 했다**(§5 미검증).
-
-### ★ 리더 진단 정정을 코드에 명시했다
-`drawPlaceDrawOverlay` 의 `pts.length === 4` 분기에 **도달성 사실을 주석으로 박아 두었다**:
-4점째 클릭은 `placeDrawClick` 에서 렌더를 거치지 않고 같은 동기 블록에서 커밋되고 `endPlaceDraw()` 가
-`state.placeDraw = null` 로 만들기 때문에 **이 분기는 현재 실행되지 않는다**. `closePath()`/채움은
-리더 지시대로 **방어로만** 넣었고, 사용자 체감은 3점 예고선이 만든다.
+### 의도적 무변경(확인함)
+`config/tools.config.json`(**`controlToken:""` 그대로** — 값 무편집) · `src/viewer/routes.ts`(인라인 게이트 4곳 존치) · `src/rpc/methods.ts`(신규 메서드 0 — 토큰은 전송계층 관심사) · `test/roiDbLoad.test.ts` · `test/placeRoiRuntimeInvariants.test.ts`(사전 실패 2건, 무접촉) · `src/mcp/server.ts`(R4 — 이미 `x-viewer-token` 자동 주입).
 
 ---
 
-## 1. 파일별 변경
+## 2. 핵심 구현 노트
 
-| 파일 | 상태 | 변경 |
-|---|---|---|
-| `web/placeDraw.js` | 수정 | `removePlaceSpace` import 추가 + **`clearPresetSpaces` 신규**(순수·DOM 0·throw 0) |
-| `web/placeDraw.d.ts` | 수정 | `clearPresetSpaces` 선언 추가 |
-| `web/index.html` | 수정 | `.roi-edit-bar` **2행 분리** + 버튼 3개(`place-clear`·`place-clear-preset`·`place-undo`). 기존 id·속성·순서 무변경 |
-| `web/app.js` | 수정 | 렌더 수정 · `ensureFloorVisible` 신규 + 3곳 호출 · 신규 함수 3개 · `state.placeRoiUndo` · `renderPlaceSelectionInfo` 동기화 · `savePlaceRoi` 스냅샷 소진 · `wire()` 결선 3줄 · import 1줄 |
-| `test/placeDraw.test.ts` | 수정 | `T8 clearPresetSpaces` describe 4건 추가 |
-| `test/placeDrawWiring.test.ts` | 수정 | S1/S2/S3/S4 봉인 describe 추가(총 +19건) |
+### 2.1 `src/api/controlGate.ts`
+- `READONLY_POST_PATHS` = `/capture/detect` · `/capture/place-roi/validate` · `/capture/ground-grid/bootstrap` · `/capture/autocorrect` (4개). 설계서 예측과 실제 카탈로그가 정확히 일치함을 드리프트 테스트로 확인했다.
+- `SELF_GATED_PATHS` = `/rpc`. 통째로 막으면 `slot.list` 같은 **읽기 RPC 가 토큰을 요구**하게 되어 `rpcDispatch` 계약이 바뀐다.
+- 판정 순서: `GET/HEAD/OPTIONS` 면제 → `/rpc` 면제 → 읽기전용 POST 면제 → **그 외 전부 게이트**(deny-by-default). URL 은 `split('?')[0]`, 메서드는 `toUpperCase()`.
+- `controlToken` 이 빈 문자열이면 `addHook` 자체를 **호출하지 않는다** → 현행 배포에서 코드 경로가 늘지 않는다(회귀 가능성 구조적 0).
+- 403 응답은 기존 인라인 게이트와 **바이트 동일**(`{error:'invalid token'}`) → `mapHttpStatus` 가 RPC `-32006 FORBIDDEN` 으로 접는 경로 불변.
+- **리더 결정 Q1(a) 주석 삽입 완료**: `/capture/detect` 는 "읽기 선언이지만 카메라를 물리 이동시킨다 — 알려진 한계, 별건"을 면제목록 주석에 명시.
 
-**무변경 목표 8파일 전부 무수정 확인**(`git status` 로 확인):
-`groundModel.ts` · `project.ts` · `ground/types.ts` · `floorRoi.ts` · **`web/core.js`** · `Finalizer.ts` · `SqliteStore.ts` · `roiDbLoad.ts`.
-`web/app.css` 도 이번 라운드 무수정. 서버(`src/**`) 무수정.
+### 2.2 드리프트 테스트(이번 단계의 안전장치)
+`test/controlGate.test.ts` 마지막 describe 2개가 **양방향**으로 봉인한다.
+1. `METHODS` 중 `http` 위임이면서 `method !== 'GET'` 인 전부에 대해 `m.mutating === !READONLY_POST_PATHS.has(url)`.
+2. 역방향 — 면제목록의 모든 경로가 실제로 어떤 `mutating:false` 메서드가 쓰는 경로다(고아 면제 금지). `toEqual` 집합 비교.
 
-> ⚠️ `git diff --stat` 에는 `groundModel.ts`·`app.css`·`captureRoutes.ts` 등이 변경으로 보이는데,
-> **이는 이전 라운드의 미커밋 작업분이다**. 이번 라운드에서 내가 편집한 파일은 위 표 6개뿐이다.
+→ 새 변이 라우트를 카탈로그에 넣으면서 면제목록을 잘못 건드리면 **즉시 실패**한다.
 
----
+### 2.3 웹 배선
+- `mutFetch(url, init)` 는 `web/token.js` 에 두고 app.js·roimaker.js 가 **공유**한다(설계는 각 파일 지역 헬퍼였으나 정의처를 둘로 만들 이유가 없다 — §4 참조).
+- 치환은 **`fetch(` → `mutFetch(` 토큰 1개 교체**로 끝냈다. `method:`·`headers:`·`body:` 는 손대지 않았다(외과적). 헤더는 `authHeaders(init.headers ?? {})` 로 mutFetch 가 토큰만 얹는다.
+- 기존에 토큰을 붙이던 4곳(`/move`·`/camerapos`·`/rpc`·`/llm/select`)은 `tokenHeaders({...})` → `{...}` 로 바꿨다. mutFetch 가 같은 헤더를 붙이므로 **전송 바이트 동일**이고, 그 결과 지역 `tokenHeaders` 가 고아가 되어 삭제했다(정의처를 `token.js` 하나로).
+- 토큰 소스가 `#viewer-token.value` → `localStorage['pa.viewerToken']` 으로 바뀌었다. `wireControlToken()` 이 ①로드 시 입력칸에 복원 ②`input` 이벤트마다 저장 → **새로고침해도 유지**되고, app.js 와 roimaker.js 가 DOM 결합 없이 같은 토큰을 쓴다(기존에 roimaker 는 토큰을 아예 못 붙였다).
 
-## 2. 신규 함수 시그니처
-
-```js
-// web/placeDraw.js — 순수
-export function clearPresetSpaces(placeRoi: PlaceRoiMap|null|undefined, key: string): PlaceRoiMap;
-
-// web/app.js — DOM/state
-function ensureFloorVisible(): void;         // #roi-floor 강제 ON (사용자 명시 조작 직후 전용)
-function clearPlaceDrawing(): void;          // #place-clear
-function clearCurrentPresetSpaces(): void;   // #place-clear-preset (confirm 필수)
-function undoPlaceRoi(): void;               // #place-undo
-```
-
-`clearPresetSpaces` 는 대상 키의 idx 를 **큰 것부터** 모아 `core.js` `removePlaceSpace` 로 접는다
-(`removePlaceSpace` 는 지운 idx **보다 큰** 것만 당기므로 남은 대상 idx 가 흔들리지 않는다).
-→ 재번호 로직 신규 구현 0, **core.js 무수정**, 전체삭제 = 기존 '삭제' n회와 동일.
+### 2.4 정적 봉인(`test/webTokenWiring.test.ts`)
+"생 `fetch(` 호출 구간 안에 `method:'POST'|'PUT'|'DELETE'|'PATCH'` 가 있으면 실패". 구간 경계는 `[Ff]etch\(` — 대문자 F 를 빠뜨리면 mutFetch 의 method 가 직전 읽기 fetch 구간으로 새어 **거짓 실패**가 난다(실제로 처음 그렇게 짜서 14건 오탐 → 수정).
+**탐지력 실증**: 같은 판정기를 `git show HEAD:web/app.js`(변경 전)에 돌려 **32건 전부 검출**, 변경 후 **0건**. 즉 "0건"이 판정기 무력화가 아님을 확인했다.
 
 ---
 
-## 3. 계약으로 봉인한 것
+## 3. 실행한 명령과 실제 출력
 
-- **커밋 순서**: `state.placeRoi = placeRoi` → `ensureFloorVisible()` → `endPlaceDraw()`.
-  `ensureFloorVisible` 이 뒤로 가면 그 프레임은 노랑도 초록도 없는 **빈 프레임**이 된다.
-  코드 주석 + 테스트(S1-T3)로 둘 다 박았다.
-- **`ensureFloorVisible` 은 자동 경로에 없다**: `drawRoiOverlay`·`drawFileFloorRoi`·`loadPlaceRoi` 본문에
-  없음을 테스트로 봉인(S2-T2) — 폴링·렌더 루프가 사용자 토글을 마음대로 켜지 않는다.
-- **정점 핸들의 `#roi-floor` 의존은 그대로**(표시 644 / 히트테스트 1373 대칭 유지, S2-T3).
-- **초기화 우선순위**: 첫 분기가 `state.placeDraw`(비파괴 우선), 그리는 중 분기는 `state.placeRoi` 를
-  대입하지 않고 `endPlaceDraw` 도 부르지 않는다(모드 유지). 면 삭제는 `deletePlaceSpace()` **위임**.
-- **파일 접촉 0**: `clearPlaceDrawing`·`clearCurrentPresetSpaces`·`undoPlaceRoi` 본문에 `fetch` 없음(테스트 봉인).
-- **되돌리기**: `state.placeRoiUndo`(전체 맵 깊은 복사) 1단계. 스냅샷 대입이 `clearPresetSpaces` 호출보다
-  **앞**. `state.placeRoiBackup`(자동보정 전용)은 **한 글자도 건드리지 않는다**. `savePlaceRoi` 성공 시 소진.
+### 3.1 단계 1 검증
+```
+$ npx vitest run test/buildTouringPlan
+ ✓ test/buildTouringPlan.test.ts (18 tests) 7ms
+ Test Files  1 passed (1)
+      Tests  18 passed (18)
+```
+(collect 단계 ENOENT 소멸. 설계서는 33 pass 로 적었으나 파일의 실제 `it` 개수는 **18** 이다.)
+
+### 3.2 신규 테스트
+```
+$ npx vitest run test/controlGate
+ ✓ test/controlGate.test.ts (19 tests) 151ms
+      Tests  19 passed (19)
+
+$ npx vitest run test/webTokenWiring
+ ✓ test/webTokenWiring.test.ts (8 tests) 5ms
+      Tests  8 passed (8)
+```
+
+### 3.3 타입
+```
+$ npx tsc --noEmit
+(출력 없음 · exit 0 = 에러 0)
+```
+
+### 3.4 전체
+```
+$ npx vitest run
+ Test Files  2 failed | 265 passed (267)
+      Tests  2 failed | 3291 passed (3293)
+   Duration  17.74s
+```
+실패 2건 = **사전 실패 그대로**(지시대로 무접촉):
+- `test/placeRoiRuntimeInvariants.test.ts > 런타임 PtzCamRoi.json — 구조 불변식(값 불단정) > 모든 주차면: 4점 + 유한 좌표`
+- `test/roiDbLoad.test.ts > loadRoiIntoDb — 정상 로딩(실제 data/Place01/PtzCamRoi.json) > preset_slotidx 는 프리셋별 1-based 연속, slot_roi 는 4점 정규화(프레임 밖 점은 보존·issues 보고)`
+
+중간에 **내 치환이 깨뜨린 실패 2건**이 있었다(`roimakerUi` 의 `fetch\('` 정규식, `slotCuboidRoutes` 의 `fetch('/capture/slots/cuboid'` 문자열 단정). §1 표대로 1줄씩 고쳐 green 으로 되돌렸다. **숨기지 않고 기록한다.**
+
+### 3.5 완료기준 4 — 토큰 켠 상태 시뮬레이션(테스트로 실행함)
+`test/controlGate.test.ts` 의 `controlToken:'SECRET'` 앱 인스턴스 기준:
+
+| 호출 | 결과 |
+|---|---|
+| `POST /capture/slots/reset` 토큰 없음 | **403** `{error:'invalid token'}` |
+| 같은 호출 + 틀린 토큰 | **403** |
+| 같은 호출 + `x-viewer-token: SECRET` | **200** |
+| `PUT /mapping` 토큰 없음 | **403**(기존에 무인증이던 경로) |
+| `GET /health`·`/capture/slots`·`/capture/status` 토큰 없음 | **200** |
+| RPC `slot.list` 무토큰 | 통과(에러 없음) |
+| RPC `slot.reset` 무토큰 | `-32006 FORBIDDEN` |
+| RPC `slot.reset` + 토큰 | 통과 |
+| RPC `plate.detect` 무토큰 | FORBIDDEN **아님**(면제 확인) |
+| `controlToken:''` 인스턴스 | 위 전부 토큰 없이 200/통과 — **현행 무회귀** |
 
 ---
 
-## 4. 계획서와 달라진 점 (2건) — 둘 다 사유 있음
+## 4. 설계와 달라진 점(3건)
 
-### D-1. `#place-clear-preset` 의 `disabled` 동기화를 **넣지 않았다**
-계획서 파일별 변경 ⑤ 는 `renderPlaceSelectionInfo` 에서 `#place-undo` 와 `#place-clear-preset` **둘 다**
-disabled 동기화하라고 했다. `#place-undo` 만 넣었다.
+| # | 설계서 | 실제 구현 | 이유 |
+|---|---|---|---|
+| 1 | `mutFetch` 를 app.js **지역 헬퍼**로 두고 roimaker 는 별도 | `web/token.js` 에서 **export 해 공유** | 같은 함수를 두 파일에 복제할 이유가 없다("정의처는 하나"). roimaker 도 동일 규약을 자동으로 따르게 된다 |
+| 2 | 정적 테스트는 "생 `method:'POST'` 0건" | **"생 `fetch(` 호출 구간 내 변이 method 0건"** | 원안대로면 `mutFetch(url,{method:'PUT'})` 같은 정상 코드까지 실패한다. 실제로 잡아야 하는 건 "토큰 없이 나가는 변이"이므로 호출 구간 단위로 판정 |
+| 3 | 기존 4곳은 `tokenHeaders` 를 `authHeaders` 위임으로 교체 | `tokenHeaders` **삭제**, 호출부는 평범한 헤더 | 4곳 전부 mutFetch 를 타므로 위임 함수가 이중 부착만 하는 고아가 된다(CLAUDE.md §3 "내 변경으로 고아가 된 코드는 제거") |
 
-**사유(코드 확인)**: `#place-clear-preset` 의 활성 조건은 `currentFrameKey()` 에서 파생되는데,
-**카메라 전환 핸들러(`$('sel-cam')` change, app.js:4940 부근)는 `renderSlotList()` 를 호출하지 않는다**
-(프리셋 전환 `$('sel-preset')` 은 호출한다). 따라서 카메라를 바꾸면 버튼이 **잘못 잠긴 채 굳는다** —
-"눌러도 아무 일이 없다"는, **이번 라운드가 고치고 있는 결함과 정확히 같은 부류**다.
-`sel-cam` 에 `renderSlotList()` 를 추가하는 것은 범위 밖 기존 코드 수정이라 택하지 않았다.
-→ 버튼은 항상 활성, 빈 프리셋 방어는 **클릭 시점 안내 문구**(`cam{c} 프리셋{p} 에는 지울 주차면이 없습니다`)로 한다.
-파괴는 confirm 뒤에만 일어나므로 안전성 손실 0. 테스트로 이 결정을 봉인했다.
-`#place-undo` 는 `state.placeRoiUndo` 파생이고 이를 바꾸는 세 곳(전체삭제·되돌리기·저장)이 **전부**
-`renderSlotList()` 를 거치므로 staleness 가 없다 → 계획대로 동기화 유지.
-
-### D-2. 테스트 S1-T3 의 앵커를 `lastIndexOf` 로 바꿨다
-`placeDrawClick` 에는 `endPlaceDraw()` 가 두 번 나온다(상단 '프리셋 바뀜' 취소 가드 + 커밋 분기).
-`indexOf` 로는 취소 가드 쪽을 집어 순서 검사가 무의미해진다(실제로 처음엔 이 때문에 빨간불이 났다).
-커밋 분기의 것(마지막)을 집도록 고쳤다. **코드가 아니라 테스트 앵커의 결함**이었다.
+설계 결함으로 판단해 설계자에게 문의할 사항은 **없었다** — §1 조사 수치가 실코드와 전부 일치했다(변이 fetch 32+3=35곳, 토큰 전송 4곳, 면제 대상 4경로).
 
 ---
 
-## 5. 미완 · 미검증 (정직하게)
+## 5. 검증하지 못한 항목(정직 보고)
 
-1. **`#roi-floor` 강제 ON 이 실제로 초록 면을 보이게 하는지 — 브라우저에서 확인 못 했다.**
-   이게 **이번 수정의 본체**인데, 내가 댈 수 있는 근거는 "코드 경로가 그렇게 되어 있다"까지다:
-   `drawFileFloorRoi` 첫 줄 `if (!$('roi-floor').checked) return;` 가 유일한 게이트이고
-   `selectFloorRoi` 는 필터링을 하지 않는다 → 토글이 켜지면 그려져야 한다. **실렌더는 미확인.**
-   → **마스터 육안 확인 필요 항목 1순위.**
-2. **`confirm()` 다이얼로그 · 버튼 클릭 · 2행 레이아웃**은 DOM 없이 실행할 수 없어 미검증
-   (id 중복 0, `.toolbar` 가 `display:flex; flex-wrap:wrap`, `.roi-edit-bar` 에 `margin-bottom:8px` 이라
-   2행이 자연히 쌓인다는 CSS 확인까지만 했다. **CSS 무수정**).
-3. **전체삭제 → 저장 → 재로딩 왕복**은 서버 왕복이라 미검증. 설계 근거(빈 배열 PUT 통과·`assemblePlaceRoi`
-   가 빈 키를 `[]` 로 보존)는 설계자가 코드로 확인했고 나는 그것을 재확인하지 않았다.
-4. **R3 이월**: 전체삭제 후 그 프리셋이 파일에서 면 0개가 되면 다음 로드에서 `placeRoiFileKeys` 에서 빠져
-   `needsPlaceSkeleton = true` 가 된다 → 그 프리셋에 다시 그려 저장할 때 **라이브 프레임이 필요**하다.
-   기존 신규 주차장 경로와 동일하고 실패 메시지도 이미 있다(app.js `저장 중단: 라이브 프레임을 먼저 시작하세요`).
-5. **부수효과(고지된 것)**: `ensureFloorVisible` 은 artifact 슬롯 floor 히트테스트(`layers.floor`)도 켠다.
-   이는 `#roi-floor` 기본값(checked) 상태와 **동일한 동작**이라 새 동작이 아니다.
-6. **별건 관찰(실카 자동ROI 격자 스케일)** — 지시대로 **손대지 않았다**.
+1. **라이브 브라우저 확인 미수행.** 13021 서버를 `controlToken:'T'` 로 띄워 실제 버튼을 눌러보지는 않았다(마스터 config 실값 파일을 바꿔야 해서 손대지 않음 — 지시). 대신 ①정적 봉인(생 변이 fetch 0건 + 탐지력 실증) ②서버측 403/200 시뮬레이션으로 대체했다. **localStorage 실제 영속·`#viewer-token` 입력 반응은 브라우저 육안 확인이 최종 확정**이다(검증자 인계 항목).
+2. **뷰어 라우트를 켠 인스턴스에서의 전역 게이트 동작**을 직접 403 으로 확인하지 않았다(테스트는 `viewer.enabled:false`). 전역 훅이 `app.register` 캡슐보다 상위인 것은 Fastify 계약이며, `viewerRoutes`·`viewerCameraposRoutes`·`viewerLlmRoutes` 테스트는 전부 green(= 토큰 미설정 시 무회귀는 확인).
+3. **알려진 한계(리더 결정 Q1(a) 유지)**: `POST /capture/detect` 는 게이트 면제인데 카메라를 물리적으로 움직인다. 무인증 카메라 조작 경로가 남아 있다 — 코드 주석에 명시했고 **문서화 단계에서 별건으로 올려야 한다.**
+4. 워크트리 루트에 정체불명 파일 `x.json`(untracked)이 있다. 내가 만든 것이 아니며 **건드리지 않았다**(보고만 한다).
 
 ---
 
-## QA 수정 라운드 (2026-07-28, `03_qa_report.md` 대응)
+## 6. 다음 웨이브 인계
 
-검증: `npx tsc --noEmit` **0 에러** · `npx vitest run` **256 파일 / 3079 테스트 전량 통과**(+4건, L3 골든 해시 green).
-변경 파일은 **기존 3개뿐**(`web/app.js` · `web/index.html` · `test/placeDrawWiring.test.ts`).
-무변경 목표 8파일 + `web/app.css` + `src/**` + `web/core.js` + `web/placeDraw.js` **추가 수정 0**.
-
-### F-1 [중] 초기화의 면 삭제가 복구 불가 → **되돌리기 일원화로 해결**
-
-리더 요구("1단계 스냅샷이 초기화·전체삭제 **양쪽**을 복구한다")를 충족시켰다.
-스냅샷 로직을 두 벌 만들지 않으려고 헬퍼 2개로 접었다:
-
-```js
-function snapshotPlaceRoi(label): void   // 파괴 **직전** 전체 맵 깊은 복사 → state.placeRoiUndo
-function sealPlaceRoiUndo(): void        // 파괴 **직후** 결과 지문(JSON) 봉인 → F-2 판정 근거
-```
-
-`clearPlaceDrawing` 의 면 삭제 분기 = `snapshotPlaceRoi(...)` → `deletePlaceSpace()` → `sealPlaceRoiUndo()`.
-`clearCurrentPresetSpaces` 도 같은 헬퍼를 쓰도록 인라인 스냅샷을 교체했다(동작 동일).
-
-**`confirm` 은 붙이지 않았다 — 사유**: ⓐ 이제 `되돌리기` 로 복구되므로 "무확인·무복구"라는 F-1 의 핵심(복구 불가)이
-사라졌다. ⓑ **같은 일을 하는 기존 `삭제` 버튼은 확인을 받지 않는다** — 초기화에만 확인을 붙이면 두 버튼의 동작이
-갈려 오히려 혼란스럽다(QA 가 지적한 "문구 혼동" 리스크 R4 와 같은 축). 대신 삭제 직후 문구로 복구 가능 사실을 알린다:
-`주차면 #N 삭제됨(미저장) — '되돌리기' 로 복구할 수 있습니다 · '저장'을 눌러야 파일에 반영됩니다`.
-버튼 title 에도 "('되돌리기' 로 복구 가능)"을 넣었다.
-
-**기존 `삭제` 버튼(`deletePlaceSpace`)은 한 줄도 안 고쳤다** — 스냅샷은 **호출자**(초기화)가 뜬다.
-`place-delete` 경로의 동작은 이전과 완전히 동일하다(회귀 0, 테스트 F-1b 로 봉인).
-
-> 남는 사실(정직): **`삭제` 버튼으로 지운 면은 여전히 복구되지 않는다.** 리더 요구는 "초기화·전체삭제 양쪽"이었고
-> `place-delete` 를 손대는 것은 범위 밖이라 그대로 뒀다. 필요하면 다음 라운드 판단 사항이다.
-
-### F-2 [하] 되돌리기의 조용한 되감기 → **문구 + 실제 손실이 있을 때만 확인**
-
-"문구 또는 범위 축소" 중 **문구만으로는 부족**하다고 판단했다 — 항상 뜨는 경고문은 읽히지 않고, 정작
-손실이 없는 대다수 경우에도 불안을 준다. 범위 축소(프리셋 단위 undo)는 전체삭제가 **다른 프리셋의 전역번호까지**
-바꾸므로 복구가 불가능해진다(설계 판단 4 의 근거 그대로).
-
-→ **지문 대조**를 택했다. `sealPlaceRoiUndo` 가 파괴 직후 결과를 `JSON.stringify` 로 저장하고,
-`undoPlaceRoi` 는 되돌리기 시점의 맵이 그 지문과 **다를 때만** 확인을 묻는다:
-
-```
-'{label}' 직전의 **전체** 주차면 상태로 되감습니다.
-그 뒤에 한 편집(새로 그린 면 · 번호 수정 · 다른 프리셋 변경)도 **함께 사라집니다**.
-되돌리기는 1단계뿐이라 이 작업은 다시 되돌릴 수 없습니다.
-```
-
-손실이 실제로 발생할 때만 뜨므로 경고가 무뎌지지 않는다. 지문 불일치는 **보수적**으로만 틀린다
-(오탐 = 확인 한 번 더, 데이터 위험 0). 복원 메시지도 범위를 명시하도록 고쳤다(`… 직전 상태(전체 프리셋) …`),
-`#place-undo` title 에도 ⚠ 고지를 넣었다. "되돌릴 전체삭제 내역이 없습니다" → "되돌릴 내역이 없습니다(초기화·전체삭제 직후에만 가능)".
-
-### F-3 [하] 네 번째 진입점 → `selectPlaceSpace` 에 추가
-
-목록 행 클릭 시 `ensureFloorVisible()` 을 **`drawRoiOverlay()` 앞**에 넣었다(1프레임 지연 없음).
-이제 진입점은 **4/4**: 그리기 시작 · 커밋 · 정점편집 ON · 목록 선택. 테스트 S2-T1 을 4곳 검사로 확장했다.
-
-### ★ F-1 실행 증명 — "초기화로 면 삭제 → 되돌리기 → 복구" (요청 사항)
-
-테스트가 아니라 **배포 소스 `web/app.js` 에서 함수 정의 원문을 그대로 잘라내 실행**했다
-(`snapshotPlaceRoi`·`sealPlaceRoiUndo`·`clearPlaceDrawing`·`deletePlaceSpace`·`undoPlaceRoi` 5개.
-재작성·복사 없음. `core.js` `removePlaceSpace` 와 `placeDraw.js` `clearPresetSpaces` 는 실모듈 import).
-
-```
-=== 시나리오 1: 초기화로 면 삭제 → 되돌리기 → 복구 ===
-[1] 삭제 전   1:1=[idx1, idx2]  1:2=[idx3]        선택=2  스냅샷=없음
-[2] 초기화 클릭 → 1:1=[idx1]      1:2=[idx2]        선택=null 스냅샷=있음
-    msg: 주차면 #2 삭제됨(미저장) — '되돌리기' 로 복구할 수 있습니다 · '저장'을 눌러야 파일에 반영됩니다
-[3] 되돌리기   1:1=[idx1, idx2]  1:2=[idx3]        선택=null 스냅샷=없음
-    msg: 되돌렸습니다: 주차면 #2 삭제 직전 상태(전체 프리셋) — 여전히 미저장 상태입니다
-
-복구 성공(원상 일치, 좌표까지 바이트 동일)? true
-1..N 순열 유지(normalizeGlobalIdx.changed === false)? true
-스냅샷 소진? true
-```
-
-- 삭제 시 `1:2` 의 면이 **idx 3 → 2 로 재압축**됐다가 되돌리기로 **3 으로 정확히 복원**된다
-  (프리셋 단위 undo 였다면 복구 불가능했을 지점 — 전체 맵 스냅샷 선택의 실증).
-
-```
-=== 시나리오 2: 삭제 후 다른 편집 → 되돌리기 (F-2) ===
-[1] 삭제 후 다른 프리셋에 1면 추가 → 1:1=1면, 1:2=2면
-[2] 되돌리기 → CONFIRM> '주차면 #1 삭제' 직전의 **전체** 주차면 상태로 되감습니다.
-    조용한 손실 방지: 확인 질문 발생 = true
-
-=== 시나리오 3: 그리는 중 초기화 (비파괴 경로 회귀) ===
-    점 개수 0 / 그리기모드 유지 = true
-    placeRoi 불변 = true / 스냅샷 생성 안 함 = true
-    msg: 1/4 — 찍은 점을 모두 지웠습니다. 모서리를 다시 4번 클릭하세요. Esc=취소
-```
-
-시나리오 3 이 중요하다 — **비파괴 분기는 스냅샷을 만들지 않는다**(점만 지우는데 undo 스택을 소비하면
-직전 삭제의 복구 기회를 조용히 날린다). 실행으로 확인했다.
-
-### 이번 수정 라운드에서 못 본 것 (여전히 정직하게)
-
-1. **브라우저 실렌더는 여전히 미확인.** F-3 로 진입점이 4/4 가 됐지만, "토글이 켜지면 초록 면이 실제로 뜬다"는
-   코드 경로 확인까지다. QA 도 §9-1 에서 같은 한계를 적었다. **마스터 육안 1순위 유지.**
-2. **`confirm()` 다이얼로그 실동작** — F-2 의 확인창은 지문 대조 로직까지만 실행 증명했고(스텁 confirm),
-   실제 브라우저 모달은 못 봤다.
-3. **F-2 지문의 오탐률** — `JSON.stringify` 키 순서에 의존한다. 이번 경로들(`assemblePlaceRoi`·spread)은
-   키 순서를 보존하지만 **모든 편집 경로를 전수 확인하지는 않았다**. 오탐 시 결과는 "확인창이 한 번 더 뜬다"
-   뿐이라 데이터 위험은 없다고 판단했으나, **전수 확인은 안 했다.**
-4. QA 지적 중 **F-4(idx 없는 원소 코너케이스)·F-5(되돌리기 라벨 중복)** 는 QA 스스로 [정보] 로 분류했고
-   리더 수정 지시에도 없어 **손대지 않았다**. F-5 는 실화면에 "되돌리기" 버튼이 둘(`#place-undo`/`#align-undo`)이라
-   문구 구분이 필요할 수 있다 — 다음 라운드 판단 사항으로 남긴다.
-5. **별건 관찰(실카 자동ROI 격자 스케일)** — 지시대로 손대지 않았다.
-
----
-
-## 6. 검증 커맨드
-
-```
-cd SettingAgent
-npx tsc --noEmit          # 0 에러
-npx vitest run            # 256 files / 3079 tests 전량 통과(QA 수정 라운드 후)
-npx vitest run test/placeDraw.test.ts test/placeDrawWiring.test.ts   # 신규 봉인만
-```
+- 게이트는 **경로 목록이 아니라 규칙**이다. W2~W4 에서 신규 변이 라우트(`/capture/tour/start` 등)를 추가하면 **자동으로 보호된다**(deny-by-default). 반대로 읽기전용 POST(`slot.occupancy.evaluate` → `POST /capture/slots/judge-occupancy`, `mutating:false`)를 추가하면 **`READONLY_POST_PATHS` 에 반드시 추가**해야 한다 — 안 하면 드리프트 테스트가 먼저 실패해서 알려준다(그게 설계 의도다).
+- W2~W4 에서 웹에 변이 fetch 를 새로 추가할 때는 **반드시 `mutFetch`** 를 써라. 생 `fetch` 로 쓰면 `webTokenWiring` 이 실패한다.
+- `test/fixtures/setupResult.23slots.json` 은 W2 투어링 파리티 테스트(T1)의 입력으로 그대로 재사용하면 된다.

@@ -235,7 +235,7 @@ describe('Finalizer slot_setup 전역번호(slot_id = 1..N)', () => {
     for (const r of store.getSlotSetup()) {
       (parkingSlotsByKey[r.presetKey] ??= []).push(r);
     }
-    const rows = buildFlatSlotRows({ placeRoi, detectByKey: {}, parkingSlotsByKey });
+    const rows = buildFlatSlotRows({ placeRoi, parkingSlotsByKey });
 
     expect(rows.map((r) => r.globalIdx)).toEqual([1, 2]);
     expect(rows[0]).toMatchObject({ globalIdx: 1, occupied: true, vpd: true, lpd: true }); // DB 태그 부착(오귀속 없음)

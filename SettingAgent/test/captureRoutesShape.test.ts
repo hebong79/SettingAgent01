@@ -55,6 +55,7 @@ const EXPECTED_ORDER = [
   'POST /capture/slots/lpd',
   'POST /capture/slots/occupy',
   'POST /capture/slots/cuboid',
+  'POST /capture/slots/judge-occupancy', // 점유 판정(순수·stateless — 카메라/DB/파일 무접촉)
   'POST /capture/save',
   'POST /capture/setup-result',
   'GET /capture/saves',

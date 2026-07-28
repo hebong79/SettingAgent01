@@ -8,6 +8,7 @@
 //   - 미저장 편집 버퍼는 이 페이지 안에만 존재한다(마스터 지시 #15).
 
 import { toPixelQuad, normalizePtzCamRoi, normalizeGlobalIdx, findPresetPtz } from './core.js';
+import { mutFetch } from './token.js'; // 변이 요청 토큰 부착(서버 변이 게이트 대응).
 import {
   createRoiMakerState,
   loadSpaces,
@@ -198,7 +199,7 @@ async function gotoPreset() {
     return;
   }
   try {
-    const res = await fetch(api('/move'), {
+    const res = await mutFetch(api('/move'), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ source: rm.source || undefined, cam: rm.cam, ...ptz }),
@@ -562,7 +563,7 @@ async function onSave() {
   let saved = 0;
   for (const item of payload) {
     try {
-      const res = await fetch('/capture/place-roi', {
+      const res = await mutFetch('/capture/place-roi', {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
@@ -591,7 +592,7 @@ async function onSave() {
   // DB 차등 반영(검출·점유·센터링 보존). 실패해도 파일은 이미 저장됐다는 사실을 숨기지 않는다.
   let dbNote = '';
   try {
-    const res = await fetch('/capture/slots/sync-roi', {
+    const res = await mutFetch('/capture/slots/sync-roi', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: '{}',

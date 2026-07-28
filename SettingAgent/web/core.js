@@ -689,30 +689,24 @@ export function removePlaceSpace(placeRoi, idx) {
 
 /**
  * 전체 주차면 평면 목록(R2). 전 카메라·전 프리셋을 하나의 목록으로 전역 인덱스 오름차순 산출.
- * - 점유: judge(OccupancyJudge) 주입 시 그 판정기로 산출 — 실소비처(app.js)는 주입해 오버레이와
- *   같은 기준(차량 접지 귀속)을 쓴다. 미전달 시 computeOccupancy(번호판 중심) 기본 경로(하위호환).
- *   occupancy.js→core.js 단방향 의존을 지키려 import 대신 주입으로 받는다.
+ * - 점유: **판정하지 않는다.** occByKey(서버 판정 캐시 = app.js:state.occComputeByKey,
+ *   `{ key: { spaces:[{id,occupied,…}] } }`)를 조회할 뿐이다. 판정 정본은 서버
+ *   (`POST /capture/slots/judge-occupancy` → src/domain/occupancyJudge.ts)로 옮겼다.
+ *   그래서 목록 뱃지와 오버레이 원이 **같은 소스**를 읽는다(구 `judge` 주입이 하던 정합 보장을 캐시가 대신한다).
  * - parkingSlotsByKey(최종화 후 DB parking_slots)에 slotIdx===globalIdx 행이 있으면 그 행의
  *   occupied/vpd/lpd 를 우선 사용(DB 태그 보존). 단 그 프리셋의 DB 행 전체가 파일 전역번호 체계와
  *   일치할 때만 채택 — 구 run(프리셋별 0-based) 처럼 다른 체계면 통째 기각(부분 겹침 오귀속 방지).
  * 반환: [{ globalIdx, cam, preset, key, occupied, vpd, lpd }] — globalIdx 오름차순.
  * throw 금지 — placeRoi null/빈 → [](graceful).
  */
-export function buildFlatSlotRows({ placeRoi, detectByKey, parkingSlotsByKey, judge }) {
+export function buildFlatSlotRows({ placeRoi, parkingSlotsByKey, occByKey }) {
   if (!placeRoi || typeof placeRoi !== 'object') return [];
   const rows = [];
   for (const key of Object.keys(placeRoi)) {
     const [cam, preset] = key.split(':').map(Number);
     const spaces = Array.isArray(placeRoi[key]) ? placeRoi[key] : [];
-    const detect = detectByKey?.[key];
-    const floorPolys = spaces.map((sp) => ({ idx: sp.idx, quad: sp.points }));
-    const occRows = judge
-      ? judge.judge(floorPolys, detect)
-      : computeOccupancy(floorPolys, [
-          ...(detect?.plates ?? []),
-          ...(detect?.vehicles ?? []).map((v) => v.plate).filter(Boolean),
-        ]);
-    const occById = new Map(occRows.map((o) => [o.idx, o.occupied]));
+    const occSpaces = occByKey?.[key]?.spaces ?? [];
+    const occById = new Map(occSpaces.map((o) => [o.id, o.occupied]));
     const dbRows = parkingSlotsByKey?.[key] ?? [];
     // slot_setup 정본(SlotSetupView): slotId=전역번호, vpd/lpd=객체|null(구 slotIdx/occupied 대체, 설계서 §3).
     // DB 행 집합이 파일 전역번호 체계와 완전히 일치할 때만 태그 채택(구 0-based run 혼입 시 통째 기각 → 파일 계산 폴백).

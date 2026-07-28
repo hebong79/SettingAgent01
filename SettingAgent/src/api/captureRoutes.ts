@@ -26,7 +26,8 @@ import { buildSlotFrontCenters } from '../ground/frontCenterBuild.js';
 import { makeCuboidContextResolver, type CuboidContextResolver } from '../ground/cuboidContext.js';
 import { filterVehiclesOnPlace } from '../capture/onPlaceFilter.js';
 import { assignPlatesToSlotViews } from '../setup/plateMatch.js';
-import type { NormalizedQuad } from '../domain/types.js';
+import type { NormalizedPoint, NormalizedQuad } from '../domain/types.js';
+import { judgeOccupancy, type OccupancyRow } from '../domain/occupancyJudge.js';
 import type { PlateBox } from '../clients/LpdClient.js';
 import type { GroundModel, PixelQuad } from '../ground/types.js';
 import { writeCamerapos } from '../setup/cameraposWriter.js';
@@ -36,7 +37,7 @@ import type { ToolsConfig } from '../config/toolsConfig.js';
 import type { SaveStore } from '../store/SaveStore.js';
 import { validateArtifactBody } from './artifactSchema.js';
 import { stringify5 } from '../util/round.js';
-import { buildOccupyRegionsBySlot } from '../domain/occupancyRegion.js';
+import { buildOccupyRegionsBySlot, computeOccupancyRegions } from '../domain/occupancyRegion.js';
 import { writeSetupResultFiles } from '../store/setupResult.js';
 import type { SlotLpdRow } from '../capture/types.js';
 import { parseOr400, fileErrorReply, parseCamPreset, sendJpeg, resolveSourceCamera } from './routeHelpers.js';
@@ -52,6 +53,46 @@ const SlotLpdSaveSchema = z.object({
     }),
   ),
 });
+
+/**
+ * POST /capture/slots/judge-occupancy — 프레임 배치 점유 판정.
+ *
+ * ★ quad/rect 의 **길이·값 범위는 검사하지 않는다**. 퇴화 입력(비4점 quad·`w=0` rect·`plates:null`)의
+ *   처리는 판정 함수가 소유한 계약이고(웹 기준변과 파리티로 봉인돼 있다), 여기서 400 으로 막으면
+ *   그 계약에 영원히 도달할 수 없게 된다. zod 는 **구조**(배열·수치)만 본다.
+ */
+const JudgeOccupancySchema = z.object({
+  frames: z.array(
+    z.object({
+      key: z.string(),
+      floorPolygons: z.array(
+        z.object({ idx: z.number(), quad: z.array(z.object({ x: z.number(), y: z.number() })) }),
+      ),
+      detect: z
+        .object({
+          plates: z.array(z.object({ quad: z.array(z.object({ x: z.number(), y: z.number() })) })).nullish(),
+          vehicles: z
+            .array(
+              z.object({
+                rect: z.object({ x: z.number(), y: z.number(), w: z.number(), h: z.number() }).nullish(),
+                plate: z.object({ quad: z.array(z.object({ x: z.number(), y: z.number() })) }).nullish(),
+              }),
+            )
+            .nullish(),
+        })
+        .nullish(),
+    }),
+  ),
+  cfg: z.object({ groundBandRatio: z.number().optional(), minBandOverlap: z.number().optional() }).optional(),
+  regions: z.boolean().optional(),
+});
+
+/** 프레임 1개의 판정 결과. `regions`/`overlapPairs` 는 `regions:true` 일 때만 실린다. */
+interface JudgeOccupancyFrameResult {
+  rows: OccupancyRow[];
+  regions?: Array<{ idx: number; scale: number; polygon: NormalizedPoint[] }>;
+  overlapPairs?: Array<[number, number]>;
+}
 
 /** POST /capture/slots/occupy — DB lpd 로 점유영역 생성. cam/preset 미지정 시 전 프리셋. */
 const SlotOccupyBuildSchema = z
@@ -488,6 +529,38 @@ function registerSlotRoutes(app: FastifyInstance, deps: CaptureRouteDeps): void 
   // 산출식은 finalize 와 **같은 단일 구현**(ground/slotFrontCenter), 지면모델 조합도 /capture/ground-model 과 동일.
   // 모델 없음/퇴화 슬롯은 skipped[] 로 드러내고 **저장하지 않는다**(기존 값 미파괴 — null 로 지우지 않음).
   app.post('/capture/slots/cuboid', (req, reply) => handleSlotsCuboid(deps, req, reply));
+
+  // 슬롯 점유 **판정**(순수) — 뷰어에만 있던 판정 로직의 서버 정본(설계 §3).
+  // ★ stateless: cam/preset 을 받아 서버가 검출을 다시 돌리지 **않는다**. 검출값은 호출자가 준다
+  //   (`POST /capture/detect` 는 카메라를 실제로 움직이므로 여기에 끌어들이면 읽기 메서드가 카메라를 점유한다).
+  //   → 카메라·DB·파일 **무접촉**, mutating:false. `frames[]` 배치인 이유는 소비처(슬롯 목록)가
+  //   전 프리셋을 한 번에 판정하기 때문이다 — 프레임마다 왕복하면 프리셋 수만큼 요청이 난다.
+  app.post('/capture/slots/judge-occupancy', (req, reply) => handleJudgeOccupancy(req, reply));
+}
+
+/** POST /capture/slots/judge-occupancy — 프레임 배치 점유 판정(+옵션 점유영역). 순수·부작용 0. */
+function handleJudgeOccupancy(req: FastifyRequest, reply: FastifyReply): unknown {
+  const body = parseOr400(reply, JudgeOccupancySchema, req.body ?? {});
+  if (!body) return undefined;
+  const byKey: Record<string, JudgeOccupancyFrameResult> = {};
+  for (const f of body.frames) {
+    // 판정 자체는 순수 도메인 함수 하나에 위임한다(라우트는 얇은 진입점).
+    const rows = judgeOccupancy(f.floorPolygons, f.detect ?? undefined, body.cfg);
+    const out: JudgeOccupancyFrameResult = { rows };
+    if (body.regions) {
+      // 모집단은 **plate 점유분만** — bbox 폴백은 축 소스(번호판 quad)가 없어 사다리꼴을 만들 수 없다
+      // (위장 생성 금지). 뷰어 오버레이(app.js)와 동일 모집단이다.
+      const r = computeOccupancyRegions(
+        rows
+          .filter((o) => o.source === 'plate' && o.plateQuad)
+          .map((o) => ({ idx: o.idx, quad: o.plateQuad as NormalizedQuad })),
+      );
+      out.regions = r.regions;
+      out.overlapPairs = r.overlapPairs; // 잔존 겹침은 숨기지 않고 그대로 보고한다.
+    }
+    byKey[f.key] = out;
+  }
+  return { byKey };
 }
 
 /** POST /capture/slots/load-roi 핸들러 본문. */

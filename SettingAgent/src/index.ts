@@ -7,6 +7,7 @@ import { VpdClient } from './clients/VpdClient.js';
 import { LpdClient } from './clients/LpdClient.js';
 import { Repository } from './store/Repository.js';
 import { SaveStore } from './store/SaveStore.js';
+import { SETUP_RESULT_NAME } from './store/setupResult.js';
 import { SetupOrchestrator } from './setup/SetupOrchestrator.js';
 import { createPresetProvider } from './setup/presetProvider.js';
 import { AgentRuntime } from './brain/AgentRuntime.js';
@@ -20,6 +21,7 @@ import { Finalizer } from './capture/Finalizer.js';
 import { PtzCalibrator } from './calibrate/PtzCalibrator.js';
 import { PlateDiscoveryJob } from './calibrate/PlateDiscoveryJob.js';
 import { LensCalibrationJob } from './calibrate/LensCalibrationJob.js';
+import { TourJob } from './capture/TourJob.js';
 import { SetupPipeline } from './pipeline/SetupPipeline.js';
 import { CRpcClient } from './clients/CRpcClient.js';
 import { loadExpectedFaces } from './setup/mapTargets.js';
@@ -112,12 +114,16 @@ async function main(): Promise<void> {
     calibFile: process.env.LENS_CALIB_FILE ?? 'data/lens_calibration.json',
     resultDir: tools.store.dataDir,
   };
+  // 셋업 결과 순회(/capture/tour/*). setup_result 정본을 읽어 각 위치로 물리 이동만 한다(DB·파일 쓰기 0).
+  const tourJob = new TourJob({ camera, loadSetupResult: () => saveStore.load(SETUP_RESULT_NAME) });
+
   //   판정처는 하나다 — 아래 클로저를 lensCalib(시작 거부)과 RPC(requiresCamera 게이트)가 **공유**한다.
   const jobBusy = (): { busy: boolean; who?: string } => {
     const running = [
       ['정밀수집', captureJob.getStatus().state],
       ['센터라이징', calibrator.getStatus().state],
       ['번호판 탐색', plateDiscovery.getStatus().state],
+      ['투어링', tourJob.getStatus().state],
     ].find(([, s]) => s === 'running' || s === 'stopping' || s === 'finalizing');
     return running ? { busy: true, who: running[0] as string } : { busy: false };
   };
@@ -149,6 +155,7 @@ async function main(): Promise<void> {
     calibrator, calibrate: tools.calibrate,
     plateDiscovery, discoverOutFile,
     lensCalib, lensCalibPaths,
+    tourJob,
     pipeline,
     viewer: tools.viewer, sources, rpc, cameraCfg: tools.camera,
     dbFile: tools.capture.dbFile,

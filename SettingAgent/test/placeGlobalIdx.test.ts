@@ -5,6 +5,7 @@ import {
   reindexPlaceSpace,
   removePlaceSpace,
   buildFlatSlotRows,
+  computeOccupancy,
   selectFloorRoi,
   type PlaceRoiMap,
 } from '../web/core.js';
@@ -35,6 +36,30 @@ function quad(x: number, y: number, s = 0.08): Pt[] {
     { x: x + s, y: y + s },
     { x, y: y + s },
   ];
+}
+
+/**
+ * 검출 → **점유 판정 캐시**(app.js:state.occComputeByKey 와 같은 shape) 변환.
+ *
+ * 점유 판정이 서버(`POST /capture/slots/judge-occupancy`)로 옮겨가면서 `buildFlatSlotRows` 는
+ * 더 이상 판정하지 않고 이 캐시를 **조회만** 한다. 아래 테스트들은 `detectByKey` 를 넘기던 자리를
+ * 이 헬퍼로 바꿀 뿐이며, **판정식(computeOccupancy = 번호판 중심 ∈ 폴리곤)과 단정값은 그대로**다.
+ */
+function occFromDetect(
+  placeRoi: PlaceRoiMap | null | undefined,
+  detectByKey: Record<string, { plates?: Array<{ quad: Pt[] }>; vehicles?: Array<{ plate?: { quad: Pt[] } }> }>,
+): Record<string, { spaces: Array<{ id: number; occupied: boolean }> }> {
+  const out: Record<string, { spaces: Array<{ id: number; occupied: boolean }> }> = {};
+  for (const key of Object.keys(placeRoi ?? {})) {
+    const spaces = Array.isArray(placeRoi?.[key]) ? placeRoi![key] : [];
+    const detect = detectByKey[key];
+    const rows = computeOccupancy(
+      spaces.map((sp) => ({ idx: sp.idx, quad: sp.points })),
+      [...(detect?.plates ?? []), ...(detect?.vehicles ?? []).flatMap((v) => (v.plate ? [v.plate] : []))],
+    );
+    out[key] = { spaces: rows.map((r) => ({ id: r.idx, occupied: r.occupied })) };
+  }
+  return out;
 }
 
 /** 프리셋 하나: n개 space(0-based idx — Unity 생성 형태), 서로 겹치지 않는 quad. */
@@ -307,7 +332,7 @@ describe('buildFlatSlotRows — 전체 주차면 평면 목록(R2)', () => {
       // quad(0.1,0.1) 의 중심 ≈ (0.14, 0.14) → 전역 1 점유. 전역 2(0.5~) 는 비점유.
       '1:1': { plates: [{ quad: quad(0.12, 0.12, 0.04) }] },
     };
-    const rows = buildFlatSlotRows({ placeRoi, detectByKey });
+    const rows = buildFlatSlotRows({ placeRoi, occByKey: occFromDetect(placeRoi, detectByKey) });
     expect(rows.find((r) => r.globalIdx === 1)?.occupied).toBe(true);
     expect(rows.find((r) => r.globalIdx === 2)?.occupied).toBe(false);
     expect(rows.find((r) => r.globalIdx === 3)?.occupied).toBe(false);
@@ -317,7 +342,7 @@ describe('buildFlatSlotRows — 전체 주차면 평면 목록(R2)', () => {
     const detectByKey = {
       '1:1': { vehicles: [{ plate: { quad: quad(0.52, 0.12, 0.04) } }] }, // 전역 2 내부.
     };
-    const rows = buildFlatSlotRows({ placeRoi, detectByKey });
+    const rows = buildFlatSlotRows({ placeRoi, occByKey: occFromDetect(placeRoi, detectByKey) });
     expect(rows.find((r) => r.globalIdx === 2)?.occupied).toBe(true);
     expect(rows.find((r) => r.globalIdx === 1)?.occupied).toBe(false);
   });
@@ -331,7 +356,7 @@ describe('buildFlatSlotRows — 전체 주차면 평면 목록(R2)', () => {
         { slotId: 2, occupied: true, vpd: { x: 0, y: 0, w: 1, h: 1 }, lpd: [{ x: 0, y: 0 }] },
       ],
     } as unknown as Parameters<typeof buildFlatSlotRows>[0]['parkingSlotsByKey'];
-    const rows = buildFlatSlotRows({ placeRoi, detectByKey, parkingSlotsByKey });
+    const rows = buildFlatSlotRows({ placeRoi, occByKey: occFromDetect(placeRoi, detectByKey), parkingSlotsByKey });
     expect(rows.find((r) => r.globalIdx === 1)).toMatchObject({ occupied: false, vpd: false, lpd: false });
     expect(rows.find((r) => r.globalIdx === 2)).toMatchObject({ occupied: true, vpd: true, lpd: true });
     // DB 행이 없는 전역 3 → 파일 계산 폴백, 태그 없음.
@@ -345,7 +370,7 @@ describe('buildFlatSlotRows — 전체 주차면 평면 목록(R2)', () => {
     expect(buildFlatSlotRows({} as Parameters<typeof buildFlatSlotRows>[0])).toEqual([]);
     // 프리셋 값이 배열 아님 / detect·db 누락 → 무크래시.
     const broken = { '1:1': null } as unknown as PlaceRoiMap;
-    expect(buildFlatSlotRows({ placeRoi: broken, detectByKey: null, parkingSlotsByKey: null })).toEqual([]);
+    expect(buildFlatSlotRows({ placeRoi: broken, occByKey: null, parkingSlotsByKey: null })).toEqual([]);
   });
 });
 
@@ -371,7 +396,7 @@ describe('구 run(0-based slot_idx) × 신 전역 인덱스 — 오귀속 금지
   } as unknown as Parameters<typeof buildFlatSlotRows>[0]['parkingSlotsByKey'];
 
   it('오귀속 금지 — 0-based DB 행은 통째 기각되어 한 칸 밀린 값이 붙지 않는다(파일 계산으로 폴백)', () => {
-    const rows = buildFlatSlotRows({ placeRoi, detectByKey, parkingSlotsByKey: legacyDb });
+    const rows = buildFlatSlotRows({ placeRoi, occByKey: occFromDetect(placeRoi, detectByKey), parkingSlotsByKey: legacyDb });
     const g1 = rows.find((r) => r.globalIdx === 1);
     // DB 를 부분 매칭했다면 slotIdx 1(다른 주차면의 값) 때문에 occupied=false 가 됐을 것.
     expect(g1?.occupied).toBe(true); // 파일 계산(진실)이 살아남음.
@@ -380,7 +405,7 @@ describe('구 run(0-based slot_idx) × 신 전역 인덱스 — 오귀속 금지
   });
 
   it('graceful 미부착 — 구 run 프리셋 전체에 VPD/LPD 태그가 붙지 않고 크래시도 없다', () => {
-    const rows = buildFlatSlotRows({ placeRoi, detectByKey, parkingSlotsByKey: legacyDb });
+    const rows = buildFlatSlotRows({ placeRoi, occByKey: occFromDetect(placeRoi, detectByKey), parkingSlotsByKey: legacyDb });
     for (const r of rows) {
       expect(r.vpd).toBe(false);
       expect(r.lpd).toBe(false);
@@ -399,7 +424,7 @@ describe('구 run(0-based slot_idx) × 신 전역 인덱스 — 오귀속 금지
         ...Array.from({ length: 5 }, (_, i) => ({ slotId: i + 3, occupied: false, vpd: null, lpd: null })),
       ],
     } as unknown as Parameters<typeof buildFlatSlotRows>[0]['parkingSlotsByKey'];
-    const rows = buildFlatSlotRows({ placeRoi, detectByKey, parkingSlotsByKey: freshDb });
+    const rows = buildFlatSlotRows({ placeRoi, occByKey: occFromDetect(placeRoi, detectByKey), parkingSlotsByKey: freshDb });
     expect(rows.find((r) => r.globalIdx === 1)).toMatchObject({ occupied: false, vpd: false, lpd: false }); // DB 우선.
     expect(rows.find((r) => r.globalIdx === 2)).toMatchObject({ occupied: true, vpd: true, lpd: true }); // 태그 부착.
   });

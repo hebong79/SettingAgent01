@@ -324,6 +324,15 @@ export const METHODS: MethodDef[] = [
     http: (p) => ({ method: 'POST', url: '/capture/slots/occupy', payload: p }),
   },
   {
+    name: 'slot.occupancy.evaluate',
+    title: '슬롯 점유 판정(차량 접지 우선·번호판 폴백)',
+    mutating: false,
+    note:
+      '순수 판정 — 카메라·DB·파일 무접촉. 검출값은 호출자가 준다(plate.detect 로 얻어 넘겨라). ' +
+      'frames[] 배치로 여러 프리셋을 한 번에 판정한다. regions:true 면 점유영역 사다리꼴도 함께 반환.',
+    http: (p) => ({ method: 'POST', url: '/capture/slots/judge-occupancy', payload: p }),
+  },
+  {
     name: 'slot.cuboid.build',
     title: '3D 육면체 앞면 중심 산출',
     mutating: true,
@@ -518,6 +527,28 @@ export const METHODS: MethodDef[] = [
     },
   },
 
+  {
+    name: 'capture.tour.start',
+    title: '셋업 결과 순회 이동 시작',
+    mutating: true,
+    requiresCamera: true,
+    preconditions: ['setup_result 존재(setup.result.write 또는 정밀수집 완료)'],
+    note: 'DB·파일을 쓰지 않는다(읽기 순회). 각 위치 dwellMs(기본 1000ms) 정지.',
+    http: (p) => ({ method: 'POST', url: '/capture/tour/start', payload: p }),
+  },
+  {
+    name: 'capture.tour.stop',
+    title: '순회 중단',
+    mutating: true,
+    http: () => ({ method: 'POST', url: '/capture/tour/stop' }),
+  },
+  {
+    name: 'capture.tour.status',
+    title: '순회 진행 상태',
+    mutating: false,
+    http: () => ({ method: 'GET', url: '/capture/tour/status' }),
+  },
+
   // ────────────────────────────────────────────────────────── setup.* (매핑·결과)
   {
     name: 'setup.mapping.get',
@@ -539,6 +570,33 @@ export const METHODS: MethodDef[] = [
     note: '기본 dryRun:true — 계산만 하고 쓰지 않는다. 적용하려면 dryRun:false.',
     requires: ['store'],
     handler: mappingAutoNumber,
+  },
+  {
+    // ★ 이름 주의(리더 결정 Q4): 이 메서드는 **setup_artifact.json 의 슬롯 엔트리 편집**이다.
+    //   "주차면(공간)을 늘린다"가 아니다 — 그 경로는 place.space.add + slot.roi.sync 로 이미 승격돼 있다.
+    name: 'setup.slot.add',
+    title: '셋업 산출물에 슬롯 엔트리 1개 추가',
+    mutating: true,
+    note:
+      'setup_artifact.json 만 바꾼다(DB·ROI 정본 PtzCamRoi.json 은 불변). ' +
+      '실제 주차면(공간) 추가는 place.space.add + slot.roi.sync 다 — 이 메서드가 아니다. ' +
+      'artifact 미제공 시 서버 파일을 읽는다. dryRun:true 면 편집 결과만 반환하고 파일을 쓰지 않는다. ' +
+      '⚠ artifact(호출자 버퍼)는 **계산 전용**이다 — dryRun:true 없이 주면 409(CONFLICT)로 거부된다(버퍼 커밋은 파일 전체 교체가 되므로). ' +
+      '⚠ slot.renumber·slot.placement.update 를 부르면 artifact 가 DB 기준으로 재생성되어 이 편집은 사라진다(응답 warnings 참조).',
+    http: (p) => ({ method: 'POST', url: '/mapping/slot/add', payload: p }),
+  },
+  {
+    name: 'setup.slot.delete',
+    title: '셋업 산출물에서 슬롯 엔트리 1개 삭제',
+    mutating: true,
+    destructive: true,
+    note:
+      '위와 동일 — artifact 전용 편집이다. DB slot_setup·ROI 정본(PtzCamRoi.json)은 건드리지 않는다. ' +
+      '⚠ artifact(호출자 버퍼)는 계산 전용 — dryRun:true 없이 주면 409(CONFLICT)로 거부된다.',
+    http: (p) => {
+      requireConfirm(p, 'setup.slot.delete', 'setup_artifact.json 에서 슬롯 엔트리를 제거한다');
+      return { method: 'POST', url: '/mapping/slot/delete', payload: omit(p, ['confirm']) };
+    },
   },
   {
     name: 'setup.result.write',

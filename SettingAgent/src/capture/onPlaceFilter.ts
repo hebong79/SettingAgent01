@@ -16,9 +16,14 @@ export const GROUND_BAND_RATIO = 0.25;
 /** 밴드 면적 대비 주차면 겹침 하한. */
 export const ON_PLACE_MIN_OVERLAP = 0.15;
 
-/** 차량 bbox 의 접지 근사 밴드(하단 GROUND_BAND_RATIO 스트립). */
-export function groundBand(rect: NormalizedRect): NormalizedRect {
-  const h = rect.h * GROUND_BAND_RATIO;
+/**
+ * 차량 bbox 의 접지 근사 밴드(하단 ratio 스트립).
+ * `ratio` 기본값은 GROUND_BAND_RATIO — 기본 인자로 부르면 종전과 **완전히 동일**하다.
+ * (인자를 연 이유: `domain/occupancyJudge.ts` 가 cfg 로 밴드 비율을 덮을 때 **식을 복제하지 않고**
+ *  이 함수를 그대로 쓰기 위해서다. `web/occupancy.js:groundBand` 도 이미 같은 시그니처다.)
+ */
+export function groundBand(rect: NormalizedRect, ratio: number = GROUND_BAND_RATIO): NormalizedRect {
+  const h = rect.h * ratio;
   return { x: rect.x, y: rect.y + rect.h - h, w: rect.w, h };
 }
 

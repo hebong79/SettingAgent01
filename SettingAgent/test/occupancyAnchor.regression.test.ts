@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { OccupancyJudge } from '../web/occupancy.js';
-import { normalizePtzCamRoi, selectFloorRoi, presetKey, buildFlatSlotRows } from '../web/core.js';
+import { normalizePtzCamRoi, selectFloorRoi, presetKey, buildFlatSlotRows, computeOccupancy } from '../web/core.js';
 import { computeOccupancyRegions } from '../web/occupancyRegion.js';
 
 /**
@@ -225,14 +225,36 @@ describe('점유 앵커 R군 — 라이브 실좌표 회귀 봉인(진단 05)', 
     expect(veh6Plate.recovered ?? false).toBe(false);
   });
 
-  it('R6 buildFlatSlotRows judge 주입 → 전역 [1..17] 전량 점유 / 미전달 시 구 경로(하위호환)', () => {
-    const detectByKey = { '1:1': DETECT[1], '1:2': DETECT[2], '1:3': DETECT[3] };
-    const injected = buildFlatSlotRows({ placeRoi: PLACE_ROI, detectByKey, judge });
+  it('R6 buildFlatSlotRows 점유 캐시 = 접지 귀속 판정 → 전역 [1..17] 전량 점유 / 번호판중심 판정은 구 결함 잔존', () => {
+    // 점유 판정은 서버(POST /capture/slots/judge-occupancy)로 옮겨졌고 buildFlatSlotRows 는 그
+    // **판정 캐시를 조회만** 한다. 따라서 이 테스트는 "어느 판정식으로 채운 캐시를 넣었는가"로
+    // 두 경로를 재현한다 — 판정식도 단정값도 그대로다(호출부만 바뀌었다).
+    const detectByKey: Record<string, any> = { '1:1': DETECT[1], '1:2': DETECT[2], '1:3': DETECT[3] };
+    const occFrom = (rowsOf: (key: string) => Array<{ idx: number; occupied: boolean }>) =>
+      Object.fromEntries(
+        Object.keys(PLACE_ROI).map((key) => [key, { spaces: rowsOf(key).map((r) => ({ id: r.idx, occupied: r.occupied })) }]),
+      );
+    const polysOf = (key: string) => (PLACE_ROI[key] ?? []).map((sp) => ({ idx: sp.idx, quad: sp.points }));
+
+    // (A) 차량 접지밴드 argmax 귀속(= OccupancyJudge, 현행 정본).
+    const injected = buildFlatSlotRows({
+      placeRoi: PLACE_ROI,
+      occByKey: occFrom((key) => judge.judge(polysOf(key), detectByKey[key])),
+    });
     expect(injected.map((r) => r.globalIdx)).toEqual(Array.from({ length: 17 }, (_, i) => i + 1));
     expect(injected.every((r) => r.occupied)).toBe(true);
 
-    // 미전달(하위호환) 경로는 기존 computeOccupancy 결과 그대로 — 구 결함(5·10·17 미점유)이 남는다.
-    const legacy = buildFlatSlotRows({ placeRoi: PLACE_ROI, detectByKey });
+    // (B) 번호판 중심(구 경로) 판정은 구 결함(5·10·17 미점유)이 남는다.
+    const legacy = buildFlatSlotRows({
+      placeRoi: PLACE_ROI,
+      occByKey: occFrom((key) => {
+        const d = detectByKey[key];
+        return computeOccupancy(polysOf(key), [
+          ...(d?.plates ?? []),
+          ...(d?.vehicles ?? []).map((v: any) => v.plate).filter(Boolean),
+        ]);
+      }),
+    });
     expect(legacy.filter((r) => !r.occupied).map((r) => r.globalIdx)).toEqual([5, 10, 17]);
   });
 

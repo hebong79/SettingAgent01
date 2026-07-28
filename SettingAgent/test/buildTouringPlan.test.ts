@@ -2,9 +2,11 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { buildTouringPlan } from '../web/core.js';
 
-// 실데이터 fixture — save/setup_result.json(고정본, 23슬롯). cwd=SettingAgent 기준 상대경로.
+// 실데이터 fixture — test/fixtures/setupResult.23slots.json(고정본, 23슬롯). cwd=SettingAgent 기준 상대경로.
+// ★ 원본 save/setup_result.json 은 .gitignore 된 **런타임 산출물**이라 테스트 고정입력이 될 수 없다
+//   (워크트리·CI 에는 존재하지 않아 collect 단계에서 ENOENT). 실데이터 사본을 fixture 로 고정한다.
 // 그룹: cam1:preset1(7)·cam1:preset2(4)·cam1:preset3(2)·cam2:preset1(6)·cam2:preset2(4) = 23.
-const realSetup = JSON.parse(readFileSync('save/setup_result.json', 'utf8')) as {
+const realSetup = JSON.parse(readFileSync('test/fixtures/setupResult.23slots.json', 'utf8')) as {
   slots: Array<{
     slotId: number;
     camId: number;

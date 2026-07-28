@@ -27,13 +27,12 @@ import {
   findPresetPtz,
   diffArtifactVsCameras,
   hitTestSlots,
-  removeSlot,
+  // nextSlotId/insertSlotAt/removeSlot 은 서버(src/setup/artifactSlotEdit.ts)로 승격됐다 — web/core.js 원본은
+  // 파리티 기준변으로 존치하되 app.js 는 더 이상 부르지 않는다(POST /mapping/slot/* 경유).
   resizeRect, // 차량 rect Ctrl+드래그 리사이즈(요구 A).
   updateSlotRoi, // 차량 rect 편집 결과 불변 교체(요구 A).
   moveRect, // 차량 rect Ctrl+드래그 평행이동(요구 A).
   hitTestRectHandle, // 차량 rect 8핸들/내부 히트(요구 A, 순수).
-  nextSlotId, // 결번 충돌회피 slotId 생성(요구 B).
-  insertSlotAt, // 전역 인덱스 중간삽입(요구 B).
   hitTestQuadVertex,
   moveQuadVertex,
   updateSlotFloorRoi,
@@ -69,7 +68,6 @@ import {
   frontFaceCenter, // 육면체 앞면(근접면) 중심점(정규화, 순수) — 2D 위치표시 원
   formatGroundBadge, // 지면모델 소스 배지 문자열(순수)
   groundModelsByKey, // ground-model 응답 models[] → cam:preset 맵(순수)
-  buildTouringPlan, // setup_result → Touring 순회 스텝 배열(카메라→프리셋→슬롯, 순수)
 } from './core.js';
 import {
   beginPlaceDraw, // 주차면 신규 그리기 상태 개시(순수)
@@ -80,10 +78,10 @@ import {
   placeQuadOf, // 프리셋 키 + 전역 idx → 4점(순수)
   movePlaceVertex, // 주차면 정점 1개 이동(순수, core.moveQuadVertex 위임)
 } from './placeDraw.js';
-import { OccupancyJudge } from './occupancy.js'; // 번호판 우선·bbox 폴백 점유 판정(순수 컴포넌트).
-import { computeOccupancyRegions } from './occupancyRegion.js'; // 번호판 기준 점유영역 사다리꼴(겹침 회피 자동 배율, 순수).
-
-const occupancyJudge = new OccupancyJudge(); // 임계값 기본(groundBandRatio=0.25, minBandOverlap=0.15). 매 프레임 재사용.
+import { mutFetch, getControlToken, setControlToken } from './token.js'; // 변이 요청 토큰 부착·보관(서버 변이 게이트 대응).
+// 점유 판정(OccupancyJudge)·점유영역 생성(computeOccupancyRegions)은 **서버 정본**으로 옮겼다
+// (POST /capture/slots/judge-occupancy — src/domain/occupancyJudge.ts + occupancyRegion.ts).
+// web/occupancy.js·web/occupancyRegion.js 는 서버 포팅본의 **파리티 기준변**이라 파일 자체는 남는다.
 
 const $ = (id) => document.getElementById(id);
 const api = (path) => `/viewer/api${path}`;
@@ -325,7 +323,8 @@ function updatePtzControlUi() {
 }
 
 function updatePtzControlEnabled() {
-  const canMove = !state.ptzBusy && (!selectedSourceIsReal() || state.ptzStateReady);
+  // 순회(Touring) 중에는 수동 PTZ 를 막는다 — 서버는 막지 않으므로(마지막 명령이 이긴다) 화면단 차단이 유일한 방어다.
+  const canMove = !state.ptzBusy && !state.touringActive && (!selectedSourceIsReal() || state.ptzStateReady);
   document.querySelectorAll('[data-dir], #btn-abs').forEach((button) => { button.disabled = !canMove; });
   $('btn-ptz-refresh').disabled = state.ptzBusy;
 }
@@ -442,7 +441,9 @@ function drawRoiOverlay() {
   overlay.height = frame.clientHeight;
   const ctx = overlay.getContext('2d');
   ctx.clearRect(0, 0, overlay.width, overlay.height);
-  updateLogicOccupancy(); // 로직 점유(파일 바닥ROI × LPD 번호판 중심) 재계산 → state.occByKey[현재프리셋](R4/R5).
+  // ★ 여기서 점유를 재계산하지 **않는다**. 판정은 서버(POST /capture/slots/judge-occupancy) 소유이고,
+  //   리드로(캔버스 리사이즈·선택 변경·마우스 조작마다)에서 부르면 HTTP 가 초당 수십 번 나간다.
+  //   갱신은 **데이터가 바뀌는 지점**에서만 한다(refreshOccupancy 주석 참조). 그리기는 캐시를 읽을 뿐이다.
   drawOccupancyOverlay(ctx); // 점유율 오버레이 — mapping 미최종화(수집 중)에도 유효 → mapping 가드 이전.
   drawFileFloorRoi(ctx); // 파일 기반 바닥 ROI(PtzCamRoi.json) — 파일 모드 바닥 레이어 → mapping 가드 이전.
   drawDetectOverlay(ctx); // 라이브 VPD/LPD 검출 오버레이(§04) — 수집 중/미최종화에도 표시 → mapping 가드 이전.
@@ -510,40 +511,62 @@ function currentFrameKey() {
 }
 
 /**
- * 현재 프리셋의 로직 점유(R4/R5) 재계산 → state.occComputeByKey[key] 갱신.
- * 소스: 파일 바닥ROI(state.placeRoi, useLlm:false 고정 — 등록 기준은 항상 파일) ×
- *       현재 프리셋 LPD 번호판(state.detectByKey[key] — 키 조회로 항상 그 프리셋 검출).
- * 파일 바닥ROI 가 없으면(파일 미로드/해당 프리셋 없음) 계산 skip(이전 값 보존, graceful).
+ * 로직 점유 재계산 — **서버 판정**(POST /capture/slots/judge-occupancy) 결과를 state.occComputeByKey 에 적재.
+ *
+ * 소스는 이전과 같다: 파일 바닥ROI(state.placeRoi, useLlm:false 고정 — 등록 기준은 항상 파일) ×
+ * 프리셋별 검출(state.detectByKey). 바뀐 것은 **판정 주체(웹→서버)와 호출 시점**뿐이다.
+ *
+ * ★ 배치인 이유: 슬롯 목록(buildFlatSlotRows)이 **전 프리셋**을 한 번에 그린다. 프레임마다 왕복하면
+ *   프리셋 수만큼 요청이 난다 → 검출을 가진 모든 키를 frames[] 하나로 접어 **요청 1회**로 만든다.
+ * ★ 호출 시점(데이터가 바뀌는 곳만): ①검출 도착·검출박스 삭제(state.detectByKey 변경)
+ *   ②파일 ROI 로드 ③주차면 편집 커밋(markPlaceDirty). 리드로(drawRoiOverlay)에서는 부르지 않는다.
+ * ★ 바닥ROI 가 없는 키는 frames 에서 제외한다 — 기존 `if (!floorPolys.length) return`(이전 값 보존)과 동일.
+ * ★ 실패(네트워크·서버 오류)는 조용히 이전 값 보존(강등 철학 — 화면의 점유를 지우지 않는다).
  */
-function updateLogicOccupancy() {
-  const key = currentFrameKey();
-  const floorPolys = selectFloorRoi({ useLlm: false, placeRoi: state.placeRoi, key }).polygons.map((p) => ({
-    idx: Number(p.label),
-    quad: p.quad,
-  }));
-  if (!floorPolys.length) return;
-  const detect = state.detectByKey[key]; // 프리셋 키로 조회 → 항상 그 프리셋 검출(일치 판정 불요).
-  // OccupancyJudge: 1단계 차량 접지밴드 argmax 귀속 → 2단계 비점유 슬롯 번호판 폴백. 후보 조립은 judge 내부.
-  const rows = occupancyJudge.judge(floorPolys, detect);
-  // 점유영역 사다리꼴: plate 점유분만 모집단(bbox 폴백은 축 소스가 없어 미생성 — 기존 주황 원 유지).
-  const region = computeOccupancyRegions(
-    rows.filter((o) => o.source === 'plate' && o.plateQuad).map((o) => ({ idx: o.idx, quad: o.plateQuad })),
-  );
-  if (region.overlapPairs.length && !occRegionOverlapWarned.has(key)) {
-    occRegionOverlapWarned.add(key);
-    console.warn(`[OccupancyRegion] ${key} 겹침 잔존:`, region.overlapPairs);
+async function refreshOccupancy() {
+  const frames = [];
+  for (const key of Object.keys(state.detectByKey)) {
+    const floorPolygons = selectFloorRoi({ useLlm: false, placeRoi: state.placeRoi, key }).polygons.map((p) => ({
+      idx: Number(p.label),
+      quad: p.quad,
+    }));
+    if (!floorPolygons.length) continue;
+    const d = state.detectByKey[key];
+    frames.push({ key, floorPolygons, detect: { plates: d?.plates ?? [], vehicles: d?.vehicles ?? [] } });
   }
-  const polyByIdx = new Map(region.regions.map((g) => [g.idx, g.polygon]));
-  state.occComputeByKey[key] = {
-    spaces: rows.map((o) => ({
-      id: o.idx,
-      occupied: o.occupied,
-      source: o.source,
-      center: o.center,
-      vehicleRect: o.vehicleRect,
-      region: polyByIdx.get(o.idx),
-    })),
-  };
+  if (!frames.length) return;
+  let byKey;
+  try {
+    const res = await mutFetch('/capture/slots/judge-occupancy', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ frames, regions: true }),
+    });
+    if (!res.ok) return; // 이전 값 보존.
+    ({ byKey } = await res.json());
+  } catch {
+    return; // 네트워크 실패 → 이전 값 보존.
+  }
+  for (const key of Object.keys(byKey ?? {})) {
+    const out = byKey[key];
+    if (out.overlapPairs?.length && !occRegionOverlapWarned.has(key)) {
+      occRegionOverlapWarned.add(key);
+      console.warn(`[OccupancyRegion] ${key} 겹침 잔존:`, out.overlapPairs);
+    }
+    // 점유영역 사다리꼴은 plate 점유분만 생성된다(bbox 폴백은 축 소스가 없어 미생성 — 기존 주황 원 유지).
+    const polyByIdx = new Map((out.regions ?? []).map((g) => [g.idx, g.polygon]));
+    // 적재 형식은 **현행 그대로** — drawOccupancyOverlay·슬롯목록 뱃지 소비처를 무변경으로 둔다.
+    state.occComputeByKey[key] = {
+      spaces: (out.rows ?? []).map((o) => ({
+        id: o.idx,
+        occupied: o.occupied,
+        source: o.source,
+        center: o.center,
+        vehicleRect: o.vehicleRect,
+        region: polyByIdx.get(o.idx),
+      })),
+    };
+  }
 }
 
 const occRegionOverlapWarned = new Set(); // 점유영역 겹침 잔존 프리셋별 console.warn 1회 가드(렌더 스팸 방지).
@@ -1091,6 +1114,7 @@ async function loadPlaceRoi(refresh = false) {
       setPlaceMsg('전역번호 재부여됨(미저장) — 저장 필요');
       console.warn('[PlaceRoi] 전역 인덱스 재부여:', norm.issues);
     }
+    await refreshOccupancy(); // ② 데이터 변경점 — 바닥 ROI(판정 입력)가 바뀌었다.
     renderSlotList(); // 전역번호 확정 후 목록 렌더.
     drawRoiOverlay(); // 로딩 완료 즉시 1회 재렌더.
   } catch { /* 네트워크 실패 → 미표시 */ }
@@ -1230,7 +1254,7 @@ async function runLiveDetect(vpdEnabled = false, ptz) {
   const body = { cam, preset, vpdOnParkingOnly: $('cap-vpd-onplace').checked, vpdEnabled };
   // ptz 제공(lpd-live) 시에만 오버라이드 전송 — 미제공이면 기존 경로(프리셋 PTZ) 그대로. state.ptz 값이 문자열일 수 있어 Number() 방어.
   if (ptz) body.ptz = { pan: Number(ptz.pan), tilt: Number(ptz.tilt), zoom: Number(ptz.zoom) };
-  const res = await fetch('/capture/detect', {
+  const res = await mutFetch('/capture/detect', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
@@ -1259,6 +1283,7 @@ async function runLiveDetect(vpdEnabled = false, ptz) {
   }
   state.selectedDetect = null; // [기능2] 새 검출 도착 → 인덱스 무효화(임시 편집분 사라짐).
   renderDetectSelection();
+  await refreshOccupancy(); // ① 데이터 변경점 — 검출이 바뀌었으니 점유를 다시 판정받는다(그리기 전).
   drawRoiOverlay();
   renderSlotList(); // 검출 도착 시 목록의 프리셋별 요약(검출 count)·점유 갱신.
 }
@@ -1303,12 +1328,12 @@ function renderSlotList() {
   //       mapping 과 무관하게 파일 ROI 를 그리고 있었으므로 목록을 그 소스에 맞추는 쪽이 정합이다.
   const fileMode = !FLOOR_ROI_USE_LLM && (state.roiHidden || !state.mapping || placeSpaceCount() > 0);
   if (finalized || fileMode) {
-    updateLogicOccupancy(); // 현재 프리셋 점유 뱃지 최신화(오버레이 원 소스 occComputeByKey 유지).
+    // 점유는 서버 판정 캐시(state.occComputeByKey)를 그대로 읽는다 — 오버레이 원과 **같은 소스**라
+    // 목록 뱃지와 오버레이가 구조적으로 갈리지 않는다(판정기 주입이 하던 역할을 캐시가 대신한다).
     const rows = buildFlatSlotRows({
       placeRoi: state.placeRoi,
-      detectByKey: state.detectByKey,
       parkingSlotsByKey: state.parkingSlotsByKey,
-      judge: occupancyJudge, // 목록 뱃지를 오버레이와 같은 판정기로 정합(주입 — core.js→occupancy.js 순환 회피).
+      occByKey: state.occComputeByKey,
     });
     for (const r of rows) {
       const div = document.createElement('div');
@@ -1449,39 +1474,73 @@ function renderSelectionInfo() {
 }
 
 /**
- * 현재 프리셋에 주차면 추가(요구 B: 전역 인덱스 중간삽입). 기본 rect(중앙 소형)·zone`cam{cam}`,
- * 삽입 위치는 #slot-insert-idx(1..N+1, 비우면 맨 끝). 추가 후 선택 → Ctrl+드래그로 배치 → '저장'.
+ * 현재 프리셋에 주차면 추가(요구 B: 전역 인덱스 중간삽입). 삽입 위치는 #slot-insert-idx(1..N+1, 비우면 맨 끝).
+ * 추가 후 선택 → Ctrl+드래그로 배치 → '저장' (2단계 UX 유지).
+ *
+ * ★ 편집 계산은 **서버가 소유**한다(src/setup/artifactSlotEdit.ts). 여기는 껍데기다 —
+ *   `dryRun:true` 로 계산 결과만 받아 메모리에 반영하고, 파일 영속화는 기존 '저장'(PUT /mapping)이 계속 맡는다.
+ *   (기본 rect·zone·slotId 생성·clamp 전부 서버 값이다.)
  */
-function addSlot() {
+async function addSlot() {
   const msg = $('map-msg');
   if (!state.mapping) {
     if (msg) msg.textContent = '표시된 산출물 없음';
     return;
   }
-  const key = presetKey(state.cam, state.preset);
-  const id = nextSlotId(state.mapping, state.cam, state.preset);
-  const rect = { x: 0.45, y: 0.45, w: 0.1, h: 0.1 };
-  const newSlot = { slotId: id, zone: `cam${state.cam}`, roiByPreset: { [key]: rect } };
-  const N = (state.mapping.globalIndex ?? []).length;
   const raw = Number($('slot-insert-idx').value);
-  const at = Number.isFinite(raw) && raw >= 1 ? Math.min(Math.round(raw), N + 1) : N + 1;
-  state.mapping = insertSlotAt(state.mapping, at, newSlot);
-  state.selectedSlotId = id;
-  markDirty();
-  drawRoiOverlay();
-  renderSlotList();
-  renderSelectionInfo();
+  const at = Number.isFinite(raw) && raw >= 1 ? Math.round(raw) : undefined; // 비우면 서버가 맨 끝으로.
+  try {
+    const res = await mutFetch(api('/mapping/slot/add'), {
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        camIdx: state.cam,
+        presetIdx: state.preset,
+        ...(at === undefined ? {} : { at }),
+        artifact: state.mapping, // 호출자 버퍼(메모리 편집본) — 서버 파일이 아니라 이것을 편집한다.
+        dryRun: true, // ★ 파일을 쓰지 않는다(배치 전 임시 rect 가 정본에 남지 않게).
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      if (msg) msg.textContent = `추가 실패: ${data.error ?? res.status}`;
+      return;
+    }
+    state.mapping = data.artifact;
+    state.selectedSlotId = data.slotId;
+    markDirty();
+    // 경고는 markDirty 문구를 **대체**한다(직전 textContent 를 읽어 이어붙이면 문구가 누적된다 — D-6).
+    if (msg && (data.warnings ?? []).length) msg.textContent = `편집됨(미저장) — ${data.warnings.join(' / ')}`;
+    drawRoiOverlay();
+    renderSlotList();
+    renderSelectionInfo();
+  } catch (err) {
+    if (msg) msg.textContent = `추가 실패(네트워크): ${err}`;
+  }
 }
 
-/** 선택 슬롯 삭제(메모리만 — '저장'으로 영속화). */
-function deleteSelectedSlot() {
+/** 선택 슬롯 삭제(메모리만 — '저장'으로 영속화). 편집 계산은 서버가 한다(dryRun). */
+async function deleteSelectedSlot() {
   if (!state.selectedSlotId || !state.mapping) return;
-  state.mapping = removeSlot(state.mapping, state.selectedSlotId);
-  state.selectedSlotId = null;
-  markDirty();
-  drawRoiOverlay();
-  renderSlotList();
-  renderSelectionInfo();
+  const msg = $('map-msg');
+  try {
+    const res = await mutFetch(api('/mapping/slot/delete'), {
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ slotId: state.selectedSlotId, artifact: state.mapping, dryRun: true }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      if (msg) msg.textContent = `삭제 실패: ${data.error ?? res.status}`;
+      return;
+    }
+    state.mapping = data.artifact;
+    state.selectedSlotId = null;
+    markDirty();
+    drawRoiOverlay();
+    renderSlotList();
+    renderSelectionInfo();
+  } catch (err) {
+    if (msg) msg.textContent = `삭제 실패(네트워크): ${err}`;
+  }
 }
 
 // --- [기능2] VPD/LPD 검출 박스 선택·크기조절·삭제(임시·메모리만) --------
@@ -1502,7 +1561,7 @@ function renderDetectSelection() {
 }
 
 /** 선택한 검출 박스 삭제(메모리만). 다음 재검출/프레임 갱신 전까지 유효. */
-function deleteSelectedDetect() {
+async function deleteSelectedDetect() {
   if (!state.selectedDetect) return;
   const key = currentFrameKey();
   const d = state.detectByKey[key];
@@ -1510,6 +1569,7 @@ function deleteSelectedDetect() {
   state.detectByKey[key] = removeDetection(d, state.selectedDetect);
   state.selectedDetect = null;
   renderDetectSelection();
+  await refreshOccupancy(); // ① 데이터 변경점 — 검출을 지웠으니 점유도 다시 판정받는다.
   drawRoiOverlay();
   renderSlotList(); // 검출 count·점유 갱신.
 }
@@ -1527,7 +1587,7 @@ async function saveMapping() {
   if (!state.mapping) return;
   const msg = $('map-msg');
   try {
-    const res = await fetch(api('/mapping'), {
+    const res = await mutFetch(api('/mapping'), {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(state.mapping),
@@ -1803,9 +1863,9 @@ async function move(ptz) {
   }
   setPtzBusy(true);
   try {
-    const res = await fetch(api('/move'), {
+    const res = await mutFetch(api('/move'), {
       method: 'POST',
-      headers: tokenHeaders({ 'content-type': 'application/json' }),
+      headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ source: state.source || undefined, cam: state.cam, ...ptz }),
     });
     const data = await res.json().catch(() => ({}));
@@ -1872,62 +1932,86 @@ async function gotoPreset() {
 
 // --- Touring Test (독립 순회) -------------------------------------------
 // setup_result.json(읽기전용)을 카메라→프리셋→슬롯 순으로 순회하며 각 위치로 물리 이동(각 1초).
-// DB·discover/detect·오버레이 데이터는 읽지도 쓰지도 않는다. move()/gotoPreset()/UI동기화/모달만 사용.
+// DB·discover/detect·오버레이 데이터는 읽지도 쓰지도 않는다.
+//
+// ★ 서버 정본화(W2): 계획 산출·스텝 진행·PTZ 이동은 전부 **서버 잡(TourJob, /capture/tour/*)** 이 소유한다.
+//   웹은 시작 요청 + 상태 폴링 + 화면 동기화만 하는 껍데기다(외부 제어자와 웹이 같은 경로를 쓴다).
 async function runTouringTest() {
   if (state.touringActive) return; // 재진입 방지.
   const btn = $('cap-touring');
   const origLabel = btn?.textContent;
 
-  // 1) 로딩 — 루트 경로(/capture/*), api() 미사용, no-store.
-  let data;
+  // 1) 서버 잡 시작(변이 → mutFetch). 실패 사유는 서버 문구를 그대로 보여준다(진단 일원화).
+  let started;
   try {
-    const res = await fetch('/capture/saves/setup_result', { cache: 'no-store' });
+    const res = await mutFetch('/capture/tour/start', {
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ source: state.source || undefined }),
+    });
+    started = await res.json().catch(() => ({}));
     if (!res.ok) {
-      $('cap-msg').textContent = `Touring: setup_result 로딩 실패(${res.status}) — 정밀수집 결과가 없습니다.`;
+      $('cap-msg').textContent = `Touring: 시작 실패(${res.status}) — ${started.error ?? '알 수 없는 오류'}`;
       return;
     }
-    data = await res.json();
   } catch (err) {
-    $('cap-msg').textContent = `Touring: 로딩 오류 — ${err instanceof Error ? err.message : err}`;
+    $('cap-msg').textContent = `Touring: 시작 오류 — ${err instanceof Error ? err.message : err}`;
     return;
   }
 
-  // 2) 스텝 산출.
-  const { steps, skipped } = buildTouringPlan(data);
-  const presetCount = steps.filter((s) => s.kind === 'preset').length;
-  const slotCount = steps.filter((s) => s.kind === 'slot').length;
-  if (!steps.length) {
-    $('cap-msg').textContent = 'Touring: 순회할 슬롯/프리셋이 없습니다(빈 setup_result).';
-    return;
-  }
-
-  // 3) 순회.
+  // 2) 진행 표시 — 1초 폴링으로 서버 상태를 따라간다(순회 루프는 웹에 없다).
   state.touringActive = true;
   if (btn) btn.disabled = true;
-  let done = 0;
+  updatePtzControlEnabled(); // 순회 중 수동 PTZ 조작 차단(마지막 명령이 이기므로 화면단에서 막는다).
+  let last;
+  let final;
   try {
-    for (const step of steps) {
-      done += 1;
-      if (btn) btn.textContent = `순회 중… (${done}/${steps.length})`;
-      if (step.kind === 'preset') {
-        syncTouringPreset(step.camId, step.presetId); // state.cam/preset + UI 동기화.
-        const home = findPresetPtz(state.cameras, step.camId, step.presetId);
-        if (home) await move(home);
-        else await gotoPreset(); // PTZ 미제공(일부 실카메라) → snapshot 폴백으로 프리셋 이동(스킵 안 함).
-      } else {
-        await move(step.ptz);
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 1000));
+      let st;
+      try {
+        const res = await fetch('/capture/tour/status', { cache: 'no-store' });
+        if (!res.ok) break;
+        st = await res.json();
+      } catch {
+        break; // 통신 두절 — 서버 잡은 계속 돈다. 버튼만 복구한다.
       }
-      await new Promise((r) => setTimeout(r, 1000)); // 각 위치 1초 대기.
+      if (btn) btn.textContent = `순회 중… (${st.done}/${st.total})`;
+      const cur = st.current;
+      if (cur && `${cur.camId}:${cur.presetId}` !== last) {
+        last = `${cur.camId}:${cur.presetId}`;
+        syncTouringPreset(cur.camId, cur.presetId); // state.cam/preset + UI 동기화(화면이 순회를 따라간다).
+      }
+      if (st.state !== 'running' && st.state !== 'stopping') {
+        final = st;
+        break;
+      }
     }
   } finally {
     state.touringActive = false;
     if (btn) { btn.disabled = false; btn.textContent = origLabel; }
+    updatePtzControlEnabled();
+    await syncPtzAfterJob(null); // 서버 순회가 카메라를 움직였다 → UI 기준 PTZ 재동기화(capPoll/discPoll 미러).
   }
 
-  // 4) 완료 모달.
+  // 3) 종료 처리 — 정상 완료만 모달(문구 불변), 중단·오류는 상태줄에 정직하게 남긴다.
+  if (!final) return;
+  if (final.state === 'error') {
+    $('cap-msg').textContent = `Touring: 순회 오류 — ${final.error ?? '알 수 없는 오류'}`;
+    return;
+  }
+  if (final.state === 'aborted') {
+    $('cap-msg').textContent = `Touring: 순회 중단(${final.done}/${final.total}).`;
+    return;
+  }
+  if (final.state === 'partial') {
+    // 일부 스텝이 실패했다 — 완료 모달을 띄우면 순회 성공으로 오판한다(카메라가 안 움직였을 수 있다).
+    $('cap-msg').textContent =
+      `Touring: ${final.failed}개 위치 이동 실패(성공 ${final.succeeded}/${final.total}). 카메라 연결·PTZ 상태를 확인하세요.`;
+    return;
+  }
   $('touring-done-body').textContent =
-    `프리셋 ${presetCount}곳, 주차면 ${slotCount}곳 순회 완료.` +
-    (skipped ? ` (센터링 없는 ${skipped}개 슬롯 건너뜀)` : '');
+    `프리셋 ${started.presets}곳, 주차면 ${started.slots}곳 순회 완료.` +
+    (started.skipped ? ` (센터링 없는 ${started.skipped}개 슬롯 건너뜀)` : '');
   $('touring-done-modal').hidden = false;
 }
 
@@ -1963,9 +2047,9 @@ async function loadCameraposViews() {
 
 /** PUT /viewer/api/camerapos(controlToken 준용) → Response. */
 async function saveCameraposViews(views) {
-  return fetch(api('/camerapos'), {
+  return mutFetch(api('/camerapos'), {
     method: 'PUT',
-    headers: tokenHeaders({ 'content-type': 'application/json' }),
+    headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ views }),
   });
 }
@@ -2129,7 +2213,7 @@ async function ggPreview() {
   }
   setGgMsg('미리보기 계산 중…');
   try {
-    const res = await fetch('/capture/ground-grid/bootstrap', {
+    const res = await mutFetch('/capture/ground-grid/bootstrap', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(ggBody(ref)),
@@ -2198,7 +2282,7 @@ async function ggApply() {
   setGgMsg(`적용 중… (preset ${targets.join(',')})`);
   let head = '';
   try {
-    const res = await fetch('/capture/ground-grid/apply', {
+    const res = await mutFetch('/capture/ground-grid/apply', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ ...ggBody(ref), confirm: true, presets: targets, refSpaceIdx: state.selectedPlaceIdx ?? undefined }),
@@ -2250,6 +2334,9 @@ function setPlaceMsg(text) {
 function markPlaceDirty(text) {
   state.placeRoiDirty = true;
   setPlaceMsg(text ?? '편집됨(미저장) — 저장을 눌러 PtzCamRoi.json 에 반영');
+  // ③ 데이터 변경점 — 주차면 편집 커밋(추가·삭제·번호변경·전체삭제·되돌리기·정점이동)이 전부 이 함수를 거친다.
+  // 호출부는 이미 즉시 drawRoiOverlay 로 기하 변경을 보여주므로, 판정이 돌아온 뒤 한 번 더 그린다.
+  void refreshOccupancy().then(() => drawRoiOverlay());
 }
 
 /** 선택된 주차면 정보·삭제 버튼 활성 상태 갱신. */
@@ -2532,7 +2619,7 @@ async function validatePlaceQuad(key, idx) {
     body.imageHeight = frame.naturalHeight;
   }
   try {
-    const res = await fetch('/capture/place-roi/validate', {
+    const res = await mutFetch('/capture/place-roi/validate', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
@@ -2585,7 +2672,7 @@ async function savePlaceRoi() {
       if (skel.zoom == null) ptzWarn = `cam${cam}:${preset}`;
     }
     try {
-      let res = await fetch('/capture/place-roi', {
+      let res = await mutFetch('/capture/place-roi', {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body),
@@ -2603,7 +2690,7 @@ async function savePlaceRoi() {
         }
         body.create = skel;
         if (skel.zoom == null) ptzWarn = `cam${cam}:${preset}`;
-        res = await fetch('/capture/place-roi', {
+        res = await mutFetch('/capture/place-roi', {
           method: 'PUT',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify(body),
@@ -2720,7 +2807,7 @@ function alignTarget() {
 async function alignSaveRef() {
   const { cam, preset } = alignTarget();
   try {
-    const res = await fetch('/capture/refframe', {
+    const res = await mutFetch('/capture/refframe', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ cam, preset }),
@@ -2742,7 +2829,7 @@ async function alignRun() {
     return;
   }
   try {
-    const res = await fetch('/capture/autocorrect', {
+    const res = await mutFetch('/capture/autocorrect', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ cam, preset }),
@@ -2788,7 +2875,7 @@ async function alignApply() {
     return;
   }
   try {
-    const res = await fetch('/capture/place-roi', {
+    const res = await mutFetch('/capture/place-roi', {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ camId: cam, presetIdx: preset, spaces }),
@@ -3176,7 +3263,7 @@ async function pollPipeline() {
 async function startPrecise() {
   $('cap-msg').textContent = '';
   prevPipelineStage = 'idle'; // 새 런 시작 → 파이프라인 전이 추적 재설정.
-  const res = await fetch('/capture/start-precise', {
+  const res = await mutFetch('/capture/start-precise', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
@@ -3258,7 +3345,7 @@ async function capCaptureStart() {
     // autoChain 미전송(요건12: '완료 후 자동 최종화' UI 제거) → 백엔드 기본 false. 스키마·연쇄 코드는 보존.
   };
   prevPipelineStage = 'idle'; // 새 런 시작 → 파이프라인 전이 추적 재설정.
-  const res = await fetch('/capture/start', {
+  const res = await mutFetch('/capture/start', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
@@ -3272,7 +3359,7 @@ async function capStop() {
   // 낙관적 즉시 피드백: 폴링 도착 전 재클릭 방지 + '정지 중…' 표시(실패 시 아래에서 복원).
   $('cap-stop').disabled = true;
   $('cap-msg').textContent = '정지 중… (현재 라운드 마무리 후 종료)';
-  const res = await fetch('/capture/stop', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+  const res = await mutFetch('/capture/stop', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) $('cap-msg').textContent = `정지 실패: ${data.error ?? res.status}`;
   capPoll(); // 이후 renderCaptureStatus 가 실제 state 로 버튼·안내 재정합.
@@ -3343,7 +3430,7 @@ async function capFinalize() {
 // 검출·센터링 초기화(수동): slot_setup 의 vpd/lpd/occupy/ptz/centered/img1 만 비움(바닥 ROI/슬롯 보존).
 async function resetSlotSetupDb() {
   if (!confirm('DB의 검출(VPD/LPD)·점유영역·센터라이징(PTZ)을 모두 초기화합니다. 되돌릴 수 없습니다. 진행할까요?')) return;
-  const res = await fetch('/capture/slots/reset', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+  const res = await mutFetch('/capture/slots/reset', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) { $('cap-msg').textContent = `초기화 실패: ${data.error ?? res.status}`; return; }
   resetOverlayDisplay();           // 클라 라이브 오버레이(detect/occ/vcuboid) 정리.
@@ -3364,7 +3451,7 @@ async function loadRoiToDb() {
  * 성공하면 true, 실패하면 false(호출자가 자기 메시지 영역에 안내한다).
  */
 async function runLoadRoiToDb() {
-  const res = await fetch('/capture/slots/load-roi', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+  const res = await mutFetch('/capture/slots/load-roi', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
   const data = await res.json().catch(() => ({}));
   if (!res.ok || !data.ok) { $('cap-msg').textContent = `ROI 로딩 실패: ${data.error ?? res.status}`; return false; }
   resetOverlayDisplay();           // 클라 라이브 오버레이(detect/occ/vcuboid) 정리.
@@ -3391,7 +3478,7 @@ async function runLoadRoiToDb() {
 // 3D육면체 ROI생성: 지면모델로 슬롯별 육면체 앞면 중심(slot3d_front_center)을 산출해 DB 저장 + 즉시 표시.
 // 파괴적이지 않다(검출·점유·센터링 무접촉) → confirm 없음. 산출 실패 슬롯은 기존 값 보존(skipped 로 드러남).
 async function buildSlotCuboids() {
-  const res = await fetch('/capture/slots/cuboid', {
+  const res = await mutFetch('/capture/slots/cuboid', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ heightM: cuboidHeight() }), // 화면 슬라이더 높이 = 저장 높이(표시=저장 정합).
@@ -3425,7 +3512,7 @@ async function saveLpdToDb() {
     $('disc-msg').textContent = '검출된 번호판 없음 — 먼저 LPD 실행';
     return;
   }
-  const res = await fetch('/capture/slots/lpd', {
+  const res = await mutFetch('/capture/slots/lpd', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ cam, preset, plates }),
@@ -3443,7 +3530,7 @@ async function saveLpdToDb() {
 async function buildOccupyRange() {
   const cam = state.capFrameKey2?.cam ?? state.cam;
   const preset = state.capFrameKey2?.preset ?? state.preset;
-  const res = await fetch('/capture/slots/occupy', {
+  const res = await mutFetch('/capture/slots/occupy', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ cam: Number(cam), preset: Number(preset) }),
@@ -3505,7 +3592,7 @@ async function calStart() {
   preciseActive = false; // 수동 센터라이징 — 상단 진행바 소유권 반납(discStart 미러).
   $('cal-msg').textContent = '';
   $('cal-summary').innerHTML = '';
-  const res = await fetch('/calibrate/ptz', {
+  const res = await mutFetch('/calibrate/ptz', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: '{}',
@@ -3539,7 +3626,7 @@ async function calPointCenter(nx, ny, mode) {
   let data = null;
   let res = null;
   try {
-    res = await fetch('/calibrate/point', {
+    res = await mutFetch('/calibrate/point', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       // source 동봉: 뷰어에서 보고 있는 소스 = 명령 대상(미동봉이면 서버 기동 시 고정된 파이프라인 카메라로 간다).
@@ -3679,7 +3766,7 @@ async function discStart() {
   // 현재 표시 프리셋 한정(runLiveDetect 미러) — 정밀수집 폴 중이면 표시 프레임, 아니면 라이브 선택 프리셋.
   const cam = state.capFrameKey2?.cam ?? state.cam;
   const preset = state.capFrameKey2?.preset ?? state.preset;
-  const res = await fetch('/discover/ptz', {
+  const res = await mutFetch('/discover/ptz', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ cam, preset }), // 전체 배치 → 현재 프리셋 한정.
@@ -3804,7 +3891,7 @@ async function lensStart() {
   lensLastSeq = 0;
   lensStartedAt = Date.now();
 
-  const res = await fetch('/calibrate/lens/start', {
+  const res = await mutFetch('/calibrate/lens/start', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ source: state.source, mode }),
@@ -3819,7 +3906,7 @@ async function lensStart() {
 }
 
 async function lensStop() {
-  const res = await fetch('/calibrate/lens/stop', { method: 'POST' });
+  const res = await mutFetch('/calibrate/lens/stop', { method: 'POST' });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) $('lens-msg').textContent = `정지 실패: ${data.error ?? res.status}`;
   lensPoll();
@@ -3903,7 +3990,7 @@ function renderLensSummary(status) {
 }
 
 async function lensApply() {
-  const res = await fetch('/calibrate/lens/apply', {
+  const res = await mutFetch('/calibrate/lens/apply', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ source: state.source, enabled: true }),
@@ -4269,7 +4356,7 @@ async function saveManualIndex() {
   try {
     let placed = '';
     if (place.changed) {
-      const rp = await fetch(api('/mapping/placement'), {
+      const rp = await mutFetch(api('/mapping/placement'), {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ placements: place.placements }),
@@ -4281,7 +4368,7 @@ async function saveManualIndex() {
       }
       placed = `배치 ${dp.updated}면 · `;
     }
-    const r = await fetch(api('/mapping/renumber'), {
+    const r = await mutFetch(api('/mapping/renumber'), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ mapping }),
@@ -4434,7 +4521,7 @@ async function saveSettings() {
     return;
   }
   try {
-    const res = await fetch('/settings', {
+    const res = await mutFetch('/settings', {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(form),
@@ -4460,19 +4547,13 @@ async function saveSettings() {
 
 // --- Unity RPC 콘솔 + LLM 모델 전환(옵션 탭) -----------------------------
 
-/** controlToken 입력값이 있으면 x-viewer-token 헤더를 붙인 headers 반환. */
-function tokenHeaders(base = {}) {
-  const t = $('viewer-token')?.value.trim();
-  return t ? { ...base, 'x-viewer-token': t } : base;
-}
-
 /** POST /viewer/api/rpc — method/params 를 Unity 로 프록시(controlToken 게이트 준용). */
 async function callRpc(method, params) {
   const body = { method };
   if (params !== undefined) body.params = params;
-  const res = await fetch(api('/rpc'), {
+  const res = await mutFetch(api('/rpc'), {
     method: 'POST',
-    headers: tokenHeaders({ 'content-type': 'application/json' }),
+    headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
   });
   return { status: res.status, data: await res.json().catch(() => ({})) };
@@ -4550,9 +4631,9 @@ async function loadLlmModels() {
 async function selectLlmModel(id) {
   const msg = $('opt-llm-active-msg');
   try {
-    const res = await fetch(api('/llm/select'), {
+    const res = await mutFetch(api('/llm/select'), {
       method: 'POST',
-      headers: tokenHeaders({ 'content-type': 'application/json' }),
+      headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ id }),
     });
     const data = await res.json().catch(() => ({}));
@@ -5177,7 +5258,7 @@ function wire() {
   $('btn-ptz-refresh').addEventListener('click', () => refreshCurrentPtz());
 
   $('btn-login').addEventListener('click', async () => {
-    const res = await fetch(api('/camera/login'), {
+    const res = await mutFetch(api('/camera/login'), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -5197,8 +5278,17 @@ function wire() {
   }
 }
 
+/** 옵션탭 제어토큰 입력칸 ↔ localStorage 결선(새로고침해도 유지 — 토큰이 사라지면 모든 변이가 403 이 된다). */
+function wireControlToken() {
+  const input = $('viewer-token');
+  if (!input) return;
+  input.value = getControlToken();
+  input.addEventListener('input', () => setControlToken(input.value));
+}
+
 async function init() {
   wire();
+  wireControlToken();
   wirePanelResize();
   await loadSources();
   // 요구사항 5: 페이지 로드 시 기존 결과(ROI 3종)를 자동 표시하지 않는다.

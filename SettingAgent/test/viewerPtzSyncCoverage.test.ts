@@ -32,6 +32,7 @@ const MOVES_CAMERA: Record<string, string> = {
   '/capture/start-precise': '정밀수집 파이프라인(discovering=앵커 loop LPD / calibrating=센터라이징) 발화',
   '/capture/pipeline': '자동체인(discovering=앵커 loop LPD / calibrating=센터라이징)',
   '/calibrate/lens/start': 'CalibrationRunner 스윕 — goPtz/setCenter 로 카메라를 수십 분 점유(종료·중지·실패 모두 원 PTZ 복귀)',
+  '/capture/tour/start': 'TourJob 순회 — 프리셋홈 move/requestImage + 슬롯 centering move(서버가 카메라를 움직인다)',
   '/move': '수동 PTZ 이동',
 };
 
@@ -63,6 +64,10 @@ const NO_MOVE: Record<string, string> = {
   '/capture/slots': '조회',
   '/capture/slots/lpd': '조회',
   '/capture/slots/occupy': 'DB(lpd→occupy_range 재생성)',
+  // 점유 **판정**(refreshOccupancy). 검출값을 본문으로 받아 계산만 한다 — 라우트 구현에
+  // camera/ICameraClient 의존이 아예 없다(captureRoutes:handleJudgeOccupancy 는 deps 를 받지도 않는다).
+  // → 카메라를 움직이지 않으므로 syncPtzAfterJob 책임이 따라오지 않는다(W2 §4.2 인계 항목의 답).
+  '/capture/slots/judge-occupancy': '순수 판정(입력은 본문 — 카메라 미이동·DB 무접촉)',
   '/capture/setup-result': '파일 IO(DB→setup_result.json)',
   '/capture/saves/setup_result': '저장본 조회(GET setup_result.json — Touring 순회 입력)', // 파일 읽기만; 카메라 미이동
 
@@ -76,6 +81,7 @@ const NO_MOVE: Record<string, string> = {
   '/capture/slots/cuboid': 'DB', // 지면모델 → slot3d_front_center 산출·저장(순수 계산·DB 만; 카메라 미이동)
   '/capture/status': '상태 조회',
   '/capture/stop': '잡 중지 신호(이동 없음)',
+  '/capture/tour/status': '순회 진행 상태 조회(이동은 /capture/tour/start 가 시작한 서버 잡이 한다)',
   '/capture/vehicle-cuboids': 'requestImage(cam,preset) — ptz 미지정 → mode preset',
   '/db/table/${encodeURIComponent': 'DB 조회',
   '/db/tables': 'DB 조회',
@@ -88,6 +94,10 @@ const NO_MOVE: Record<string, string> = {
   '/mapping': '파일 IO',
   '/mapping/placement': 'DB 배치(cam/preset/위치) 부분 UPDATE + json 전파(파일 IO·DB 만; 카메라 미이동)',
   '/mapping/renumber': 'DB slot_id 재번호 + json 전파(파일 IO·DB 만; 카메라 미이동)',
+  // 슬롯 엔트리 편집(setup_artifact.json). 웹은 dryRun:true 로 부르므로 **파일 IO 조차 없다**(순수 계산 반환).
+  // 라우트 구현(server.ts:slotAddHandler/slotDeleteHandler)에 camera/ICameraClient 의존이 없다.
+  '/mapping/slot/add': '산출물 슬롯 추가 계산(dryRun 이면 파일 IO 0; 카메라 미이동)',
+  '/mapping/slot/delete': '산출물 슬롯 삭제 계산(dryRun 이면 파일 IO 0; 카메라 미이동)',
   '/ptz': '읽기 전용 PTZ 조회(동기화 자체가 쓰는 경로)',
   '/rpc': 'Unity RPC 패스스루',
   '/rpc/catalog': '카탈로그 조회',
@@ -97,7 +107,11 @@ const NO_MOVE: Record<string, string> = {
 
 /** 뷰어 스크립트(app.js + roimaker.js)가 fetch 하는 모든 라우트 경로. */
 function fetchedRoutes(): string[] {
-  const re = /fetch\((?:api\()?[`'"](\/[a-zA-Z0-9/_?=&{}$.-]+)/g;
+  // ★ 대문자 F 필수 — 토큰 배선(web/token.js `mutFetch`) 이후 변이 요청은 전부 `mutFetch(` 로 나간다.
+  //   소문자 `fetch\(` 만 훑으면 **카메라를 움직이는 라우트가 100% 수집에서 빠지고**(29 vs 57),
+  //   아래 첫 단정은 "수집된 것 중 미분류"를 보므로 **덜 수집할수록 통과가 쉬워진다** —
+  //   테스트는 green 인데 봉인은 사라진 상태가 된다(이 저장소가 반복해 겪은 조용한 유실).
+  const re = /[Ff]etch\((?:api\()?[`'"](\/[a-zA-Z0-9/_?=&{}$.-]+)/g;
   const out = new Set<string>();
   for (const src of [APP, ROIMAKER]) {
     for (const m of src.matchAll(re)) out.add(m[1]!.split('?')[0]!);
@@ -149,6 +163,8 @@ describe('수정 14 — 뷰어 PTZ 동기화 커버리지', () => {
     '/capture/start': 'capPoll',
     '/capture/detect': 'runLiveDetect',
     '/capture/pipeline': 'pollPipeline',
+    // 순회는 서버 잡(TourJob)이 카메라를 움직인다 → 폴링 함수가 종료 시 UI 기준 PTZ 를 되찾아야 한다.
+    '/capture/tour/start': 'runTouringTest',
   };
 
   it.each(Object.entries(SYNC_OWNER))('%s → %s 가 syncPtzAfterJob 을 호출한다', (_route, owner) => {

@@ -1,81 +1,59 @@
-# 04 영향도 분석 — 그리기 렌더 결함 수정 + ROI 초기화/전체삭제
+# 04 문서화·영향도 요약 — SettingAgent 4건 서버 정본화 + 웹 껍데기화
 
-작성: 2026-07-28 14:08 / 문서화(documenter)
-최종 문서: `SettingAgent/docs/20260728_140851_그리기렌더수정_ROI초기화_전체삭제.md`
+작성: 2026-07-28 23:16 / 문서화(documenter)
+갱신: 2026-07-28 23:50 — 독립 QA 검증(`_workspace/03_qa_report.md`) · 결함 수정 3건(투어링 partial · D-1 · D-6) ·
+리더 라이브 검증(포트 13021) 반영. 아래 내용은 기존 서술 중 사실과 달라진 부분만 정정하고 새 사실을 추가한 것이며,
+전면 재작성이 아니다.
 
----
+※ 이 파일은 이전 라운드(그리기 렌더 결함 수정)의 산출물이 있던 자리를 이번 작업(서버 정본화 4건) 내용으로 **대체**했다.
+이전 라운드 문서는 `SettingAgent/docs/20260728_140851_그리기렌더수정_ROI초기화_전체삭제.md` 에 이미 남아 있으므로 유실이 아니다.
 
-## 1. 변경/신규 파일과 파급
+## 최종 문서
 
-| 파일 | 구분 | 파급 대상 |
-|---|---|---|
-| `web/app.js` | 수정(범위 큼) | 렌더 결함 수정(3점 닫힘 예고) · `ensureFloorVisible` 신규+4곳 배선 · 초기화/전체삭제/되돌리기 함수 신규 · `state.placeRoiUndo` 필드 · `renderPlaceSelectionInfo` disabled 동기화 · `savePlaceRoi` 스냅샷 소진 1줄 · `wire()` 결선. 아래 §2 참조 |
-| `web/index.html` | 수정(가산) | `.roi-edit-bar` 2행 분리 + 버튼 3개(`place-clear`·`place-clear-preset`·`place-undo`) 추가. 기존 id·속성·순서 무변경 → 기존 결선·CSS 셀렉터 영향 없음 |
-| `web/placeDraw.js` | 수정 | `clearPresetSpaces` 신규(순수함수). `core.js`의 `removePlaceSpace`를 **호출만** 함 — `core.js` 자체는 무수정 |
-| `web/placeDraw.d.ts` | 수정 | `clearPresetSpaces` 타입 선언 추가. `tsc --noEmit` 0에러 유지 확인됨 |
-| `test/placeDraw.test.ts` | 수정 | `clearPresetSpaces` 순수 테스트(랜덤 500케이스 포함) 추가 — 테스트 전용, 런타임 영향 없음 |
-| `test/placeDrawWiring.test.ts` | 수정 | S1~S4 렌더/순서/결선 소스텍스트 봉인 describe 추가(+19건) — 테스트 전용 |
-
-### 무변경 확인(보호 파일) — `git diff --numstat` 재확인 결과
-```
-groundModel.ts · project.ts · ground/types.ts · floorRoi.ts · web/core.js ·
-Finalizer.ts · SqliteStore.ts · roiDbLoad.ts
-```
-문서화 시점 재확인 결과, `web/core.js`·`project.ts`·`ground/types.ts`·`floorRoi.ts`·`Finalizer.ts`·`SqliteStore.ts`·`roiDbLoad.ts` **7개는 이번 라운드 완전 무변경**이다. `groundModel.ts`는 `git status`상 diff가 있으나 리더·검증자가 mtime(11:36, 이번 라운드 편집창 13:35~13:44보다 이전)으로 **이전 라운드(지면격자) 산물임을 이미 확인**한 것을 재인용한다 — 이번 라운드가 만든 변경이 아니다. `web/app.css`도 이번 라운드 무변경(diff는 직전 그리기 도구 라운드 누적분).
-
-서버(`src/**`)는 이번 라운드 **완전 무변경**이다.
+1. **구현 설계·변경 문서**: `SettingAgent/docs/20260728_231600_4건_서버정본화_웹껍데기화_구현.md`
+2. **영향도 분석 문서**: `SettingAgent/docs/20260728_231600_4건_서버정본화_영향도분석.md`
 
 ---
 
-## 2. 기존 기능 영향
+## 핵심 요약
 
-### 2-1. 캔버스 렌더/편집 (그리기 오프 상태)
-- 검증자가 배포 원문 `drawPlaceDrawOverlay`를 직접 실행해 그리기 off 3케이스(정점편집 on/off, 선택 유무 조합) 전부 **발행 캔버스 명령 0건**을 확인 — 회귀 0이 구조가 아니라 실행으로 증명됐다.
-- 1점·2점·2점+커서 렌더 시퀀스는 baseline과 **바이트 단위 동일**(추가된 것은 3점 단계 점선 하나뿐).
+- 4건(①인증 토큰 ②투어링 ③점유판정 ④슬롯편집)을 W1~W4 웨이브로 순차 서버 정본화. 신규 소스 6개(`controlGate.ts`·`touringPlan.ts`·`TourJob.ts`·`tourRoutes.ts`·`occupancyJudge.ts`·`artifactSlotEdit.ts`) + `web/token.js`, 수정 13개(테스트 제외). `git diff --stat`: **22 files changed, 1409 insertions(+), 693 deletions(-)**(W4 완료 시점 실측치 — 이후 결함수정 3건이 이 목록 내 파일들을 추가로 건드렸고, 갱신 후 라인수는 재실행하지 않아 확인 필요로 남긴다).
+- 핵심 설계 결정 5가지: RPC 로직 0줄(REST 위임) · `dryRun` 으로 정본화+기존 UX 동시 만족(리더 Q3) · 파리티 기준변은 항상 `web/*` · DB 쓰기 0(wipe 전례 회피) · 토큰 게이트 deny-by-default.
+- 작업 중 실결함 **7건** 발견·수정(최초 4건 + 독립 QA·리더 라이브 검증에서 추가 3건): 웹 `state.ptz` 부패(W2) · 미등록 라우트 2건(T4 동적검사) · **R15**(`mutFetch` 도입으로 PTZ 커버리지 정규식이 카메라 이동 라우트 8/9 놓침 — green 인데 봉인 없던 상태, W2 해소·설계자 독립 재현 완료) · 뷰어 컨텍스트 라우트 누락 시 웹 404(W4 사전 대응) · **★투어링 partial**(리더 라이브 검증 발견 — 전량 실패인데 `done 28/28·skipped 0` 오보 → `succeeded`/`failed`/`partial` 상태 신설로 수정) · **★D-1**(독립 QA 발견 — `artifact` 버퍼가 파일 전체 대체 → `rejectBufferCommit()` 가드로 409/`-32005` 차단, 기능손실 0, 웹 무영향) · **D-6**(독립 QA 발견 — `addSlot` 경고 문구 이어붙임 → 대체 방식으로 수정).
+- **테스트 결과(실측 그대로)**: `npx tsc --noEmit` 0 / `npx vitest run` **2 failed | 3452 passed (3454)**. 웨이브별 증가 3291(W1)→3349(W2)→3396(W3)→3436(W4)→**3452**(QA 봉인편입 +7 + W4 D-1 가드 회귀 +9). 사전 실패 2건(`test/roiDbLoad.test.ts`·`test/placeRoiRuntimeInvariants.test.ts`)은 W1 착수 전부터 존재·이번 작업과 무관·상태 변화 없음 — QA 시작/종료 재측정과 최종 상태 모두에서 신원 재확인됨. `GET /rpc/catalog` **70→76**(QA·리더 라이브 검증 양쪽에서 실측 재확인).
+- **독립 QA 검증**(`_workspace/03_qa_report.md`, 최초 문서 작성 후 실제로 수행됨 — "이번 라운드 QA 문서 없음"은 정정한다): 7개 항목 중 6개 통과(웹 껍데기화·토큰 게이트 87라우트 전수·파일 무변경 30케이스·DB 파괴경로 부재·RPC 규약·경계면 교차비교), 1개(파리티 판별력) 결함 — 변이 17건 중 10 검출/7 미검출, 미검출 중 6건은 진짜 구멍(1건은 원리적 검출 불가) → **6건 전부 영구 케이스로 편입 후 재주입 6/6 FAIL 실증**, 최종 판별력 17건 중 16 검출.
+- **리더 라이브 검증**(포트 13021, 마스터 13020 무접촉): `GET /rpc/catalog`=76, 토큰 게이트 무토큰 403/토큰 통과, `setup.slot.add {dryRun:true}` 파일 md5 완전 불변 + 실커밋 후 원복 확인, `setup.slot.delete` 부재 슬롯 거부+파일 무변경, **점유판정 웹↔서버 라이브 완전 일치**, 오류코드 실측, **투어링 실카(Hucoms 192.168.0.153) 28스텝 완주**(이 과정에서 투어링 partial 결함 발견). 검증 후 환경 원복 완료(config port 13020/controlToken:"", fixture 삭제, 13021 종료). → 남은 미확인은 **브라우저 화면 육안**(폴링 라벨·완료 모달·오버레이 픽셀 동일성·2단계 UX 체감·localStorage)과 **`partial` 상태의 실패-경로 라이브 관측**뿐이다.
 
-### 2-2. `#roi-floor` 토글 — 부수효과 고지
-`ensureFloorVisible()`은 사용자 명시 조작(그리기 시작/커밋/정점편집 ON/목록 선택) 직후에만 호출되며, 자동 폴링·렌더 루프(`drawRoiOverlay`·`drawFileFloorRoi`·`loadPlaceRoi`)에는 존재하지 않음을 테스트로 봉인했다. 이 토글을 켜면 **artifact 슬롯의 floor 히트테스트(`layers.floor`)도 함께 켜지는 부수효과**가 있으나, 이는 `#roi-floor` 기본값(checked, `index.html` 초기 상태)과 동일한 동작으로 되돌리는 것뿐이라 신규 동작이 아니다.
+## 타 에이전트 영향
 
-### 2-3. `#slot-list` 목록 UI
-`renderSlotList` 자체는 이번 라운드 변경 0(직전 라운드 D-2 병기 분기 유지, 봉인 테스트 green). 다만 `#place-clear-preset` disabled 동기화를 카메라 전환(`sel-cam`) 경로에는 넣지 않았다 — 이유는 그 경로가 기존부터 `renderSlotList()`를 호출하지 않아, 넣었다면 카메라 전환 후 버튼이 "잘못 잠긴 채 굳는" 새 무반응 결함이 생기기 때문(검증자가 코드로 확인·승인). 대신 버튼은 항상 활성으로 두고 클릭 시점에 빈 프리셋 안내로 방어한다 — 파괴는 `confirm` 이후에만 일어나 안전성 손실은 없다.
+- ActionAgent/DMAgent 가 읽는 `data/setup_artifact.json`·`save/setup_result.json` **스키마는 불변**. 단 슬롯편집 기능이 `setup_artifact.json` 의 **슬롯 수(내용)를 바꿀 수 있다** — 문서에 명시함. D-1 가드(`rejectBufferCommit`) 로 "호출자 버퍼가 파일을 조용히 통째로 대체"하는 위험은 차단됐다.
+- MCP `setting_rpc_catalog`/`setting_rpc` 는 카탈로그를 그대로 프록시하므로 **MCP 파일 수정 0**인데 노출 메서드는 70→76 으로 자동 증가. 76 은 QA·리더 라이브 검증 양쪽에서 재확인됨.
 
-### 2-4. `PUT /capture/place-roi` 및 파일(`PtzCamRoi.json`)
-- 초기화·전체삭제·되돌리기 세 함수 모두 `fetch` 0줄 — **파일 접촉 없음**을 코드 확인 + `PtzCamRoi.json` mtime(변경 전 상태 유지)으로 재확인했다.
-- 전체삭제가 저장 시 만드는 "빈 배열 PUT"은 **기존 서버 스키마가 이미 허용**하는 입력이라 서버측 계약 변경이 없다(`PlaceRoiPutSchema.spaces`는 min 없는 배열). `applyPlaceRoiUpdateEx`가 대상 프리셋을 통째 교체하는 기존 동작 그대로다.
-- 전체삭제는 **다른 프리셋의 전역 idx도 이동시킨다**(`removePlaceSpace` 전역 재압축 특성 — 기존 '삭제' 버튼과 동일 성질, 새 위험 등급이 아님). 저장 후 `slot_ptz.json`·DB(`slot_setup`)·artifact `globalIndex`와의 정합은 기존 'ROI 파일 로딩'(runLoadRoiToDb) 재구성 절차로 수렴해야 한다 — 확인문에 명시했고, 신규 절차를 만들지는 않았다.
-- 전체삭제로 어느 프리셋이 파일상 면 0개가 되면, 다음 로드 시 `placeRoiFileKeys`에서 빠져 `needsPlaceSkeleton=true`가 된다 — 그 프리셋에 다시 그려 저장하려면 **라이브 프레임이 먼저 필요**하다(기존 신규 주차장 경로와 동일 조건, 실패 메시지도 기존 것 재사용).
+## 알려진 한계·미검증(은닉 없이 문서에 명시)
 
-### 2-5. 전역 idx 의존 (`slot_ptz.json`·센터링·artifact `globalIndex`)
-`clearPresetSpaces`는 기존 `removePlaceSpace`(전역 재압축)를 그대로 위임하므로 idx 계약을 새로 만들지 않는다. 랜덤 500케이스 검증으로 결과가 항상 1..N 순열임을 확인했다. 다만 전체삭제 후 idx가 이동한 신규 상태에 대해 센터링·`slot_ptz.json` 갱신은 **이번 작업 범위 밖**(기존 절차로 별도 필요) — §2-4와 동일한 한계다.
+① 무인증 카메라 이동 라우트는 **`/capture/detect` + `/capture/autocorrect` 2개**다(최초 작성 시 1개로 적었던 것을 독립 QA D-3 이 정정, 리더 Q1(a) 현행 유지·둘 다 문서에 명시) ② 라이브 검증 — 라우트/RPC/파일 정합·점유판정 일치는 리더가 실측 완료, **브라우저 화면 육안**과 **투어링 partial 의 실패-경로 라이브 관측**만 미확인 ③ 사전 실패 2건은 이번 작업과 무관·상태 변화 없음(QA 재확인 완료), `points:[]` 규약 vs "4점 필수" 모순은 마스터 판단 대기 ④ `setup.slot.add` 는 artifact 편집이지 주차면 추가가 아님(리더 Q4, 명시함) ⑤ 슬롯편집 후 `renumber`/`placement` 호출 시 편집 소실 가능(R10, 코드로 안 막음 — `warnings[]`로만 고지) ⑥ D-1: `artifact` 버퍼가 파일 전체를 대체하는 위험 — 설계 R12는 "DB 에는 참, 파일에는 거짓"이었고 지금은 `rejectBufferCommit()` 가드로 차단됨 ⑦ 투어링 partial: 전량 실패를 `done` 으로 오보하던 결함을 발견·수정, 실패-경로 라이브 관측은 아직 없음.
 
-### 2-6. `state.placeRoiBackup`(자동보정 전용)
-신규 `state.placeRoiUndo`와 **완전히 분리**되어 있다(교차 참조 0, 버튼 id 별개 `#place-undo`/`#align-undo`, 소진 지점도 각각 `savePlaceRoi`/`alignApply`). 자동보정(`alignApply`/`alignUndo`) 흐름에는 영향 없음.
+## 확인 필요(운영) — 갱신: 대부분 해소됨
 
----
+`config/tools.config.json` 의 `server.port:13020→13021`·`viewer.controlToken:""→"LIVETEST"` 상태는 리더의
+라이브 검증에 실제로 쓰인 것으로 확인됐고, 검증 후 **원복 완료**(port 13020, controlToken:"", git HEAD 와
+바이트 동일 확인) — 더 이상 확인 필요 항목이 아니다. `x.json`(untracked)은 독립 QA(D-7)가 출처를 특정했다 —
+`test/jobFrameReset.test.ts` 의 테스트 부산물(사전 존재, 이번 작업과 무관), `.gitignore` 등록 여부만 남은 결정.
 
-## 3. 테스트
+## 롤백
 
-- 신규/수정 테스트: `test/placeDraw.test.ts`(`clearPresetSpaces` 순수 테스트, 랜덤 500케이스 포함) · `test/placeDrawWiring.test.ts`(S1~S4 렌더/순서/결선 봉인 +19건).
-- 전량 회귀: `tsc --noEmit` **0에러**, `vitest run` **256파일 / 3079테스트 green**(구현자·검증자 실행 수치 일치), L3 골든 해시(`test/groundGrid.test.ts`) green.
-- 검증자가 추가로 수행한 것은 vitest가 아니라 **배포 소스 원문을 직접 잘라 실행하는 별도 하네스**(`qa_render.mjs`·`qa_clear.mjs`·`qa_off.mjs`, scratchpad에서 실행 후 저장소 무오염 확인)였다 — "테스트 통과"와 "실제 발행되는 캔버스 명령"을 구분하기 위함.
+W4→W3→W2→W1 역순 롤백 가능(각 웨이브가 이전 웨이브 파일을 수정하지 않았음을 상호 확인). W1(토큰)은 W2~W4 전부가 `mutFetch` 규약을 계승했으므로 **가장 마지막에만 롤백 가능**. 단 `test/viewerPtzSyncCoverage.test.ts` 의 R15 정규식 수정(`[Ff]etch\(`)은 W2 롤백 시에도 **유지해야 함**(W1 이 남긴 실결함의 수정이므로). 이후 결함수정 3건(투어링 partial·D-1·D-6)은 각각 W2/W4/W4 산출물 내부 수정이라 별도 롤백 단위를 추가하지 않는다 — 해당 웨이브를 롤백하면 함께 되돌아간다.
 
----
+## 후속 작업 후보(갱신)
 
-## 4. 운영 유의
-
-- **되돌리기는 1단계 한정**이다. 초기화·전체삭제 각각 1회분만 복구 가능하며, 그 이후 다른 편집(새 면 추가·번호 수정 등)이 있으면 되돌리기 시 그 편집까지 함께 사라진다 — 이 경우에만(지문 불일치 시에만) 추가 확인이 뜬다.
-- **저장 전에는 파일이 절대 바뀌지 않는다** — 초기화/전체삭제/되돌리기는 메모리 조작뿐이고, 반영은 기존 '저장' 버튼 클릭 시 1회 PUT으로만 일어난다.
-- **`place-delete`(기존 개별 삭제 버튼)로 지운 면은 이번 라운드로도 복구되지 않는다** — 되돌리기는 초기화·전체삭제 경로에만 연결되어 있다.
-- 전체삭제로 어떤 프리셋이 파일상 0면이 되면, 다음에 그 프리셋에 다시 그려 저장하려면 **라이브 프레임을 먼저 시작**해야 한다(§2-4).
-- **브라우저 실렌더는 여전히 미확인**이다 — 아래 후속 권고 참조.
+1. **[여전히 최상위, 범위 축소]** 마스터 브라우저 육안 확인 — 남은 것은 화면(폴링 라벨·완료 모달·오버레이 픽셀 동일성·2단계 UX·localStorage)뿐.
+2. 무인증 카메라 이동 라우트 2개(`/capture/detect`+`/capture/autocorrect`) 별건 처리 여부 결정.
+3. 사전 실패 2건 `points:[]` vs "4점 필수" 모순 해소 방침 결정(이번 작업과 무관, memo 이월 중).
+4. R10(슬롯편집-renumber 소실) 실제 재현 테스트 여부 검토.
+5. 투어링 `partial` 상태의 실패-경로 라이브 관측(실장비는 보통 204 를 받아 `failed:0` 만 재현됨).
+6. D-5(순수 판정 라우트가 capture 잡 의존성에 묶임, 실운영 영향 0) 처리 여부.
+7. `x.json` 출처는 밝혀짐(D-7, 테스트 부산물) — `.gitignore` 등록 여부만 결정.
 
 ---
 
-## 5. 후속 권고 (우선순위)
-
-1. **[최상위] 마스터 브라우저 육안 확인** — `#roi-floor`가 꺼진 상태에서 그리기를 시작/커밋했을 때 초록 파일 ROI가 실제로 보이는지, 3점 단계 점선 닫힘 예고가 시인성 있게 보이는지, `confirm()` 모달과 2행 레이아웃이 정상 렌더되는지. 이번 라운드는 전부 "코드 경로 확인"까지이며 실제 픽셀은 누구도 보지 못했다.
-2. 전체삭제 → 저장 → `ROI 파일 로딩`(DB 재구성) 종단 흐름을 실서버로 1회 재현 — 현재는 코드 직접 실행(`applyPlaceRoiUpdateEx`/`normalizePtzCamRoi`)까지만 확인됨, HTTP 계층·파일 I/O는 미검증.
-3. F-1 잔여 갭 처리 방침 결정 — 기존 `place-delete`(개별 삭제) 경로도 되돌리기로 복구할지 여부(리더 요구는 "초기화·전체삭제 양쪽"이었고 이번 범위는 그 둘까지만).
-4. F-5(되돌리기 버튼 문구 중복 `#place-undo`/`#align-undo`) 문구 구분 — 정보 등급, 다음 라운드 판단.
-5. 별건: 실카 자동ROI 격자 스케일 의심(`auto cam1 p01 8/10`) — 이번 라운드는 지시대로 손대지 않음, 그리기 정상화 확인 후 별도 확인 필요.
-6. 이월 항목(변경 없음): R2(단일 quad `focalFromVPs` f²≤0) 근본 해결 · `normalizePtzCamRoi` 조용한 탈락 · `allowNew` UI 미노출 · Unity 튜닝값.
+**갱신 이력**: 2026-07-28 23:50 — 독립 QA·결함수정 3건·리더 라이브 검증 반영.
