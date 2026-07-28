@@ -27,6 +27,24 @@ function functionBody(src: string, name: string): string {
   throw new Error(`${name} 본문 파싱 실패`);
 }
 
+describe('ROI 표시 토글 초기값', () => {
+  it('바닥(#roi-floor)은 기본 OFF — 웹 시작 시 체크 해제 상태다(마스터 요청 2026-07-28)', () => {
+    const i = html.indexOf('id="roi-floor"');
+    expect(i, '#roi-floor 체크박스가 index.html 에 있어야 함').toBeGreaterThan(-1);
+    const tag = html.slice(html.lastIndexOf('<input', i), html.indexOf('>', i) + 1);
+    expect(tag).not.toContain('checked');
+  });
+
+  it('나머지 표시 토글(차량·번호판·점유)의 기본 ON 은 유지된다(바닥만 바꿨다)', () => {
+    for (const id of ['roi-vehicle', 'roi-plate', 'roi-occupancy']) {
+      const i = html.indexOf(`id="${id}"`);
+      expect(i, `#${id} 가 index.html 에 있어야 함`).toBeGreaterThan(-1);
+      const tag = html.slice(html.lastIndexOf('<input', i), html.indexOf('>', i) + 1);
+      expect(tag, `#${id} 는 기본 ON 이어야 함`).toContain('checked');
+    }
+  });
+});
+
 describe('표시 초기화(#roi-clear) — 바닥 제외 오버레이 데이터 삭제(Hide 아님)', () => {
   it('#roi-clear 는 resetOverlayDisplay 에 결선된다(clearRoiDisplay 재유입 차단)', () => {
     expect(app).toMatch(/\$\(['"]roi-clear['"]\)\.addEventListener\(\s*['"]click['"]\s*,\s*resetOverlayDisplay\s*\)/);

@@ -3924,14 +3924,20 @@ function setTab(tab) {
   const analyze = tab === 'analyze';
   const options = tab === 'options';
   const db = tab === 'db';
-  const full = analyze || options || db; // 전체폭 뷰(뷰포트·패널 숨김).
+  const roimaker = tab === 'roimaker';
+  const full = analyze || options || db || roimaker; // 전체폭 뷰(뷰포트·패널 숨김).
   document.querySelector('.viewport-wrap').hidden = full;
   $('panel-resizer').hidden = full;
   $('panel').hidden = full;
   $('analyze-view').hidden = !analyze;
   $('options-view').hidden = !options;
   $('db-view').hidden = !db;
+  $('roimaker-view').hidden = !roimaker;
   $('precise-box').hidden = tab !== 'precise';
+  // ROI 편집 탭은 자기 스트림을 쓴다 → 제어탭 스트림을 내려 카메라 이중 점유를 막는다(설계서 §8 위험 7).
+  if (roimaker) stopLive();
+  // 결선은 roimaker.js 가 이 이벤트로 받는다(app.js ↔ roimaker.js 직접 의존 없음 — 모듈 격리).
+  document.dispatchEvent(new CustomEvent('sv:tab', { detail: { tab } }));
   if (tab === 'precise') { capPoll(); calPoll(); loadPlaceRoi(); loadGroundModel(); void loadParkingSlots().then(() => drawRoiOverlay()); }
   if (analyze) renderAnalysis();
   if (options) { loadSettings(); loadRpcCatalog(); loadLlmModels(); }

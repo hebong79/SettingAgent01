@@ -516,6 +516,53 @@ export class SqliteStore {
     return { changed: tx(rows) };
   }
 
+  /**
+   * 기하(slot_roi)만 slot_id 키로 부분 UPDATE(updated_at 동반) — ROIMaker 수동 편집 전용.
+   * ★ 전량 delete 금지(`upsertSlotLpd` 와 동일 규약) — 타깃 외 슬롯·타 컬럼(vpd/lpd/occupy/pan/tilt/
+   *   zoom/centered/img1/slot3d_front_center) 불변. 배치(cam/preset/preset_slotidx)도 무접촉.
+   * slotRoi 는 이미 stringify5 직렬화된 정규화 폴리곤 JSON TEXT(호출측 규약). 빈 폴리곤은 '[]'.
+   * slot_id 미존재 행은 조용히 무시. 반환=실제 갱신 행수.
+   */
+  updateSlotRoiGeometry(
+    rows: Array<{ slotId: number; slotRoi: string }>,
+    updatedAt: string = new Date().toISOString(),
+  ): { changed: number } {
+    const set = this.db.prepare(`UPDATE slot_setup SET slot_roi = ?, updated_at = ? WHERE slot_id = ?`);
+    const tx = this.db.transaction((list: Array<{ slotId: number; slotRoi: string }>) => {
+      let changed = 0;
+      for (const r of list) changed += set.run(r.slotRoi, updatedAt, r.slotId).changes;
+      return changed;
+    });
+    return { changed: tx(rows) };
+  }
+
+  /**
+   * 신규 슬롯 행만 INSERT(기존 행 무접촉) — ROIMaker 가 새로 그린 주차면 전용.
+   * ★ `replaceSlotSetup` 과 달리 DELETE 를 하지 않는다(검출·점유·센터링 보존).
+   * PK/UNIQUE 충돌은 트랜잭션 예외 → 전량 롤백(부분 삽입 금지). 반환=삽입 행수.
+   */
+  insertSlotSetupRows(rows: SlotSetupRow[]): { inserted: number } {
+    const ins = this.db.prepare(
+      `INSERT INTO slot_setup
+         (slot_id, cam_id, preset_id, preset_slotidx, slot_roi, vpd_bbox, lpd_obb, occupy_range,
+          pan, tilt, zoom, centered, img1, slot3d_front_center, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const tx = this.db.transaction((list: SlotSetupRow[]) => {
+      for (const r of list) {
+        ins.run(
+          r.slotId, r.camId, r.presetId, r.presetSlotIdx ?? null,
+          r.slotRoi, r.vpdBbox ?? null, r.lpdObb ?? null, r.occupyRange ?? null,
+          r.pan == null ? null : round5(r.pan), r.tilt == null ? null : round5(r.tilt), r.zoom == null ? null : round5(r.zoom),
+          r.centered, r.img1 ?? null,
+          r.slot3dFrontCenter ?? null, r.updatedAt ?? null,
+        );
+      }
+      return list.length;
+    });
+    return { inserted: tx(rows) };
+  }
+
   /** slot_setup 검출·센터링 컬럼 전량 초기화(수동 '초기화' 버튼). slot_roi·행은 보존. 반환=초기화 행수. */
   clearSlotSetupEnrichment(updatedAt: string): number {
     const info = this.db.prepare(

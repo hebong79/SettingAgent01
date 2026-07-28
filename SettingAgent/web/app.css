@@ -1893,3 +1893,161 @@ body.resizing {
 #overlay.click-centering {
   cursor: crosshair;
 }
+
+/* ===== ROI 편집(ROIMaker) 탭 — 전용 뷰포트·전용 캔버스 ======================
+   제어탭(.viewport / #overlay)과 DOM·핸들러가 분리돼 있다(설계서 §2.3 격리 규약). */
+.roimaker-view {
+  display: flex;
+  grid-column: 1 / -1;
+  flex: 1 1 auto;
+  gap: 16px;
+  min-width: 0;
+  max-height: calc(100vh - 108px);
+}
+
+.rm-main {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.rm-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.rm-head h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.rm-head p {
+  margin: 4px 0 0;
+  color: var(--faint);
+  font-size: 12px;
+}
+
+.rm-viewport-shell {
+  display: grid;
+  flex: 1 1 auto;
+  min-height: 420px;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid #263845;
+  border-radius: 12px;
+  background: #05090d;
+}
+
+/* letterbox 오차 방지: img 자체 크기에 canvas 일치(.viewport 규약 동일). */
+.rm-viewport {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  background: #000;
+}
+
+.rm-viewport img {
+  display: block;
+  max-width: 100%;
+}
+
+.rm-viewport canvas {
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: auto; /* 정점 드래그·정점 추가 수신 — none 이면 img 로 통과되어 편집 불가 */
+}
+
+/* 그리기 모드에서 조준 커서(정점을 정확히 찍는 작업이다). */
+.rm-viewport canvas.drawing {
+  cursor: crosshair;
+}
+
+.rm-hint {
+  color: var(--faint);
+  font-size: 12px;
+}
+
+.rm-panel {
+  display: flex;
+  flex: 0 0 320px;
+  flex-direction: column;
+  gap: 12px;
+  overflow: auto;
+}
+
+/* 시작 ↔ 정지 토글(요구 9·10) — 상태를 색으로도 드러낸다. */
+.rm-toggle {
+  min-width: 74px;
+  border-color: #2f7d4f;
+  background: rgba(74, 222, 128, 0.16);
+  color: #d7f7e2;
+  font-weight: 700;
+}
+
+.rm-toggle.active {
+  border-color: #a33b3b;
+  background: rgba(255, 111, 106, 0.2);
+  color: #ffd1d1;
+}
+
+.rm-list {
+  max-height: calc(100vh - 320px);
+  overflow: auto;
+  color: #c6d0d8;
+  font-size: 13px;
+}
+
+.rm-row {
+  border-bottom: 1px solid var(--line-soft);
+  border-radius: 6px;
+  cursor: pointer;
+  padding: 8px;
+  transition: background 120ms ease;
+}
+
+.rm-row:hover {
+  background: rgba(78, 161, 255, 0.08);
+}
+
+.rm-row.selected {
+  background: rgba(34, 211, 238, 0.14);
+  color: #cffafe;
+}
+
+/* 타 프리셋 행(전체 보기) — 현재 화면 좌표계가 아니라는 것을 흐리게 드러낸다. */
+.rm-row.other {
+  opacity: 0.6;
+}
+
+.rm-dim {
+  color: var(--faint);
+  font-size: 12px;
+}
+
+.rm-badge {
+  border-radius: 4px;
+  font-size: 11px;
+  margin-left: 4px;
+  padding: 1px 5px;
+}
+
+.rm-badge.dirty {
+  background: rgba(250, 204, 21, 0.18);
+  color: #fde68a;
+}
+
+.rm-badge.warn {
+  background: rgba(255, 111, 106, 0.18);
+  color: #ffd1d1;
+}
+
+.rm-badge.empty {
+  background: rgba(148, 163, 184, 0.18);
+  color: #cbd5e1;
+}

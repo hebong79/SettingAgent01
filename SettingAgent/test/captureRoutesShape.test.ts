@@ -51,6 +51,7 @@ const EXPECTED_ORDER = [
   'GET /capture/slots',
   'POST /capture/slots/reset',
   'POST /capture/slots/load-roi',
+  'POST /capture/slots/sync-roi', // ROIMaker 저장 — load-roi 의 비파괴 형제(차등 동기)
   'POST /capture/slots/lpd',
   'POST /capture/slots/occupy',
   'POST /capture/slots/cuboid',

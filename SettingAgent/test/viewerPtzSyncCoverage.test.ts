@@ -15,6 +15,9 @@ import { fileURLToPath } from 'node:url';
  */
 
 const APP = readFileSync(fileURLToPath(new URL('../web/app.js', import.meta.url)), 'utf8');
+// ROI 편집 탭(web/roimaker.js)도 자기 라우트를 fetch 한다 → 같은 봉인 아래 둔다.
+// (app.js 만 훑으면 새 페이지가 봉인을 통째로 빠져나간다.)
+const ROIMAKER = readFileSync(fileURLToPath(new URL('../web/roimaker.js', import.meta.url)), 'utf8');
 
 /**
  * 카메라를 **실제로 움직이는** 라우트(서버 코드까지 따라가 판정).
@@ -47,6 +50,7 @@ const NO_MOVE: Record<string, string> = {
   '/camera/login': '자격증명',
   '/camerapos': '파일 IO',
   '/cameras${state.source': '목록 조회',
+  '/cameras${q}': '목록 조회(roimaker.js — 소스 쿼리 변수만 다르고 같은 라우트)',
   '/capture/autocorrect': 'requestImage(cam,preset) — ptz 미지정 → mode preset(실카 move 없음)',
   '/capture/finalize': '순수 계산·DB',
   '/capture/frame': '프레임 조회',
@@ -63,6 +67,7 @@ const NO_MOVE: Record<string, string> = {
 
   '/capture/slots/reset': 'DB',
   '/capture/slots/load-roi': 'DB', // PtzCamRoi.json → slot_setup 재구성(파일·DB 만; 카메라 미이동)
+  '/capture/slots/sync-roi': 'DB', // ROIMaker 저장 — PtzCamRoi.json → slot_setup 차등 반영(파일·DB 만; 카메라 미이동)
   '/capture/slots/cuboid': 'DB', // 지면모델 → slot3d_front_center 산출·저장(순수 계산·DB 만; 카메라 미이동)
   '/capture/status': '상태 조회',
   '/capture/stop': '잡 중지 신호(이동 없음)',
@@ -85,11 +90,13 @@ const NO_MOVE: Record<string, string> = {
   '/snapshot': 'state.ptz override 렌더 — UI 가 이미 아는 위치',
 };
 
-/** app.js 가 fetch 하는 모든 라우트 경로. */
+/** 뷰어 스크립트(app.js + roimaker.js)가 fetch 하는 모든 라우트 경로. */
 function fetchedRoutes(): string[] {
   const re = /fetch\((?:api\()?[`'"](\/[a-zA-Z0-9/_?=&{}$.-]+)/g;
   const out = new Set<string>();
-  for (const m of APP.matchAll(re)) out.add(m[1]!.split('?')[0]!);
+  for (const src of [APP, ROIMAKER]) {
+    for (const m of src.matchAll(re)) out.add(m[1]!.split('?')[0]!);
+  }
   return [...out].sort();
 }
 

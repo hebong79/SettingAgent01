@@ -15,6 +15,7 @@ import type { VpdClient } from '../clients/VpdClient.js';
 import type { LpdClient } from '../clients/LpdClient.js';
 import { runDetect, loadDetectCfg } from '../capture/detectPipeline.js';
 import { loadRoiIntoDb, loadSetupTargetsFromRoi, roiToCameraViews } from '../capture/roiDbLoad.js';
+import { syncRoiToDb } from '../capture/roiSlotSync.js';
 import type { SetupTarget } from '../setup/SetupOrchestrator.js';
 import { loadSetupTargets, viewsToTargets, parseCameraViews, type MapFiles } from '../setup/mapTargets.js';
 import { buildGroundInputs } from '../ground/groundInputs.js';
@@ -135,6 +136,15 @@ const PlaceRoiPutSchema = z.object({
       points: z.array(z.object({ x: z.number(), y: z.number() })),
     }),
   ),
+  /**
+   * 선택적 무결성 가드(ROIMaker 저장 경로). 제공 시, 쓰기 **직전** 원본 파일의 해당 프리셋
+   * `parking_spaces` 원시 개수와 비교해 다르면 409 + 파일 무변경.
+   *
+   * ★ 근거(실사고): `idx` 없는 주차면은 normalizePtzCamRoi 에서 조용히 탈락하는데,
+   *   applyPlaceRoiUpdate 는 그 프리셋을 **통째 교체**한다 → 클라이언트가 못 본 주차면이 파일에서 사라진다
+   *   (2026-07-28 기록: 8면 → 7면 소실). 미제공 시 **현행 동작 그대로**라 기존 호출자(자동보정)는 무영향.
+   */
+  expectRawCount: z.number().int().nonnegative().optional(),
 });
 
 // 자동보정 다운스케일 그리드·탐색 파라미터(정규화 오프셋은 다운스케일 불변). 이동+스케일만(회전·원근 미보정).
@@ -429,6 +439,22 @@ function registerSlotRoutes(app: FastifyInstance, deps: CaptureRouteDeps): void 
   // 실패 시(파일 없음/파싱 실패/유효 슬롯 0건) DB 무변경 — 안전 규약은 loadRoiIntoDb 소유.
   app.post('/capture/slots/load-roi', (req, reply) => handleSlotsLoadRoi(deps, req, reply));
 
+  // ROI 파일 → slot_setup **차등 동기**(ROIMaker 저장 경로). load-roi 의 비파괴 형제.
+  // slot_roi 만 UPDATE / 신규만 INSERT / 파일에 없는 행은 삭제하지 않고 보고 → 검출·점유·센터링 보존.
+  // 본문 없음(정본은 파일 하나 — 클라이언트가 DB 조작을 지시하지 않는다). 안전 규약은 syncRoiToDb 소유.
+  app.post('/capture/slots/sync-roi', async (_req, reply) => {
+    if (!deps.placeRoiFile) {
+      reply.code(404);
+      return { ok: false, error: 'placeRoiFile 미설정' };
+    }
+    const result = syncRoiToDb(deps.store, {
+      placeRoiFile: deps.placeRoiFile,
+      now: new Date().toISOString(),
+    });
+    if (!result.ok) reply.code(409); // 파일·아이덴티티 문제로 **DB 무변경** — 클라이언트가 구분할 수 있어야 한다.
+    return result;
+  });
+
   // 라이브 LPD 검출 → 슬롯 공간배정 → slot_setup.lpd 부분 UPDATE(수동 "DB에 추가" 버튼). VPD 미접촉.
   app.post('/capture/slots/lpd', (req, reply) => handleSlotsLpd(deps, req, reply));
 
@@ -665,6 +691,28 @@ function registerSaveRoutes(app: FastifyInstance, deps: CaptureRouteDeps): void 
   }
 }
 
+/**
+ * PtzCamRoi raw JSON 에서 (cam_id, preset_idx) 프리셋의 `parking_spaces` **원시** 개수.
+ * 정규화(normalizePtzCamRoi)를 거치지 않는다 — 조용히 탈락하는 주차면까지 세는 것이 이 함수의 목적이다.
+ * 대상 카메라/프리셋이 없으면 -1(요청한 개수와 절대 같아질 수 없어 가드가 발동한다).
+ */
+function countRawSpaces(json: unknown, camId: unknown, presetIdx: unknown): number {
+  const cameras = Array.isArray((json as { cameras?: unknown })?.cameras)
+    ? (json as { cameras: unknown[] }).cameras
+    : [];
+  for (const entry of cameras) {
+    const e = entry as { camera?: { cam_id?: unknown }; presets?: unknown };
+    if (e?.camera?.cam_id !== camId) continue;
+    const presets = Array.isArray(e.presets) ? e.presets : [];
+    for (const pr of presets) {
+      const p = pr as { preset_idx?: unknown; parking_spaces?: unknown };
+      if (p?.preset_idx !== presetIdx) continue;
+      return Array.isArray(p.parking_spaces) ? p.parking_spaces.length : 0;
+    }
+  }
+  return -1;
+}
+
 /** 미리 정의된 주차면 폴리곤(PtzCamRoi.json) GET/PUT. */
 function registerPlaceRoiRoutes(app: FastifyInstance, deps: CaptureRouteDeps): void {
   // 미리 정의된 주차면 폴리곤(PtzCamRoi.json) raw JSON 서빙. 정규화는 클라이언트(core.js normalizePtzCamRoi).
@@ -694,7 +742,20 @@ function registerPlaceRoiRoutes(app: FastifyInstance, deps: CaptureRouteDeps): v
     if (!parsed) return;
     try {
       const raw = await readFile(deps.placeRoiFile, 'utf8');
-      const next = applyPlaceRoiUpdate(JSON.parse(raw), parsed);
+      const json = JSON.parse(raw);
+      // 선택적 무결성 가드 — 통째 교체 전에 "내가 본 개수 == 파일의 원시 개수" 를 확인한다(§D-4).
+      if (parsed.expectRawCount != null) {
+        const actual = countRawSpaces(json, parsed.camId, parsed.presetIdx);
+        if (actual !== parsed.expectRawCount) {
+          reply.code(409);
+          return {
+            error: 'raw 주차면 개수 불일치 — 저장하지 않음(다른 곳에서 파일이 바뀌었거나 idx 누락 주차면이 있습니다)',
+            expected: parsed.expectRawCount,
+            actual,
+          };
+        }
+      }
+      const next = applyPlaceRoiUpdate(json, parsed);
       await writeFile(deps.placeRoiFile, stringify5(next, 2), 'utf8');
       return { ok: true, spaceCount: parsed.spaces.length };
     } catch (err) {

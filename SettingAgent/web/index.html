@@ -18,6 +18,7 @@
       <nav class="tabs" aria-label="viewer modes">
         <button class="tab active" data-tab="control">제어·모니터링</button>
         <button class="tab" data-tab="precise">정밀 수집</button>
+        <button class="tab" data-tab="roimaker">ROI 편집</button>
         <button class="tab" data-tab="analyze">분석</button>
         <button class="tab" data-tab="options">옵션</button>
         <button class="tab" data-tab="db">DB</button>
@@ -38,7 +39,8 @@
           <div class="roi-toggles">
             <label><input id="roi-vehicle" type="checkbox" checked /> 차량</label>
             <label><input id="roi-plate" type="checkbox" checked /> 번호판</label>
-            <label><input id="roi-floor" type="checkbox" checked /> 바닥</label>
+            <!-- 바닥 ROI 는 기본 OFF(마스터 요청 2026-07-28) — 첫 화면을 영상 위주로 두고, 필요할 때 켠다. -->
+            <label><input id="roi-floor" type="checkbox" /> 바닥</label>
             <label><input id="roi-occupancy" type="checkbox" checked /> 점유</label>
             <label title="체크하면 차량(VPD)·번호판(LPD)·점유영역·센터라이징 위치의 소스를 DB(slot_setup)로 전환해 표시한다(라이브 검출 대체). 켤 때마다 DB를 재조회한다. 표시는 각 항목 체크박스(차량/번호판/점유)를 따르며, DB에 값이 없는 항목(예: vpd_bbox=null)은 아무것도 그려지지 않는다"><input id="roi-db" type="checkbox" /> DB 보기</label>
             <label title="주차면을 3D 육면체로 표시(지면모델 기반). 기존 바닥 ROI 는 그대로 유지">
@@ -303,6 +305,64 @@
 
         </section>
       </aside>
+
+      <!--
+        ROI 편집(ROIMaker) 뷰: 'ROI 편집' 탭에서 전체폭 표시.
+        카메라 화면 위에 주차면 폴리곤을 직접 그린다(좌클릭=정점, 우클릭=폐합, 정지모드에서 정점 드래그).
+        ★ 제어탭 오버레이(#overlay)와 **캔버스·핸들러가 완전히 분리**돼 있다(회귀 격리 — 설계서 §2.3).
+        결선은 web/roimaker.js, 순수 로직은 web/roimakerCore.js.
+      -->
+      <section id="roimaker-view" class="roimaker-view" hidden>
+        <div class="rm-main">
+          <div class="rm-head">
+            <div>
+              <h2>ROI 편집</h2>
+              <p>선택한 카메라·프리셋 화면 위에 주차면을 직접 그립니다 · 저장 시 PtzCamRoi.json + DB slot_setup</p>
+            </div>
+            <div class="rm-toolbar toolbar">
+              <button id="rm-draw-toggle" class="rm-toggle">시작</button>
+              <button id="rm-add" title="주차면 번호(id)만 먼저 만듭니다. 만들어진 빈 슬롯이 선택된 상태에서 '시작 → 그리기 → 우클릭' 하면 그 번호에 ROI 가 채워집니다">추가</button>
+              <button id="rm-delete" disabled title="선택한 주차면의 ROI 를 지웁니다(주차면과 전역번호는 유지). 아직 저장하지 않은 주차면은 목록에서 완전히 제거됩니다">삭제</button>
+              <button id="rm-save" class="primary" title="PtzCamRoi.json 저장 후 DB slot_setup 에 차등 반영(검출·점유·센터링은 보존)">저장</button>
+              <button id="rm-reload" title="서버에서 다시 읽기(미저장 편집은 버려집니다)">되돌리기</button>
+            </div>
+          </div>
+          <div class="rm-viewport-shell">
+            <div class="rm-viewport">
+              <img id="rm-frame" alt="camera frame" />
+              <canvas id="rm-overlay"></canvas>
+            </div>
+          </div>
+          <div id="rm-hint" class="rm-hint">
+            좌클릭 = 점 추가 · 우클릭 = 마무리(3점 이상) · Backspace = 마지막 점 취소 · Esc = 그리던 것 취소
+          </div>
+        </div>
+
+        <aside class="rm-panel">
+          <section class="panel-section">
+            <div class="section-title">대상 선택</div>
+            <label class="field full">소스 <select id="rm-source"></select></label>
+            <div class="control-grid">
+              <label class="field">카메라 <select id="rm-cam"></select></label>
+              <label class="field">프리셋 <select id="rm-preset"></select></label>
+            </div>
+            <label class="field full" title="캔버스·목록에 무엇을 보여줄지 고릅니다. '전체 보기'의 타 프리셋 ROI 는 좌표계가 달라 위치가 맞지 않으므로 흐린 점선으로만 표시하고 편집할 수 없습니다">
+              보기 범위
+              <select id="rm-view-scope">
+                <option value="preset">현재 프리셋만</option>
+                <option value="slot">현재 슬롯만</option>
+                <option value="all">전체 보기</option>
+              </select>
+            </label>
+            <div id="rm-msg" class="map-msg"></div>
+          </section>
+
+          <section class="panel-section">
+            <div class="section-title">주차면 슬롯 목록</div>
+            <div id="rm-list" class="rm-list"></div>
+          </section>
+        </aside>
+      </section>
 
       <!-- 분석 뷰: '분석' 탭에서 전체폭 표시. 최종 setup_artifact.json(/mapping) 분석. -->
       <section id="analyze-view" class="analyze-view" hidden>
@@ -592,5 +652,6 @@
     </div>
 
     <script type="module" src="./app.js"></script>
+    <script type="module" src="./roimaker.js"></script>
   </body>
 </html>
