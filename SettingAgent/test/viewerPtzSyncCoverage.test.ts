@@ -58,6 +58,7 @@ const NO_MOVE: Record<string, string> = {
   '/capture/job-cuboids': '조회',
   '/capture/occupancy': '조회·계산',
   '/capture/place-roi': '파일 IO',
+  '/capture/place-roi/validate': '읽기 전용(W/H 조회만 — quad 사용가능 판정, 쓰기 0)',
   '/capture/refframe': 'requestImage(cam,preset) — ptz 미지정 → mode preset',
   '/capture/slots': '조회',
   '/capture/slots/lpd': '조회',
@@ -65,6 +66,10 @@ const NO_MOVE: Record<string, string> = {
   '/capture/setup-result': '파일 IO(DB→setup_result.json)',
   '/capture/saves/setup_result': '저장본 조회(GET setup_result.json — Touring 순회 입력)', // 파일 읽기만; 카메라 미이동
 
+  // 지면 격자 자동 바닥 ROI. bootstrap 은 순수 계산(부작용 0), apply 는 파일 IO(PtzCamRoi.json/ground_grid.json).
+  // 둘 다 카메라를 호출하지 않는다 — 라우트 구현에 camera/ICameraClient 의존이 없다(groundGridRoutes.ts).
+  '/capture/ground-grid/bootstrap': '순수 계산(미저장; 카메라 미이동)',
+  '/capture/ground-grid/apply': '파일 IO(PtzCamRoi.json + ground_grid.json; 카메라 미이동)',
   '/capture/slots/reset': 'DB',
   '/capture/slots/load-roi': 'DB', // PtzCamRoi.json → slot_setup 재구성(파일·DB 만; 카메라 미이동)
   '/capture/slots/sync-roi': 'DB', // ROIMaker 저장 — PtzCamRoi.json → slot_setup 차등 반영(파일·DB 만; 카메라 미이동)

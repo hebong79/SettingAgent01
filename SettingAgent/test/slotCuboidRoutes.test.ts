@@ -395,8 +395,11 @@ describe('경계면 교차 — web/app.js buildSlotCuboids ↔ POST /capture/slo
     expect(body).toMatch(/if \(!res\.ok \|\| !data\.ok\)[\s\S]*?return;/);
   });
 
-  it('loadRoiToDb 에도 동일한 1회 가드 해제가 추가돼 있다(설계 §D 함께 고칠 것)', () => {
-    const roiFn = fnSource(appJs, 'async function loadRoiToDb()');
+  // 본문은 `runLoadRoiToDb()` 로 추출됐다(지면격자 승인 연쇄가 같은 경로를 재사용 — 복사 금지).
+  // `loadRoiToDb()` 는 confirm + 위임만 남으므로 가드 해제는 추출된 본문에서 봉인한다.
+  it('runLoadRoiToDb 에도 동일한 1회 가드 해제가 추가돼 있다(설계 §D 함께 고칠 것)', () => {
+    expect(fnSource(appJs, 'async function loadRoiToDb()')).toContain('runLoadRoiToDb()');
+    const roiFn = fnSource(appJs, 'async function runLoadRoiToDb()');
     expect(roiFn).toContain('state.groundLoaded = false');
     expect(roiFn).toContain('loadGroundModel()');
   });

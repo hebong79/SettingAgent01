@@ -16,6 +16,7 @@ import type { Finalizer } from '../capture/Finalizer.js';
 import type { SqliteStore } from '../capture/SqliteStore.js';
 import { registerCaptureRoutes } from './captureRoutes.js';
 import { registerCalibrateRoutes } from './calibrateRoutes.js';
+import { registerGroundGridRoutes } from './groundGridRoutes.js';
 import { registerDiscoverRoutes } from './discoverRoutes.js';
 import { registerLensCalibRoutes } from './lensCalibRoutes.js';
 import { registerSettingsRoutes } from './settingsRoutes.js';
@@ -116,6 +117,8 @@ export interface ApiDeps {
   refFrameDir?: string;
   /** 지면모델 설정(GET /capture/ground-model). 3D 육면체 렌더 근거. */
   ground?: ToolsConfig['ground'];
+  /** 지면 격자 저작 파일(ground_grid.json) 경로. placeRoiFile·ground 와 함께 주입 시 /capture/ground-grid/* 등록(가산). */
+  groundGridFile?: string;
   /** 주차면별 번호판 중심정렬·줌 PTZ 캘리브레이션 잡(/calibrate/*). 미주입 시 미등록(가산). */
   calibrator?: PtzCalibrator;
   /** calibrate 설정(outFile=GET /calibrate/result 경로). */
@@ -439,6 +442,15 @@ export function buildServer(deps: ApiDeps): FastifyInstance {
       // sources/cameraCfg 는 옵셔널 전달 — 주입돼야 POST /capture/start-precise 의 source 지정이 살아난다(헤드리스 보존).
       sources: deps.sources,
       cameraCfg: deps.cameraCfg,
+    });
+  }
+
+  // 지면 격자 자동 바닥 ROI(/capture/ground-grid/*). 세 의존성이 모두 있을 때만 등록(가산, 기존 라우트 불변).
+  if (deps.placeRoiFile && deps.groundGridFile && deps.ground?.enabled) {
+    registerGroundGridRoutes(app, {
+      placeRoiFile: deps.placeRoiFile,
+      groundGridFile: deps.groundGridFile,
+      ground: deps.ground,
     });
   }
 

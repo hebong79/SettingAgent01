@@ -1,10 +1,10 @@
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import sharp from 'sharp';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { estimateAlign } from '../capture/frameAlign.js';
-import { applyPlaceRoiUpdate, loadNormalizedPlaceRoi } from '../capture/placeRoi.js';
+import { applyPlaceRoiUpdateEx, loadNormalizedPlaceRoi } from '../capture/placeRoi.js';
 import type { CaptureJob } from '../capture/CaptureJob.js';
 import type { Finalizer } from '../capture/Finalizer.js';
 import type { SetupPipeline } from '../pipeline/SetupPipeline.js';
@@ -20,6 +20,7 @@ import type { SetupTarget } from '../setup/SetupOrchestrator.js';
 import { loadSetupTargets, viewsToTargets, parseCameraViews, type MapFiles } from '../setup/mapTargets.js';
 import { buildGroundInputs } from '../ground/groundInputs.js';
 import { estimateGroundModels } from '../ground/groundModel.js';
+import { diagnoseQuad } from '../ground/quadDiag.js';
 import { buildFrameCuboids } from '../ground/frameCuboids.js';
 import { buildSlotFrontCenters } from '../ground/frontCenterBuild.js';
 import { makeCuboidContextResolver, type CuboidContextResolver } from '../ground/cuboidContext.js';
@@ -27,7 +28,7 @@ import { filterVehiclesOnPlace } from '../capture/onPlaceFilter.js';
 import { assignPlatesToSlotViews } from '../setup/plateMatch.js';
 import type { NormalizedQuad } from '../domain/types.js';
 import type { PlateBox } from '../clients/LpdClient.js';
-import type { GroundModel } from '../ground/types.js';
+import type { GroundModel, PixelQuad } from '../ground/types.js';
 import { writeCamerapos } from '../setup/cameraposWriter.js';
 import type { PresetProvider } from '../setup/presetProvider.js';
 import type { SetupBrain } from '../brain/SetupBrain.js';
@@ -145,6 +146,26 @@ const PlaceRoiPutSchema = z.object({
    *   (2026-07-28 기록: 8면 → 7면 소실). 미제공 시 **현행 동작 그대로**라 기존 호출자(자동보정)는 무영향.
    */
   expectRawCount: z.number().int().nonnegative().optional(),
+  // 신규 주차장(파일 부재·대상 cam/preset 부재)에서 골격을 만들 때만 붙는다. 기존 호출자는 안 보낸다(가산·옵셔널).
+  // pan/tilt/zoom 이 없으면 저장은 되어도 L3 부트스트랩이 "PTZ 미상" 으로 실패한다(PtzCamRoi.json 이 유일한 PTZ 출처).
+  create: z
+    .object({
+      imageWidth: z.number().positive(),
+      imageHeight: z.number().positive(),
+      pan: z.number().optional(),
+      tilt: z.number().optional(),
+      zoom: z.number().positive().optional(),
+    })
+    .optional(),
+});
+
+/** POST /capture/place-roi/validate — 정규화 quad 1개의 isUsableQuad 판정 + 거부 사유(읽기 전용 — 쓰기 0). */
+const PlaceRoiValidateSchema = z.object({
+  camId: z.number().int().positive(),
+  presetIdx: z.number().int().positive(),
+  quad: z.array(z.object({ x: z.number(), y: z.number() })).length(4),
+  imageWidth: z.number().positive().optional(),
+  imageHeight: z.number().positive().optional(),
 });
 
 // 자동보정 다운스케일 그리드·탐색 파라미터(정규화 오프셋은 다운스케일 불변). 이동+스케일만(회전·원근 미보정).
@@ -732,7 +753,7 @@ function registerPlaceRoiRoutes(app: FastifyInstance, deps: CaptureRouteDeps): v
   });
 
   // 자동보정 결과(정규화 spaces)를 PtzCamRoi.json 에 저장(§04). GET place-roi 와 대칭·무토큰(/capture/* 관례).
-  // 파일 미설정=404, 읽기/쓰기/파싱 실패=500. applyPlaceRoiUpdate 로 픽셀 역변환·구조 보존.
+  // 파일 미설정=404, 읽기/쓰기/파싱 실패=500. applyPlaceRoiUpdateEx 로 픽셀 역변환·구조 보존.
   app.put('/capture/place-roi', async (req, reply) => {
     if (!deps.placeRoiFile) {
       reply.code(404);
@@ -741,9 +762,17 @@ function registerPlaceRoiRoutes(app: FastifyInstance, deps: CaptureRouteDeps): v
     const parsed = parseOr400(reply, PlaceRoiPutSchema, req.body ?? {});
     if (!parsed) return;
     try {
-      const raw = await readFile(deps.placeRoiFile, 'utf8');
+      // 파일 부재: create 가 있으면 **빈 문서에서 시작**(신규 주차장의 첫 주차면), 없으면 기존대로 404.
+      let raw: string;
+      try {
+        raw = await readFile(deps.placeRoiFile, 'utf8');
+      } catch (err) {
+        if (!parsed.create || (err as NodeJS.ErrnoException)?.code !== 'ENOENT') throw err;
+        raw = '{"cameras":[]}';
+      }
       const json = JSON.parse(raw);
-      // 선택적 무결성 가드 — 통째 교체 전에 "내가 본 개수 == 파일의 원시 개수" 를 확인한다(§D-4).
+      // 선택적 무결성 가드(ROIMaker 저장 경로) — 통째 교체 전에 "내가 본 개수 == 파일의 원시 개수" 를 확인한다.
+      // create 로 새 골격을 만드는 경로는 이 값을 보내지 않으므로 가드가 발동하지 않는다(두 기능 무간섭).
       if (parsed.expectRawCount != null) {
         const actual = countRawSpaces(json, parsed.camId, parsed.presetIdx);
         if (actual !== parsed.expectRawCount) {
@@ -755,13 +784,52 @@ function registerPlaceRoiRoutes(app: FastifyInstance, deps: CaptureRouteDeps): v
           };
         }
       }
-      const next = applyPlaceRoiUpdate(json, parsed);
+      const { json: next, applied, issues } = applyPlaceRoiUpdateEx(json, parsed);
+      if (parsed.create) await mkdir(dirname(deps.placeRoiFile), { recursive: true });
       await writeFile(deps.placeRoiFile, stringify5(next, 2), 'utf8');
-      return { ok: true, spaceCount: parsed.spaces.length };
+      // spaceCount = **요청한** 주차면 수(하위호환 유지). 실제로 파일에 반영된 수는 appliedCount 다 —
+      // applied 를 보지 않는 클라이언트가 spaceCount 를 성공 근거로 오해하지 않도록 둘을 분리해 둔다.
+      return { ok: true, spaceCount: parsed.spaces.length, appliedCount: applied ? parsed.spaces.length : 0, applied, issues };
     } catch (err) {
       fileErrorReply(reply, err, 'PtzCamRoi.json 없음', 'place-roi 쓰기 실패');
       return;
     }
+  });
+
+  // 주차면 quad 사용가능 판정. **읽기 전용 — 파일을 쓰지 않는다**(W/H 조회를 위해 PtzCamRoi.json 을 읽기는 한다).
+  // 판정은 isUsableQuad 단일 원천(뷰어 재구현 금지). 정규화 quad → 픽셀 역변환에 W/H 가 필요한데
+  // 우선순위는 PtzCamRoi.json 의 해당 cam → body 의 imageWidth/imageHeight 다(파일이 없어도 동작해야 한다).
+  app.post('/capture/place-roi/validate', async (req, reply) => {
+    const parsed = parseOr400(reply, PlaceRoiValidateSchema, req.body ?? {});
+    if (!parsed) return;
+    let W = 0;
+    let H = 0;
+    if (deps.placeRoiFile) {
+      try {
+        const root = JSON.parse(await readFile(deps.placeRoiFile, 'utf8')) as { cameras?: unknown };
+        const cams = Array.isArray(root?.cameras) ? root.cameras : [];
+        const hit = cams.find(
+          (c) => (c as { camera?: { cam_id?: unknown } })?.camera?.cam_id === parsed.camId,
+        ) as { camera?: { imageWidth?: unknown; imageHeight?: unknown } } | undefined;
+        W = Number(hit?.camera?.imageWidth) || 0;
+        H = Number(hit?.camera?.imageHeight) || 0;
+      } catch {
+        /* 파일 없음·파싱 실패 → body 폴백(강등, throw 금지) */
+      }
+    }
+    if (!(W > 0 && H > 0)) {
+      W = parsed.imageWidth ?? 0;
+      H = parsed.imageHeight ?? 0;
+    }
+    if (!(W > 0 && H > 0)) {
+      return {
+        ok: false,
+        reasons: ['이미지 크기 미상 — 라이브 프레임을 먼저 시작하세요'],
+        metrics: { minEdgePx: 0, areaPx2: 0, convex: false },
+      };
+    }
+    const quadPx = parsed.quad.map((p) => ({ x: p.x * W, y: p.y * H })) as PixelQuad;
+    return diagnoseQuad(quadPx);
   });
 }
 

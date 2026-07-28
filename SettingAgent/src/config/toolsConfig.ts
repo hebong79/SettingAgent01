@@ -296,6 +296,11 @@ const StoreSchema = z.object({
   reportsDir: z.string().min(1).default('reports'),
   /** 미리 정의된 주차면 폴리곤 파일(dataDir 상대). finalize/detect 의 PtzCamRoi 소스. */
   placeRoiFile: z.string().min(1).default('Place01/PtzCamRoi.json'),
+  /**
+   * 지면 격자(자동 바닥 ROI) 저작 파일(dataDir 상대). `/capture/ground-grid/*` 전용.
+   * 정본 흐름: 격자 → PtzCamRoi.json → slot_setup(파생). 이 파일은 DB 에 직접 쓰지 않는다.
+   */
+  groundGridFile: z.string().min(1).default('Place01/ground_grid.json'),
 });
 
 /**
@@ -401,7 +406,7 @@ export const DEFAULT_TOOLS_CONFIG: ToolsConfig = {
   },
   ground: { enabled: true, minDepthEdgePx: 250, slotWidthM: 2.5, slotDepthM: 5.0 },
   server: { port: 13020, apiKeyEnv: 'SETTING_API_KEY' },
-  store: { dataDir: 'data', captureDir: 'data/captures', saveDir: 'save', reportsDir: 'reports', placeRoiFile: 'Place01/PtzCamRoi.json' },
+  store: { dataDir: 'data', captureDir: 'data/captures', saveDir: 'save', reportsDir: 'reports', placeRoiFile: 'Place01/PtzCamRoi.json', groundGridFile: 'Place01/ground_grid.json' },
   viewer: { enabled: true, allowMove: true, defaultFps: 3, staticDir: 'web', controlToken: '' },
   unityRpc: { baseUrl: 'http://localhost:13110', timeoutMs: 10000 },
   // cameraSources 는 기본값 미설정(undefined → sourceRegistry 가 단일 sim 으로 폴백).

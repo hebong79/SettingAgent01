@@ -25,10 +25,10 @@ import type {
 const DEG = Math.PI / 180;
 /** fovBaseV 정의 기준 zoom(detectMath.FovOpts.zoomRef 와 동일 규약). */
 const ZOOM_REF = 1;
-/** quad 최소 변 길이(px). 이보다 짧으면 '거의 선분' → 추정 표본 제외. */
-const MIN_EDGE_PX = 8;
-/** quad 최소 면적(px²). 조건수 붕괴 방어. */
-const MIN_AREA_PX = 400;
+/** quad 최소 변 길이(px). 이보다 짧으면 '거의 선분' → 추정 표본 제외. (거부 사유 문장용으로 quadDiag 가 참조 — 값 불변) */
+export const MIN_EDGE_PX = 8;
+/** quad 최소 면적(px²). 조건수 붕괴 방어. (거부 사유 문장용으로 quadDiag 가 참조 — 값 불변) */
+export const MIN_AREA_PX = 400;
 /** 소실점 무한원 판정: |w| / hypot(x,y) < 이 값이면 무한원(≈1e6px 밖) → 동차 유지, 정규화 금지. */
 const VP_INF_EPS = 1e-6;
 /** 지면 법선·시선 내적 하한. 이보다 작으면 지평선 위(지면점 아님) → 기각. */

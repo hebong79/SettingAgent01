@@ -61,6 +61,7 @@ const EXPECTED_ORDER = [
   'GET /capture/saves/:name',
   'GET /capture/place-roi',
   'PUT /capture/place-roi',
+  'POST /capture/place-roi/validate',
   'GET /capture/ground-model',
   'GET /capture/vehicle-cuboids',
   'GET /capture/job-cuboids',

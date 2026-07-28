@@ -121,9 +121,81 @@ export function applyPlaceRoiUpdate(
   json: unknown,
   update: { camId: unknown; presetIdx: unknown; spaces: PlaceRoiSpace[] },
 ): unknown {
-  if (!json || typeof json !== 'object') return json;
-  const root = json as { cameras?: unknown; [k: string]: unknown };
-  const cameras = Array.isArray(root.cameras) ? root.cameras : [];
+  return applyPlaceRoiUpdateEx(json, update).json;
+}
+
+/**
+ * 빈 상태에서 대상 카메라/프리셋 골격을 만들 때 쓰는 최소 메타(뷰어 실측값).
+ * - imageWidth/imageHeight: `<img id="frame">` 의 naturalWidth/naturalHeight(정규화 좌표의 유일한 역변환 기준).
+ * - pan/tilt/zoom: **L3 부트스트랩의 유일한 PTZ 출처**다. `planAutoRoi` 는 `buildGroundInputs(json, [])` 로
+ *   camerapos 를 넘기지 않으므로, 이 값이 비면 `ref.zoom == null` → "PTZ 미상 — 부트스트랩 불가" 로 즉시 실패한다.
+ */
+export interface PlaceRoiSkeleton {
+  imageWidth: number;
+  imageHeight: number;
+  pan?: number;
+  tilt?: number;
+  zoom?: number;
+}
+
+/**
+ * `applyPlaceRoiUpdate` 확장판 — 반환에 `applied`(실제로 교체가 일어났는가) + `issues` 를 붙이고,
+ * `create` 가 주어지면 **없는 카메라/프리셋 골격을 생성**한다(신규 주차장의 첫 주차면).
+ *
+ * `applied` 가 필요한 이유: 대상 cam/preset 이 없으면 기존 구현은 원본을 그대로 돌려주는데
+ * 라우트는 `{ok:true}` 를 반환해 **아무것도 저장되지 않았는데 성공으로 보였다**(조용한 거짓 성공).
+ *
+ * `create` 는 **가산**이다 — 카메라·프리셋이 이미 있으면 아무것도 하지 않는다(기존 imageWidth 등 메타 덮어쓰기 금지).
+ */
+export function applyPlaceRoiUpdateEx(
+  json: unknown,
+  update: { camId: unknown; presetIdx: unknown; spaces: PlaceRoiSpace[]; create?: PlaceRoiSkeleton },
+): { json: unknown; applied: boolean; issues: string[] } {
+  const issues: string[] = [];
+  const create = update.create;
+  let root: { cameras?: unknown; [k: string]: unknown };
+  if (!json || typeof json !== 'object') {
+    if (!create) {
+      issues.push('PtzCamRoi JSON 형식이 아님 — 적용하지 않음');
+      return { json, applied: false, issues };
+    }
+    root = { cameras: [] };
+  } else {
+    root = json as { cameras?: unknown; [k: string]: unknown };
+  }
+  // cameras 가 배열이 아니면 [] 로 정규화한다(기존 applyPlaceRoiUpdate 거동 그대로).
+  let cameras = Array.isArray(root.cameras) ? root.cameras : [];
+
+  // create: 대상 카메라/프리셋 골격 보강(있으면 무동작).
+  if (create) {
+    const hasCam = cameras.some((c) => (c as { camera?: { cam_id?: unknown } })?.camera?.cam_id === update.camId);
+    if (!hasCam) {
+      cameras = [
+        ...cameras,
+        {
+          camera: { cam_id: update.camId, imageWidth: create.imageWidth, imageHeight: create.imageHeight },
+          presets: [],
+        },
+      ];
+      issues.push(`cam${update.camId} 신규 생성(${create.imageWidth}x${create.imageHeight})`);
+    }
+    cameras = cameras.map((camEntry) => {
+      const entry = camEntry as { camera?: { cam_id?: unknown }; presets?: unknown };
+      if (entry?.camera?.cam_id !== update.camId) return camEntry;
+      const presets = Array.isArray(entry.presets) ? entry.presets : [];
+      if (presets.some((p) => (p as { preset_idx?: unknown })?.preset_idx === update.presetIdx)) return camEntry;
+      const preset: Record<string, unknown> = { preset_idx: update.presetIdx };
+      // PTZ 는 있는 값만 기록(없는 키를 null 로 채우면 정상값과 구분이 안 된다).
+      if (Number.isFinite(create.pan)) preset.pan = create.pan;
+      if (Number.isFinite(create.tilt)) preset.tilt = create.tilt;
+      if (Number.isFinite(create.zoom)) preset.zoom = create.zoom;
+      preset.parking_spaces = [];
+      issues.push(`cam${update.camId} preset${update.presetIdx} 신규 생성`);
+      return { ...entry, presets: [...presets, preset] };
+    });
+  }
+
+  let applied = false;
   const nextCameras = cameras.map((camEntry) => {
     const entry = camEntry as {
       camera?: { cam_id?: unknown; imageWidth?: unknown; imageHeight?: unknown };
@@ -133,7 +205,10 @@ export function applyPlaceRoiUpdate(
     if (!cam || cam.cam_id !== update.camId) return camEntry;
     const W = Number(cam.imageWidth);
     const H = Number(cam.imageHeight);
-    if (!Number.isFinite(W) || !Number.isFinite(H) || W <= 0 || H <= 0) return camEntry;
+    if (!Number.isFinite(W) || !Number.isFinite(H) || W <= 0 || H <= 0) {
+      issues.push(`cam${update.camId}: 이미지 크기 누락/오류 — 적용하지 않음`);
+      return camEntry;
+    }
     const presets = Array.isArray(entry.presets) ? entry.presets : [];
     const nextPresets = presets.map((presetRaw) => {
       const preset = presetRaw as { preset_idx?: unknown; [k: string]: unknown };
@@ -142,11 +217,13 @@ export function applyPlaceRoiUpdate(
         idx: sp.idx,
         points: (sp.points ?? []).map((p) => [p.x * W, p.y * H]),
       }));
+      applied = true;
       return { ...preset, parking_spaces };
     });
     return { ...entry, presets: nextPresets };
   });
-  return { ...root, cameras: nextCameras };
+  if (!applied) issues.push(`cam${update.camId} preset${update.presetIdx} 대상 없음 — 적용하지 않음`);
+  return { json: { ...root, cameras: nextCameras }, applied, issues };
 }
 
 /**
