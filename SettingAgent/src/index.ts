@@ -132,6 +132,7 @@ async function main(): Promise<void> {
     placeRoiFile: join(tools.store.dataDir, tools.store.placeRoiFile),
     refFrameDir: join(tools.store.dataDir, 'refframes'),
     ground: tools.ground,
+    groundGridFile: join(tools.store.dataDir, tools.store.groundGridFile),
     calibrator, calibrate: tools.calibrate,
     plateDiscovery, discoverOutFile,
     lensCalib, lensCalibPaths,

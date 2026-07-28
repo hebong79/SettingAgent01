@@ -71,6 +71,15 @@ import {
   groundModelsByKey, // ground-model 응답 models[] → cam:preset 맵(순수)
   buildTouringPlan, // setup_result → Touring 순회 스텝 배열(카메라→프리셋→슬롯, 순수)
 } from './core.js';
+import {
+  beginPlaceDraw, // 주차면 신규 그리기 상태 개시(순수)
+  addPlaceDrawPoint, // 클릭 점 추가(4점 초과 무시, 순수)
+  undoPlaceDrawPoint, // 마지막 점 되돌리기(순수)
+  appendPlaceSpace, // 그린 4점을 끝에 append + idx 부여(순수, idx 누락 불가)
+  clearPresetSpaces, // 한 프리셋의 주차면 전부 제거(순수, core.removePlaceSpace 전량 위임 → 1..N 재압축)
+  placeQuadOf, // 프리셋 키 + 전역 idx → 4점(순수)
+  movePlaceVertex, // 주차면 정점 1개 이동(순수, core.moveQuadVertex 위임)
+} from './placeDraw.js';
 import { OccupancyJudge } from './occupancy.js'; // 번호판 우선·bbox 폴백 점유 판정(순수 컴포넌트).
 import { computeOccupancyRegions } from './occupancyRegion.js'; // 번호판 기준 점유영역 사다리꼴(겹침 회피 자동 배율, 순수).
 
@@ -111,10 +120,19 @@ const state = {
   placeRoiReport: {}, // 프리셋키 → issues[] (파일 모드 렌더 시 검수 advisory 재사용, R5).
   selectedPlaceIdx: null, // 선택된 주차면 전역 인덱스(PtzCamRoi, 없으면 null).
   placeRoiDirty: false, // 주차면 전역번호/삭제 편집 미저장 여부('저장'으로 확정).
+  placeDraw: null, // 주차면 신규 그리기 진행 상태 { key, points:[{x,y}...] }. null=off(기존 캔버스 동작 100% 보존).
+  placeRoiFileMissing: false, // GET /capture/place-roi 가 404 였다(= PtzCamRoi.json 부재/신규 주차장) → 저장 시 create 첨부.
+  placeRoiFileKeys: new Set(), // 파일에서 실제로 로드된 cam:preset 키. 여기 없는 키는 파일에 대상이 없다 → 저장 시 골격(create) 필요.
   detectByKey: {}, // cam:preset → 라이브 VPD/LPD 검출({vehicles,plates}). 프리셋별 보존(전환 시 유지, POST /capture/detect). drawDetectOverlay 근거.
   discoverByKey: {}, // cam:preset → discovery(앞면중심 LOOP) 결과 LPD OBB quad[](GET /discover/result found 분). 매 완료 시 대체. drawDetectOverlay 근거.
   selectedDetect: null, // [기능2] 선택된 검출 박스 { kind:'vehicle'|'plate', index } | null(임시 편집·메모리만).
   placeRoiBackup: null, // [기능3] 자동보정 직전 스냅샷 { key, spaces }(되돌리기용).
+  // '이 프리셋 전체삭제' 직전 **전체 맵** 스냅샷 { label, placeRoi }. '저장' 성공 시 소진. 1단계만(다중 undo 없음).
+  // placeRoiBackup(자동보정 전용·프리셋 단위)과 절대 공유하지 않는다 — 전체삭제는 **다른 프리셋의 전역번호까지** 바꾼다.
+  placeRoiUndo: null,
+  // 지면 격자 자동 ROI 미리보기(POST /capture/ground-grid/bootstrap 응답). 미리보기 전에는 null.
+  // 가산 레이어 전용 — 파일 ROI(state.placeRoi)를 **대체하지 않는다**(#roi-auto off 면 렌더 픽셀 동일).
+  autoRoi: null, // { camId, presetIdx, cols, rows, colStart, presets:[{presetIdx,pairs,unmatchedAuto,...}], constants, grid }
   parkingSlotsByKey: null, // 최종화 후 slot_setup(cam:preset → 행배열, GET /capture/slots). renderSlotList 소스(§06 H7).
   dbTablesLoaded: false, // DB 탭 콤보 1회 채움 가드.
   dbTable: '', // 현재 선택된 DB 테이블명.
@@ -135,6 +153,8 @@ const DB_LIMIT = 200; // DB 뷰어 페이지 크기(서버 clamp 상한 1000 내
 const HANDLE_PX = 8; // 핸들 사각형 반경(px).
 // { kind:'floorVertex', index, ... } | { kind:'vpdResize', handle, ... } | { kind:'vpdMove', ... } | null
 let dragState = null;
+// 주차면 그리기 중 커서 위치(정규화) — 마지막 확정 점에서 커서까지 고무줄선을 그리는 용도. 그리기 off 면 null.
+let placeDrawCursor = null;
 
 /** 슬롯 ROI·선택 표시만 숨김(데이터 보존). 수집 시작(capCaptureStart) 전용 — 검출/점유/육면체 등 라이브 레이어는 유지한다. */
 function clearRoiDisplay() {
@@ -426,6 +446,8 @@ function drawRoiOverlay() {
   drawOccupancyOverlay(ctx); // 점유율 오버레이 — mapping 미최종화(수집 중)에도 유효 → mapping 가드 이전.
   drawFileFloorRoi(ctx); // 파일 기반 바닥 ROI(PtzCamRoi.json) — 파일 모드 바닥 레이어 → mapping 가드 이전.
   drawDetectOverlay(ctx); // 라이브 VPD/LPD 검출 오버레이(§04) — 수집 중/미최종화에도 표시 → mapping 가드 이전.
+  drawAutoRoi(ctx); // 지면 격자 자동 바닥 ROI(가산 레이어, 주황) — #roi-auto off 면 기존 렌더와 픽셀 동일.
+  drawPlaceDrawOverlay(ctx); // 주차면 신규 그리기 미리보기·정점 핸들(가산) — mapping 없는 신규 주차장에서도 보여야 하므로 가드 이전.
   drawCuboidOverlay(ctx); // 3D 육면체(가산 레이어) — 산출물 없이도(수집 중/파일 모드) 그린다 → mapping 가드 이전.
   drawVehicleCuboidOverlay(ctx); // 차량 3D 육면체(det 권위 + seg 마스크 접지선) — 토글 off 면 기존 렌더와 픽셀 동일.
   drawMaskOverlay(ctx); // VPD seg 마스크 반투명 오버레이(#roi-mask, 기본 off) — 지면 가드 이전(수집 중에도 표시).
@@ -613,6 +635,103 @@ function drawFileFloorRoi(ctx) {
     ctx.fillStyle = selected ? '#ff4d4d' : '#39ff14';
     ctx.fillText(poly.label, pts[0].px + 2, pts[0].py + 12);
   }
+}
+
+/**
+ * 주차면 신규 그리기 오버레이 — **가산 레이어**(그리기 off + 정점편집 off 면 기존 렌더와 픽셀 동일).
+ * ① 그리는 중(1~3점): 확정 점 노란 원 + 순번, 점 사이 폴리라인, 마지막 점 → 커서 고무줄선.
+ * ② 정점 편집 ON + 선택 면 있음: 그 면의 4정점 핸들(드래그 어포던스).
+ */
+function drawPlaceDrawOverlay(ctx) {
+  const key = currentFrameKey();
+  // ② 선택 면 정점 핸들(#place-edit-vertex ON 일 때만 — OFF 면 화면 변화 0).
+  if ($('place-edit-vertex')?.checked && state.selectedPlaceIdx != null && $('roi-floor').checked) {
+    const quad = placeQuadOf(state.placeRoi, key, state.selectedPlaceIdx);
+    if (quad?.length) drawQuadHandles(ctx, toPixelQuad(quad, overlay.width, overlay.height));
+  }
+  // ① 그리는 중 미리보기.
+  const draw = state.placeDraw;
+  if (!draw || draw.key !== key) return;
+  const pts = (draw.points ?? []).map((p) => ({ px: p.x * overlay.width, py: p.y * overlay.height }));
+  ctx.save();
+  ctx.strokeStyle = '#ffd60a';
+  ctx.lineWidth = 2;
+  if (pts.length > 1) {
+    ctx.beginPath();
+    pts.forEach((p, i) => (i ? ctx.lineTo(p.px, p.py) : ctx.moveTo(p.px, p.py)));
+    if (pts.length === 4) {
+      // 4점 완성 = 닫힌 사각형 + 반투명 채움.
+      // ⚠️ 도달성 사실: 4점째 클릭은 placeDrawClick 에서 **렌더를 거치지 않고 같은 동기 블록에서 커밋**되고
+      //    endPlaceDraw() 가 state.placeDraw 를 null 로 만든다 → 현재 이 분기로 들어오는 경로는 없다.
+      //    그래도 상태가 화면에 나오게 되면 반드시 '면' 으로 보여야 하므로 방어로 둔다(사용자 체감은 아래 3점 예고선이 만든다).
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(255, 214, 10, 0.18)';
+      ctx.fill();
+    }
+    ctx.stroke();
+  }
+  // 3점 = 닫힘 예고. 마지막 점 → 첫 점을 점선으로 그려 '한 번 더 찍으면 이 사각형' 을 보이게 한다.
+  if (pts.length === 3) {
+    ctx.save();
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(pts[2].px, pts[2].py);
+    ctx.lineTo(pts[0].px, pts[0].py);
+    ctx.stroke();
+    ctx.restore();
+  }
+  // 마지막 점 → 커서 고무줄선(어디를 찍으면 어떤 변이 되는지 보이게).
+  if (pts.length && placeDrawCursor) {
+    ctx.setLineDash([5, 4]);
+    ctx.beginPath();
+    ctx.moveTo(pts[pts.length - 1].px, pts[pts.length - 1].py);
+    ctx.lineTo(placeDrawCursor.nx * overlay.width, placeDrawCursor.ny * overlay.height);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  for (let i = 0; i < pts.length; i++) {
+    ctx.beginPath();
+    ctx.arc(pts[i].px, pts[i].py, 5, 0, Math.PI * 2);
+    ctx.fillStyle = '#ffd60a';
+    ctx.fill();
+    ctx.strokeStyle = '#000000';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.fillStyle = '#ffd60a';
+    ctx.fillText(String(i + 1), pts[i].px + 7, pts[i].py - 7);
+  }
+  ctx.restore();
+}
+
+/**
+ * 지면 격자 자동 바닥 ROI 오버레이(#roi-auto) — **가산 레이어**.
+ * 파일 ROI(초록 #39ff14)를 대체하지 않고 **겹쳐** 그린다(겹쳐보기가 목적). 색은 주황으로 구분한다.
+ * 근거는 서버 미리보기(state.autoRoi) 하나뿐 — 뷰어는 격자를 추정하지 않는다(추정은 전부 서버 소유).
+ * 기존 슬롯과 매칭된 quad 는 실선(라벨=전역 idx), 매칭 없는 신규 후보는 점선(라벨=셀 좌표)으로 구분한다.
+ */
+function drawAutoRoi(ctx) {
+  if (!$('roi-auto')?.checked || !state.autoRoi) return;
+  const key = currentFrameKey();
+  const [cam, preset] = key.split(':').map(Number);
+  if (cam !== state.autoRoi.camId) return; // 다른 카메라 프레임 → 표시 안 함.
+  const p = (state.autoRoi.presets ?? []).find((x) => x.presetIdx === preset);
+  if (!p) return;
+  ctx.save();
+  const stroke = (quad, dashed, label) => {
+    const pts = toPixelQuad(quad, overlay.width, overlay.height);
+    ctx.setLineDash(dashed ? [6, 4] : []);
+    ctx.beginPath();
+    pts.forEach((q, i) => (i ? ctx.lineTo(q.px, q.py) : ctx.moveTo(q.px, q.py)));
+    ctx.closePath();
+    ctx.strokeStyle = '#ff9f1c'; // 자동=주황(파일 초록·육면체 보라와 구분).
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.fillStyle = '#ff9f1c';
+    ctx.fillText(label, pts[0].px + 2, pts[0].py - 4);
+  };
+  for (const pair of p.pairs ?? []) stroke(pair.quadNorm, false, `auto#${pair.slotIdx} IoU ${pair.iou.toFixed(2)}`);
+  for (const u of p.unmatchedAuto ?? []) stroke(u.quadNorm, true, `신규? ${u.cell}`);
+  ctx.restore();
 }
 
 // --- 3D 육면체 오버레이(지면모델) -----------------------------------------
@@ -939,12 +1058,20 @@ async function loadPlaceRoi() {
   state.placeRoiLoaded = true; // 재시도 폭주 방지(실패해도 세션 1회).
   try {
     const res = await fetch('/capture/place-roi', { cache: 'no-store' });
-    if (!res.ok) return; // 404 등 → 조용히 미표시(advisory).
+    if (!res.ok) {
+      // 404 = 파일 부재(신규 주차장) → 저장 시 골격 생성(create) 이 필요하다는 신호. 표시는 기존대로 조용히 생략.
+      state.placeRoiFileMissing = res.status === 404;
+      state.placeRoiFileKeys = new Set();
+      return;
+    }
+    state.placeRoiFileMissing = false;
     const { byPreset, report } = normalizePtzCamRoi(await res.json());
     // R3: 파일 idx 를 전역 인덱스(1..N)로 정규화. 이미 1..N 고유면 무변경(사용자 재지정 번호 보존),
     // 중복·0-based·누락이면 (cam→preset→배열순) 재부여 → '저장' 전까지 미저장 버퍼.
     const norm = normalizeGlobalIdx(byPreset);
     state.placeRoi = norm.placeRoi;
+    // 파일에 실재하는 키 스냅샷(저장 시 골격 필요 여부 판정 근거). 이후 그리기로 생긴 키는 여기에 없다.
+    state.placeRoiFileKeys = new Set(Object.keys(norm.placeRoi));
     state.placeRoiReport = {}; // 프리셋별 issues 맵 재구성(파일 모드 렌더 advisory 재사용, R5).
     for (const r of report) {
       state.placeRoiReport[presetKey(r.camId, r.presetIdx)] = r.issues;
@@ -1127,6 +1254,33 @@ async function runLiveDetect(vpdEnabled = false, ptz) {
   renderSlotList(); // 검출 도착 시 목록의 프리셋별 요약(검출 count)·점유 갱신.
 }
 
+/**
+ * artifact(state.mapping) 슬롯 행을 현재 프리셋 기준으로 box 에 렌더 → 그린 행 수.
+ * `withHeader` 면 파일 목록과 구분되는 구분선 헤더를 먼저 붙인다(병기 모드).
+ * 행 내용·클릭 동작(selectSlot)은 기존 코드 그대로다.
+ */
+function renderArtifactSlotRows(box, withHeader) {
+  const key = presetKey(state.cam, state.preset);
+  const globalIndex = state.mapping.globalIndex ?? [];
+  const slots = (state.mapping.slots ?? []).filter((slot) => slot.roiByPreset?.[key]);
+  if (withHeader && !slots.length) return 0; // 병기 모드에서 빈 헤더만 남기지 않는다.
+  if (withHeader) {
+    const h = document.createElement('div');
+    h.className = 'slot-empty';
+    h.textContent = `— 산출물 슬롯(cam${state.cam}:${state.preset}) ${slots.length}개 —`;
+    box.appendChild(h);
+  }
+  for (const slot of slots) {
+    const div = document.createElement('div');
+    div.className = 'slot';
+    if (slot.slotId === state.selectedSlotId) div.classList.add('selected');
+    div.textContent = `#${slotLabel(slot.slotId, globalIndex)} ${slot.slotId} (${slot.zone})`;
+    div.addEventListener('click', () => selectSlot(slot.slotId)); // 목록 클릭으로도 선택.
+    box.appendChild(div);
+  }
+  return slots.length;
+}
+
 function renderSlotList() {
   const box = $('slot-list');
   box.innerHTML = '';
@@ -1134,7 +1288,11 @@ function renderSlotList() {
   // 전역 인덱스 오름차순 '하나의 평면 목록'으로 렌더(R2, 프리셋 그룹 헤더 없음). 소스=state.placeRoi.
   // 둘 다 아니면(LLM·미최종화) 아래 mapping.slots 분기 유지(회귀 0).
   const finalized = !!(state.parkingSlotsByKey && Object.keys(state.parkingSlotsByKey).length);
-  const fileMode = !FLOOR_ROI_USE_LLM && (state.roiHidden || !state.mapping);
+  // 파일 ROI 에 면이 하나라도 있으면 artifact(state.mapping) 유무와 무관하게 이 평면 목록을 쓴다.
+  // 근거: 이 조건이 없으면 artifact 가 있는 환경에서 **새로 그린 파일 ROI 면이 목록에 안 보여** 선택할 수 없고,
+  //       선택이 없으면 지면격자 미리보기(ggRefSpace)에 도달할 수 없다. 오버레이(drawFileFloorRoi)는 이미
+  //       mapping 과 무관하게 파일 ROI 를 그리고 있었으므로 목록을 그 소스에 맞추는 쪽이 정합이다.
+  const fileMode = !FLOOR_ROI_USE_LLM && (state.roiHidden || !state.mapping || placeSpaceCount() > 0);
   if (finalized || fileMode) {
     updateLogicOccupancy(); // 현재 프리셋 점유 뱃지 최신화(오버레이 원 소스 occComputeByKey 유지).
     const rows = buildFlatSlotRows({
@@ -1158,23 +1316,14 @@ function renderSlotList() {
       div.textContent = '표시할 주차면 없음 — PtzCamRoi.json 확인';
       box.appendChild(div);
     }
+    // ★ 파일 목록이 artifact 슬롯 목록을 **대체하지 않는다** — 둘 다 있으면 아래에 이어 그린다(병기).
+    //   파일 ROI 가 있다는 이유로 기존 artifact 슬롯 선택 워크플로를 뺏으면 그게 목록 UI 회귀다.
+    if (state.mapping && !state.roiHidden) renderArtifactSlotRows(box, true);
     renderPlaceSelectionInfo();
     return;
   }
   if (!state.mapping) return;
-  const key = presetKey(state.cam, state.preset);
-  const globalIndex = state.mapping.globalIndex ?? [];
-  let count = 0;
-  for (const slot of state.mapping.slots ?? []) {
-    if (!slot.roiByPreset?.[key]) continue;
-    count += 1;
-    const div = document.createElement('div');
-    div.className = 'slot';
-    if (slot.slotId === state.selectedSlotId) div.classList.add('selected');
-    div.textContent = `#${slotLabel(slot.slotId, globalIndex)} ${slot.slotId} (${slot.zone})`;
-    div.addEventListener('click', () => selectSlot(slot.slotId)); // 목록 클릭으로도 선택.
-    box.appendChild(div);
-  }
+  const count = renderArtifactSlotRows(box, false);
   if (count === 0) {
     // #4: 빈 상태 안내 — 데이터 0 vs 네비게이션 불가 구분 힌트.
     const div = document.createElement('div');
@@ -1182,6 +1331,7 @@ function renderSlotList() {
     div.textContent = '이 프리셋에 주차면 없음 — 다른 프리셋 선택 또는 분석 탭 확인';
     box.appendChild(div);
   }
+  renderPlaceSelectionInfo(); // 구멍 봉합: 이 분기에서도 선택 상태를 동기화(안 하면 gg 버튼이 회색으로 굳는다).
 }
 
 // --- 주차면 선택·삭제·크기조정(#1~#3) -----------------------------------
@@ -1232,6 +1382,20 @@ function hitTestFloorVertex(nx, ny) {
   const slot = (state.mapping.slots ?? []).find((s) => s.slotId === state.selectedSlotId);
   const quad = slot?.floorRoiByPreset?.[key];
   if (!quad) return null;
+  const tolX = HANDLE_PX / (overlay.width || frame.clientWidth || 1);
+  const tolY = HANDLE_PX / (overlay.height || frame.clientHeight || 1);
+  return hitTestQuadVertex(quad, nx, ny, tolX, tolY);
+}
+
+/**
+ * 선택된 **파일 주차면**(state.placeRoi)의 4정점 히트. → 0|1|2|3|null
+ * 명시 토글(#place-edit-vertex, 기본 OFF) 뒤에 둔다 — OFF 면 첫 줄에서 null 이라 기존 클릭 동작 변화 0.
+ */
+function hitTestPlaceVertex(nx, ny) {
+  if (!$('place-edit-vertex')?.checked) return null;
+  if (state.selectedPlaceIdx == null || !$('roi-floor').checked) return null;
+  const quad = placeQuadOf(state.placeRoi, currentFrameKey(), state.selectedPlaceIdx);
+  if (!quad?.length) return null;
   const tolX = HANDLE_PX / (overlay.width || frame.clientWidth || 1);
   const tolY = HANDLE_PX / (overlay.height || frame.clientHeight || 1);
   return hitTestQuadVertex(quad, nx, ny, tolX, tolY);
@@ -1851,6 +2015,220 @@ async function deletePreset() {
   }
 }
 
+// --- 지면 격자(자동 바닥 ROI) 패널 — 미리보기·승인 적용 -------------------------
+// 정본 흐름: 격자 → PtzCamRoi.json → slot_setup(파생). 뷰어는 서버 산출을 표시만 한다(추정 0).
+// 수동 경로('면 그리기' — 캔버스 4점, placeDraw.js)와는 **가산 관계**다. 이 패널은 어떤 기존 동작도 바꾸지 않는다.
+
+function setGgMsg(text) {
+  const el = $('gg-msg');
+  if (el) el.textContent = text;
+}
+
+/**
+ * 게이트 사유 표시. text 가 있으면 `#gg-msg` 에 문구 + 경고 강조(.gg-warn),
+ * 비면 **강조만 해제**하고 텍스트는 건드리지 않는다(미리보기 성공 문구가 지워지면 안 된다).
+ */
+function setGgGate(text) {
+  const el = $('gg-msg');
+  if (!el) return;
+  if (text) {
+    el.textContent = text;
+    el.classList.add('gg-warn');
+  } else {
+    el.classList.remove('gg-warn');
+  }
+}
+
+/** 선택된 주차면(기준 면) → { camId, presetIdx, quad } 또는 null. */
+function ggRefSpace() {
+  if (state.selectedPlaceIdx == null) return null;
+  for (const [key, spaces] of Object.entries(state.placeRoi ?? {})) {
+    const sp = (spaces ?? []).find((s) => s.idx === state.selectedPlaceIdx);
+    if (sp && sp.points?.length === 4) {
+      const [camId, presetIdx] = key.split(':').map(Number);
+      return { camId, presetIdx, quad: sp.points };
+    }
+  }
+  return null;
+}
+
+/** 기준 주차면 선택 상태 표시 + 적용 버튼 잠금 갱신. */
+function renderGgSelectionInfo() {
+  const info = $('gg-sel-info');
+  if (!info) return;
+  const ref = ggRefSpace();
+  info.textContent = ref
+    ? `기준 주차면: #${state.selectedPlaceIdx} (cam${ref.camId} preset${ref.presetIdx})`
+    : '기준 주차면 미선택';
+  // 미리보기도 적용과 **같은 규약**으로 잠근다 — 미선택 시 눌러도 아무 일이 없던 '조용한 무반응'을 없앤다.
+  const prev = $('gg-preview');
+  if (prev) prev.disabled = !ref;
+  // 서버는 **파일**(PtzCamRoi.json)을 읽는다 — 메모리 버퍼의 미저장 편집은 부트스트랩에 반영되지 않는다.
+  if (ref && state.placeRoiDirty) setGgGate("미저장 편집이 있습니다 — '저장' 후 미리보기하세요(서버는 파일을 읽습니다)");
+  else setGgGate(ref ? '' : '기준 주차면을 주차면 목록에서 먼저 선택하세요(4점 폴리곤 1개) — 선택하면 미리보기가 열립니다');
+  const apply = $('gg-apply');
+  if (apply) apply.disabled = !($('gg-confirm')?.checked && state.autoRoi);
+}
+
+/** 미리보기·적용 공통 요청 본문. */
+function ggBody(ref) {
+  return {
+    camId: ref.camId,
+    presetIdx: ref.presetIdx,
+    quad: ref.quad,
+    cols: Math.max(1, Number($('gg-cols').value) || 1),
+    rows: Math.max(1, Number($('gg-rows').value) || 1),
+    colStart: Number($('gg-colstart').value) || 0,
+  };
+}
+
+/** 프리셋별 미리보기 표(생성 수 · 파일 수 · 매칭 · 평균 IoU · 적용 가능 · issues). */
+function renderGgTable(presets) {
+  const el = $('gg-table');
+  if (!el) return;
+  const rows = (presets ?? [])
+    .map(
+      (p) =>
+        `<tr><td>${p.presetIdx}</td><td>${p.generated}</td><td>${p.fileCount}</td><td>${p.matched}</td>` +
+        // 격자정합: matched=0 일 때 원인을 구분한다. onLattice=0 이면 '다른 주차열'(창을 옮겨도 안 됨).
+        `<td>${p.onLattice ?? '-'}/${p.fileCount}</td>` +
+        `<td>${p.medianResidM == null ? '-' : `${p.medianResidM.toFixed(2)}m`}</td>` +
+        `<td>${p.avgIoU == null ? '-' : p.avgIoU.toFixed(4)}</td>` +
+        `<td>${p.applicable ? 'OK' : '거부'}</td>` +
+        `<td>${(p.issues ?? []).join(' / ')}</td></tr>`,
+    )
+    .join('');
+  el.innerHTML =
+    '<table class="an-table"><thead><tr><th>프리셋</th><th>생성</th><th>파일</th><th>매칭</th>' +
+    '<th title="파일 슬롯 중 이 격자의 무한격자 위에 있는 수. 0 이면 다른 주차열이라 창을 어떻게 옮겨도 매칭 불가">격자정합</th>' +
+    '<th title="파일 슬롯 중심의 격자점 이탈 거리 중앙값">이탈</th>' +
+    '<th>평균 IoU</th><th>적용</th><th>issues</th></tr></thead><tbody>' +
+    (rows || '<tr><td colspan="9">결과 없음</td></tr>') +
+    '</tbody></table>';
+}
+
+/** '미리보기': 부트스트랩 + 전 프리셋 자동 quad 산출. **파일을 쓰지 않는다**. */
+async function ggPreview() {
+  const ref = ggRefSpace();
+  if (!ref) {
+    setGgMsg('기준 주차면을 주차면 목록에서 먼저 선택하세요(4점 폴리곤 1개)');
+    return;
+  }
+  if (state.placeRoiDirty) {
+    setGgMsg("미저장 편집이 있습니다 — 먼저 '저장'을 누르세요(서버는 메모리가 아니라 PtzCamRoi.json 파일을 읽습니다)");
+    return;
+  }
+  setGgMsg('미리보기 계산 중…');
+  try {
+    const res = await fetch('/capture/ground-grid/bootstrap', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(ggBody(ref)),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) {
+      state.autoRoi = null;
+      renderGgTable([]);
+      // ⚠️ 알려진 한계(이번 범위로 해결 불가): 수동으로 그린 **단일 quad** 는 소실점 초점추정(focalFromVPs)이
+      //    f²≤0 로 실패할 수 있고, 폴백은 **같은 카메라의 다른 프리셋**을 요구한다. 1면뿐인 신규 주차장은
+      //    그 폴백 재료가 없다 → 실패를 숨기지 말고 사용자가 할 수 있는 행동을 준다.
+      setGgMsg(
+        `미리보기 실패: ${data.error ?? res.status}${data.issues?.length ? ` — ${data.issues.join(' / ')}` : ''}` +
+          ' · 같은 카메라의 다른 프리셋에도 주차면을 1개 그린 뒤 저장하고 다시 시도하세요(초점 추정에 프리셋 2개 이상이 필요할 수 있습니다)',
+      );
+      renderGgSelectionInfo();
+      drawRoiOverlay();
+      return;
+    }
+    state.autoRoi = { camId: ref.camId, ...data };
+    renderGgTable(data.presets);
+    const c = data.constants ?? {};
+    setGgMsg(
+      `부트스트랩: 카메라고 d=${Number(c.d).toFixed(3)}m · fovBaseV=${Number(c.fovBaseV).toFixed(3)}° · ` +
+        `격자 θ=${Number(data.grid?.thetaDeg).toFixed(2)}° ${data.grid?.rows}행×${data.grid?.cols}열 ` +
+        `(피치 ${data.grid?.colPitchM}m/${data.grid?.rowPitchM}m). '자동ROI' 토글로 겹쳐보기.` +
+        (data.issues?.length ? ` ⚠ ${data.issues.join(' / ')}` : ''),
+    );
+    $('roi-auto').checked = true; // 미리보기를 냈으면 바로 보이게 한다(가산 레이어라 기존 렌더는 그대로).
+  } catch (e) {
+    state.autoRoi = null;
+    setGgMsg(`미리보기 실패(네트워크): ${e}`);
+  }
+  renderGgSelectionInfo();
+  drawRoiOverlay();
+}
+
+/** '승인 후 적용': 적용 가능한 프리셋만 PtzCamRoi.json 에 반영. 실패 시 파일 무변경(서버 게이트). */
+async function ggApply() {
+  const ref = ggRefSpace();
+  if (!ref || !state.autoRoi) {
+    setGgMsg('먼저 미리보기를 실행하세요');
+    return;
+  }
+  const targets = (state.autoRoi.presets ?? []).filter((p) => p.applicable).map((p) => p.presetIdx);
+  if (!targets.length) {
+    setGgMsg('적용 가능한 프리셋이 없습니다(표의 issues 확인) — 파일 무변경');
+    return;
+  }
+  // ★ 파괴 성질을 사용자가 읽을 문장으로 명시한다(문서에만 적고 UI 에서 빼지 않는다).
+  if (
+    !confirm(
+      '자동 ROI 를 적용합니다.\n\n' +
+        `1) PtzCamRoi_auto.json 에 자동 산출분을 기록합니다(감사 기록 — 삭제하지 않습니다).\n` +
+        '2) PtzCamRoi.json 을 백업(.bak)한 뒤 갱신합니다.\n' +
+        `3) DB slot_setup 을 전량 재구성합니다(preset ${targets.join(',')}).\n\n` +
+        '★ 3)에서 기존 검출(VPD/LPD)·점유영역·센터라이징(PTZ)은 모두 사라집니다.\n' +
+        '   나중에 수동 소스로 재구성하면 slot_roi 는 복구되지만 검출·점유·센터링 데이터는 복구되지 않습니다\n' +
+        '   (replaceSlotSetup 이 DELETE+INSERT 이므로 — 재수집·재센터링이 필요합니다).\n\n' +
+        '진행할까요?',
+    )
+  ) {
+    setGgMsg('적용 취소됨 — 파일·DB 무변경');
+    return;
+  }
+  setGgMsg(`적용 중… (preset ${targets.join(',')})`);
+  let head = '';
+  try {
+    const res = await fetch('/capture/ground-grid/apply', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...ggBody(ref), confirm: true, presets: targets, refSpaceIdx: state.selectedPlaceIdx ?? undefined }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) {
+      const detail = data.detail
+        ? ` (대상 ${data.detail.nextSlots}면 / 현재 ${data.detail.currentSlots}면` +
+          (data.detail.missingIdx?.length ? ` · 사라진 idx ${data.detail.missingIdx.join(',')}` : '') +
+          // G5: idx 없는 주차면은 idx 집합에 안 나타나므로 프리셋별 raw 개수로 보여준다.
+          (data.detail.droppedRaw?.length ? ` · 소실 위험 ${data.detail.droppedRaw.map((e) => `${e.key} ${e.from}→${e.to}면`).join(' ')}` : '') +
+          ')'
+        : '';
+      setGgMsg(`적용 실패(파일 무변경): ${data.error ?? res.status}${detail}${data.issues?.length ? ` — ${data.issues.join(' / ')}` : ''}`);
+      return;
+    }
+    head =
+      `적용됨: ${data.applied.map((a) => `preset${a.presetIdx}(${a.spaceCount}면)`).join(' ')} — ` +
+      `${data.autoFile ?? 'PtzCamRoi_auto.json'} 기록 · 백업 ${data.backupFile ?? '-'} · PtzCamRoi.json 갱신` +
+      (data.issues?.length ? ` ⚠ ${data.issues.join(' / ')}` : '');
+  } catch (e) {
+    setGgMsg(`적용 실패(네트워크): ${e}`);
+    return;
+  }
+  // 승인 1회가 재구성까지 수행한다 — 기존 라우트를 그대로 연쇄 호출(신규 DB 경로 0).
+  setGgMsg(`${head} — DB slot_setup 재구성 중…`);
+  const dbOk = await runLoadRoiToDb();
+  if (!dbOk) {
+    // 안전 실패 모드: 파일은 앞서고 DB 는 직전 정상값을 유지한다(재시도로 수렴).
+    setGgMsg(`${head} — 파일은 갱신됐으나 DB 재구성 실패 — 'ROI 파일 로딩' 으로 재시도하세요(현재 DB 는 이전 상태 유지)`);
+    state.placeRoiLoaded = false;
+    await loadPlaceRoi(); // 갱신된 파일을 다시 읽어 화면(초록 파일 ROI)을 정본과 맞춘다.
+    renderSlotList();
+    drawRoiOverlay();
+    return;
+  }
+  setGgMsg(`${head} — DB slot_setup 전량 재구성 완료`);
+}
+
 // --- 주차면 목록 편집(PtzCamRoi.json 전역 인덱스) — 선택·수정·삭제·저장·열기(R4) ---
 // 소스는 state.placeRoi(전역 인덱스 1..N). 편집은 메모리 버퍼 → '저장'(전 프리셋 순차 PUT)으로 확정.
 
@@ -1867,16 +2245,25 @@ function markPlaceDirty(text) {
 
 /** 선택된 주차면 정보·삭제 버튼 활성 상태 갱신. */
 function renderPlaceSelectionInfo() {
+  // '되돌리기' 는 선택과 무관하므로 **조기 return 위**에서 동기화한다(아래 `selectedPlaceIdx == null` 분기가 return 한다).
+  // placeRoiUndo 를 바꾸는 세 곳(전체삭제·되돌리기·저장)이 모두 renderSlotList 를 거치므로 여기서 항상 최신이다.
+  // ※ '이 프리셋 전체삭제' 는 **일부러 disabled 동기화를 하지 않는다**: 현재 프레임 키에서 파생되는데
+  //   카메라 전환(#sel-cam)은 renderSlotList 를 부르지 않아 버튼이 잘못 잠긴 채 굳을 수 있다
+  //   (= 이번 라운드가 고치는 '조용한 무반응' 과 같은 결함). 빈 프리셋 방어는 클릭 시점 안내 문구로 한다.
+  const undoBtn = $('place-undo');
+  if (undoBtn) undoBtn.disabled = !state.placeRoiUndo;
   const info = $('place-sel-info');
   const delBtn = $('place-delete');
   if (!info || !delBtn) return;
   if (state.selectedPlaceIdx == null) {
     info.textContent = '선택된 주차면 없음';
     delBtn.disabled = true;
+    renderGgSelectionInfo();
     return;
   }
   info.textContent = `선택: #${state.selectedPlaceIdx}`;
   delBtn.disabled = false;
+  renderGgSelectionInfo(); // 지면 격자 패널의 '기준 주차면' 표시를 같은 선택에 동기화(가산).
 }
 
 /** 총 주차면 수(전역 인덱스 N). */
@@ -1895,6 +2282,9 @@ function selectPlaceSpace(row) {
     gotoPreset(); // 선택 프리셋으로 Unity 물리 이동(cam.setPTZ 경로).
     reconnectLiveIfActive(); // 라이브 중이면 새 프리셋으로 스트림 재연결.
   }
+  // 네 번째 진입점: 바닥 토글이 꺼진 채 목록에서 면을 고르면 하이라이트도 정점 핸들도 안 나온다
+  // (표시·히트테스트가 둘 다 #roi-floor 를 요구) → 선택했는데 화면이 안 변하는 '조용한 무반응'. 렌더 **앞**에 둔다.
+  ensureFloorVisible();
   drawRoiOverlay();
   renderSlotList();
 }
@@ -1928,6 +2318,229 @@ function deletePlaceSpace() {
 }
 
 /**
+ * 되돌리기 스냅샷 개시 — 파괴 **직전** 전체 맵 깊은 복사(alignRun 과 동일 관용구).
+ * 초기화(면 삭제)·전체삭제 **양쪽**이 같은 1단계 스냅샷을 쓴다(되돌리기 일원화).
+ */
+function snapshotPlaceRoi(label) {
+  state.placeRoiUndo = { label, placeRoi: JSON.parse(JSON.stringify(state.placeRoi ?? {})), after: null };
+}
+
+/**
+ * 파괴 **직후** 결과를 지문으로 봉인. 되돌리기 시점에 이 지문과 다르면 = 그 사이 다른 편집이 있었다는 뜻이고,
+ * 전체 맵 통째 교체가 그 편집까지 되감으므로 **조용히 넘어가지 않고 사용자에게 확인**한다(F-2).
+ */
+function sealPlaceRoiUndo() {
+  if (state.placeRoiUndo) state.placeRoiUndo.after = JSON.stringify(state.placeRoi ?? {});
+}
+
+/**
+ * '초기화': 그리는 중이면 **찍은 점만** 비우고(그리기 모드는 유지), 아니면 선택된 면 1개를 삭제한다.
+ * 우선순위가 **그리는 중 > 선택 면** 인 이유: 그리기 중 '초기화' 의 의도는 100% "지금 찍은 점 다시" 이고,
+ * 이때 커밋된 면을 지우면 되돌릴 수 없는 파괴가 오조작으로 일어난다 → 비파괴 분기를 항상 앞에 둔다.
+ * 면 삭제는 `deletePlaceSpace()` 에 위임한다(구현 중복 0 · 동작 차이 0). 파일 접촉 0 — 반영은 '저장' 뿐.
+ */
+function clearPlaceDrawing() {
+  if (state.placeDraw) {
+    state.placeDraw = beginPlaceDraw(state.placeDraw.key); // 같은 프리셋에서 0점부터 다시(모드 유지 — 취소는 Esc/'그리기 취소').
+    placeDrawCursor = null;
+    setPlaceMsg('1/4 — 찍은 점을 모두 지웠습니다. 모서리를 다시 4번 클릭하세요. Esc=취소');
+    drawRoiOverlay();
+    return;
+  }
+  if (state.selectedPlaceIdx != null) {
+    // 면 삭제는 파괴다 → 반드시 복구 가능해야 한다(전체삭제와 **같은** 1단계 스냅샷을 쓴다).
+    // confirm 은 붙이지 않는다: 되돌리기로 복구되고, 같은 일을 하는 기존 '삭제' 버튼도 확인을 받지 않는다
+    // (여기만 확인을 받으면 두 버튼의 동작이 갈려 더 혼란스럽다). 대신 복구 가능 사실을 문구로 알린다.
+    const idx = state.selectedPlaceIdx;
+    snapshotPlaceRoi(`주차면 #${idx} 삭제`);
+    deletePlaceSpace();
+    sealPlaceRoiUndo();
+    setPlaceMsg(`주차면 #${idx} 삭제됨(미저장) — '되돌리기' 로 복구할 수 있습니다 · '저장'을 눌러야 파일에 반영됩니다`);
+    return;
+  }
+  setPlaceMsg('지울 점도, 선택된 주차면도 없습니다');
+}
+
+/**
+ * '이 프리셋 전체삭제': 지금 화면에 보이는 프레임(currentFrameKey — drawFileFloorRoi 와 **같은 기준**)의
+ * 주차면만 목록에서 전부 지운다. 확인 필수 · 파일 접촉 0(반영은 '저장') · 직전 상태는 state.placeRoiUndo 로 1단계 복구.
+ * 남은 면의 전역번호는 1..N 으로 재압축된다(removePlaceSpace 위임) — 구멍을 남기는 선택지는 없다
+ * (normalizeGlobalIdx 가 1..N 순열이 아니면 다음 로드에서 무조건 재부여한다).
+ */
+function clearCurrentPresetSpaces() {
+  const key = currentFrameKey();
+  const [cam, preset] = key.split(':');
+  const n = (state.placeRoi?.[key] ?? []).length;
+  if (!n) {
+    setPlaceMsg(`cam${cam} 프리셋${preset} 에는 지울 주차면이 없습니다`);
+    return;
+  }
+  const ok = confirm(
+    `cam${cam} 프리셋${preset} 의 주차면 ${n}개를 목록에서 전부 지웁니다.\n` +
+      `· 다른 프리셋·다른 카메라의 주차면은 그대로입니다.\n` +
+      `· 파일(PtzCamRoi.json)은 아직 바뀌지 않습니다 — '저장'을 눌러야 반영됩니다.\n` +
+      `· 저장 전에는 '되돌리기' 로 복구할 수 있습니다.\n` +
+      `★ 남은 주차면의 전역번호가 1..N 으로 다시 매겨집니다. 저장 후에는 'ROI 파일 로딩' 으로\n` +
+      `   DB(slot_setup)를 재구성해야 검출·점유·센터라이징 귀속이 맞습니다.\n` +
+      `진행할까요?`,
+  );
+  if (!ok) return;
+  // 스냅샷은 반드시 변경 **앞**에서(전체 맵 깊은 복사 — 전체삭제는 다른 프리셋의 전역번호까지 바꾼다).
+  snapshotPlaceRoi(`cam${cam} 프리셋${preset} 전체삭제(${n}개)`);
+  state.placeRoi = clearPresetSpaces(state.placeRoi, key);
+  sealPlaceRoiUndo();
+  state.selectedPlaceIdx = null; // 남은 면의 idx 가 이동하므로 옛 번호를 유지하면 엉뚱한 면이 선택된 것처럼 보인다.
+  markPlaceDirty(
+    `cam${cam} 프리셋${preset} 주차면 ${n}개 삭제됨(미저장) — '되돌리기' 가능 · '저장'을 눌러야 파일에 반영됩니다`,
+  );
+  drawRoiOverlay();
+  renderSlotList();
+}
+
+/**
+ * '되돌리기': 직전 파괴(초기화의 면 삭제 · 이 프리셋 전체삭제) 전의 **전체 맵** 스냅샷 복원(1단계 한정 — 복원하면 소진).
+ * 전체 맵을 통째 교체하므로 그 뒤에 한 편집도 함께 되감긴다 → 실제로 되감을 편집이 있을 때만 확인을 받는다(조용한 손실 금지).
+ */
+function undoPlaceRoi() {
+  const snap = state.placeRoiUndo;
+  if (!snap) {
+    setPlaceMsg('되돌릴 내역이 없습니다(초기화·전체삭제 직후에만 가능)');
+    return;
+  }
+  // 파괴 직후 지문과 지금이 다르다 = 그 사이에 다른 편집이 있었다 → 그 편집도 사라진다는 사실을 먼저 알린다.
+  if (snap.after != null && JSON.stringify(state.placeRoi ?? {}) !== snap.after) {
+    const ok = confirm(
+      `'${snap.label}' 직전의 **전체** 주차면 상태로 되감습니다.\n` +
+        `그 뒤에 한 편집(새로 그린 면 · 번호 수정 · 다른 프리셋 변경)도 **함께 사라집니다**.\n` +
+        `되돌리기는 1단계뿐이라 이 작업은 다시 되돌릴 수 없습니다.\n` +
+        `진행할까요?`,
+    );
+    if (!ok) return;
+  }
+  state.placeRoi = snap.placeRoi;
+  state.placeRoiUndo = null;
+  state.selectedPlaceIdx = null;
+  markPlaceDirty(`되돌렸습니다: ${snap.label} 직전 상태(전체 프리셋) — 여전히 미저장 상태입니다`);
+  drawRoiOverlay();
+  renderSlotList();
+}
+
+// --- 주차면 신규 그리기(캔버스 4점) — 상태머신·커밋·검증 --------------------
+// 저장은 **하지 않는다**. 커밋은 메모리 버퍼(state.placeRoi)까지이고 파일 반영은 '저장' 버튼뿐이다.
+
+/**
+ * 바닥 표시 토글(#roi-floor)을 켠다 — **사용자 명시 조작 직후에만** 호출한다
+ * (ggPreview 가 `$('roi-auto').checked = true` 로 강제 ON 하는 것과 같은 규약. 자동 폴링·렌더 루프에서는 절대 호출 금지).
+ * 이 토글이 꺼져 있으면 drawFileFloorRoi(초록 파일 ROI)와 정점 핸들이 통째로 사라져 "찍어도 아무 일이 없다" 로 보인다.
+ */
+function ensureFloorVisible() {
+  const el = $('roi-floor');
+  if (el && !el.checked) el.checked = true;
+}
+
+/** 그리기 진행 상태를 폐기하고 UI(커서·버튼)를 원복. 그린 점은 placeRoi 에 반영되지 않는다. */
+function endPlaceDraw() {
+  state.placeDraw = null;
+  placeDrawCursor = null;
+  overlay.classList.remove('place-drawing');
+  const btn = $('place-draw');
+  if (btn) btn.textContent = '면 그리기';
+  drawRoiOverlay();
+}
+
+/** '면 그리기' 토글. 진행 중이면 취소, 아니면 시작(개별 센터라이징과는 물리 배타 — 클릭을 서로 뺏는다). */
+function togglePlaceDraw() {
+  if (state.placeDraw) {
+    endPlaceDraw();
+    setPlaceMsg('그리기 취소됨');
+    return;
+  }
+  const clickMode = $('cal-click-mode')?.value;
+  if (clickMode && clickMode !== 'off') {
+    setPlaceMsg("개별 센터라이징이 켜져 있습니다 — 콤보를 'off' 로 두고 다시 시작하세요(클릭을 공유할 수 없습니다)");
+    return;
+  }
+  state.placeDraw = beginPlaceDraw(currentFrameKey());
+  placeDrawCursor = null;
+  ensureFloorVisible(); // 기존 초록 면이 보여야 '어디에' 그릴지 안다(꺼진 채 그리면 결과가 안 보인다).
+  overlay.classList.add('place-drawing');
+  const btn = $('place-draw');
+  if (btn) btn.textContent = '그리기 취소';
+  setPlaceMsg('1/4 — 주차면 모서리를 시계(또는 반시계) 한 방향으로 4번 클릭하세요. Esc=취소 · Ctrl+Z=되돌리기');
+  drawRoiOverlay();
+}
+
+/**
+ * 그리기 모드에서 캔버스 클릭 1회 — 점 추가, 4점째면 커밋.
+ * 커밋 = placeRoi 끝 append(idx 부여) + 선택 + 정점편집 자동 ON. **PUT 은 보내지 않는다.**
+ */
+function placeDrawClick(e) {
+  e.preventDefault();
+  // 그리는 도중 프리셋이 바뀌면 다른 화면의 좌표를 섞어 찍게 된다 → 조용히 이어붙이지 않고 취소한다.
+  if (state.placeDraw.key !== currentFrameKey()) {
+    endPlaceDraw();
+    setPlaceMsg('프리셋이 바뀌어 그리기를 취소했습니다 — 다시 시작하세요');
+    return;
+  }
+  const { nx, ny } = eventToNorm(e);
+  const { draw, full } = addPlaceDrawPoint(state.placeDraw, { x: nx, y: ny });
+  state.placeDraw = draw;
+  if (!full) {
+    setPlaceMsg(`${draw.points.length + 1}/4 — 다음 모서리를 클릭하세요. Esc=취소 · Ctrl+Z=되돌리기`);
+    drawRoiOverlay();
+    return;
+  }
+  const key = draw.key;
+  const points = draw.points;
+  const { placeRoi, idx } = appendPlaceSpace(state.placeRoi, key, points);
+  state.placeRoi = placeRoi;
+  state.selectedPlaceIdx = idx; // 지면격자 '기준 주차면'(ggRefSpace) 성립 — 미리보기 잠금 해제.
+  const gidx = $('place-gidx');
+  if (gidx) gidx.value = String(idx);
+  const vtx = $('place-edit-vertex');
+  if (vtx) vtx.checked = true; // 그린 직후 정점 미세조정으로 자연 연결.
+  // ★ 순서가 계약이다: endPlaceDraw() **앞**이어야 한다. endPlaceDraw 안의 drawRoiOverlay() 한 번이
+  //   노랑 미리보기(state.placeDraw=null 로 사라짐)와 초록 파일 ROI 를 같은 프레임에 처리하는데,
+  //   이 호출이 뒤로 가면 그 프레임엔 노랑도 초록도 없는 **빈 프레임**이 된다(= 커밋했는데 화면이 빈다).
+  ensureFloorVisible();
+  endPlaceDraw();
+  markPlaceDirty(`주차면 #${idx} 추가됨(미저장) — 정점을 드래그해 맞춘 뒤 '저장'을 눌러야 파일에 기록됩니다`);
+  renderSlotList();
+  void validatePlaceQuad(key, idx);
+}
+
+/**
+ * 그린 면이 지면격자 게이트(isUsableQuad)를 통과하는지 **서버 판정**으로 확인(읽기 전용 — 파일을 쓰지 않는다).
+ * 판정 재구현 금지 규약 — 뷰어는 문장만 표시한다. 네트워크 실패는 강등(면은 유지, 경고만).
+ */
+async function validatePlaceQuad(key, idx) {
+  const quad = placeQuadOf(state.placeRoi, key, idx);
+  if (!quad || quad.length !== 4) return;
+  const [camId, presetIdx] = key.split(':').map(Number);
+  const body = { camId, presetIdx, quad };
+  if (frame.naturalWidth > 0 && frame.naturalHeight > 0) {
+    body.imageWidth = frame.naturalWidth;
+    body.imageHeight = frame.naturalHeight;
+  }
+  try {
+    const res = await fetch('/capture/place-roi/validate', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      setPlaceMsg(`주차면 #${idx} 검증 실패(${data.error ?? res.status}) — 지면격자에서 거부될 수 있습니다`);
+      return;
+    }
+    if (data.ok) setPlaceMsg(`주차면 #${idx}: 사용 가능한 주차면입니다(미저장 — '저장' 필요)`);
+    else setPlaceMsg(`주차면 #${idx}: ${(data.reasons ?? ['사용 불가']).join(' / ')}`);
+  } catch (err) {
+    setPlaceMsg(`주차면 #${idx} 검증 실패(네트워크: ${err}) — 지면격자에서 거부될 수 있습니다`);
+  }
+}
+
+/**
  * '저장': state.placeRoi 전 프리셋을 PUT /capture/place-roi 로 순차 저장(PtzCamRoi.json).
  * 서버가 요청마다 readFile→apply→writeFile 하므로 반드시 직렬 await(병렬 시 갱신 유실).
  * 하나라도 실패하면 즉시 중단 + 실패 프리셋 명시(부분 저장 상태를 숨기지 않는다).
@@ -1938,17 +2551,62 @@ async function savePlaceRoi() {
     setPlaceMsg('저장할 주차면이 없습니다');
     return;
   }
+  // idx 가드: idx 없는 주차면은 서버 정규화에서 조용히 탈락하고 통째 교체 저장 시 **파일에서 사라진다**.
+  // 하나라도 정수 idx 가 아니면 PUT 자체를 보내지 않는다(데이터 파괴 차단).
+  for (const key of keys) {
+    const bad = (state.placeRoi[key] ?? []).filter((sp) => !Number.isInteger(sp?.idx));
+    if (bad.length) {
+      setPlaceMsg(`저장 중단(cam${key}): 전역번호(idx) 없는 주차면 ${bad.length}개 — 저장하면 파일에서 사라집니다`);
+      return;
+    }
+  }
+  let ptzWarn = null; // zoom 이 유효하지 않아 골격에서 빠진 프리셋(있으면 저장 후 경고 — 지면격자 부트스트랩 불가).
   for (const key of keys) {
     const [cam, preset] = key.split(':').map(Number);
+    const body = { camId: cam, presetIdx: preset, spaces: state.placeRoi[key] };
+    // 골격(create)이 필요한 경우 = 파일 자체가 없거나(404), 이 cam:preset 이 **파일에서 로드된 키가 아닐 때**.
+    // 후자가 "파일은 있는데 대상 cam/preset 이 없는" 경우다 — 이 조건이 없으면 그 프리셋은 영구히 저장 불가였다.
+    if (needsPlaceSkeleton(key)) {
+      const skel = buildPlaceSkeleton(cam, preset);
+      if (!skel) {
+        setPlaceMsg('저장 중단: 라이브 프레임을 먼저 시작하세요(이미지 크기 미상 — 1920×1080 을 추측하지 않습니다)');
+        return;
+      }
+      body.create = skel;
+      if (skel.zoom == null) ptzWarn = `cam${cam}:${preset}`;
+    }
     try {
-      const res = await fetch('/capture/place-roi', {
+      let res = await fetch('/capture/place-roi', {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ camId: cam, presetIdx: preset, spaces: state.placeRoi[key] }),
+        body: JSON.stringify(body),
       });
+      let data = await res.json().catch(() => ({}));
+      // applied=false = 대상 cam/preset 이 파일에 없어 **아무것도 반영되지 않음**.
+      // 골격을 안 붙여 보낸 경우라면 사용자 추가 조작 없이 **골격을 만들어 1회만** 재시도한다(무한 반복 없음).
+      if (res.ok && data.applied === false && !body.create) {
+        const skel = buildPlaceSkeleton(cam, preset);
+        if (!skel) {
+          setPlaceMsg(
+            `저장 안 됨(cam${cam}:${preset}): 대상 카메라/프리셋이 파일에 없습니다 — 라이브 프레임을 시작하면 골격을 만들어 저장합니다`,
+          );
+          return;
+        }
+        body.create = skel;
+        if (skel.zoom == null) ptzWarn = `cam${cam}:${preset}`;
+        res = await fetch('/capture/place-roi', {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        data = await res.json().catch(() => ({}));
+      }
       if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
         setPlaceMsg(`저장 실패(cam${cam}:${preset}): ${data.error ?? res.status} — 이후 프리셋은 저장되지 않음`);
+        return;
+      }
+      if (data.applied === false) {
+        setPlaceMsg(`저장 안 됨(cam${cam}:${preset}): ${(data.issues ?? ['대상 카메라/프리셋 없음']).join(' / ')}`);
         return;
       }
     } catch (e) {
@@ -1957,7 +2615,50 @@ async function savePlaceRoi() {
     }
   }
   state.placeRoiDirty = false;
-  setPlaceMsg(`저장됨: ${keys.length}개 프리셋 · ${placeSpaceCount()}개 주차면(PtzCamRoi.json)`);
+  state.placeRoiUndo = null; // 저장 확정 → 전체삭제 되돌리기 소진(alignApply 의 placeRoiBackup 규약과 동일).
+  setPlaceMsg(`저장됨: ${keys.length}개 프리셋 · ${placeSpaceCount()}개 주차면(PtzCamRoi.json) — 재로딩 중…`);
+  // 파일 왕복 재로딩: 화면에 보이는 좌표·idx 가 **파일에 실제로 들어간 값**임을 눈으로 확인한다.
+  const saved = placeSpaceCount();
+  const selected = state.selectedPlaceIdx;
+  state.placeRoiLoaded = false;
+  await loadPlaceRoi();
+  state.selectedPlaceIdx = selected;
+  renderSlotList();
+  drawRoiOverlay();
+  // 재로딩이 전역번호를 다시 매겼다면(placeRoiDirty) 그 경고 문구를 덮지 않는다.
+  if (!state.placeRoiDirty) {
+    // zoom 이 유효하지 않아 골격에 못 넣었으면 숨기지 않는다 — 그 프리셋은 지면격자 부트스트랩이 실패한다.
+    const warn = ptzWarn ? ` · ⚠ ${ptzWarn} 은 zoom 미상으로 기록되지 않았습니다 — 지면격자 미리보기가 실패합니다(프리셋 PTZ 확인)` : '';
+    setPlaceMsg(`저장·재로딩 완료: ${placeSpaceCount()}개 주차면(저장 직전 ${saved}개)${warn}`);
+  }
+}
+
+/**
+ * 이 프리셋 키에 골격(create) 첨부가 필요한가.
+ * - 파일 자체가 없다(GET 404) → 필요.
+ * - 파일에서 **로드된 적 없는 키**(= 파일에 그 cam/preset 이 없거나 주차면이 0개였다) → 필요.
+ *   이 조건이 없으면 "파일은 있는데 대상 cam/preset 이 없는" 경우 저장이 영구히 불가능했다.
+ * 파일에서 로드된 키면 false — 기존 저장 경로에는 새 실패 조건(라이브 미시작)이 붙지 않는다(회귀 0).
+ */
+function needsPlaceSkeleton(key) {
+  return state.placeRoiFileMissing || !state.placeRoiFileKeys.has(key);
+}
+
+/**
+ * 골격 메타 생성. 이미지 크기의 실측 출처는 프레임의 naturalWidth/Height **뿐**이며, 없으면 null(저장 거부).
+ * PTZ 는 L3 부트스트랩의 유일한 출처다(PtzCamRoi.json 밖에서 읽지 않는다) — 프리셋 PTZ, 없으면 뷰어 현재 PTZ.
+ * zoom 은 서버 스키마가 양수만 받으므로 유효하지 않으면 **넣지 않는다**(넣으면 저장 전체가 400 으로 죽는다).
+ */
+function buildPlaceSkeleton(cam, preset) {
+  const w = frame.naturalWidth;
+  const h = frame.naturalHeight;
+  if (!(w > 0 && h > 0)) return null;
+  const ptz = findPresetPtz(state.cameras, cam, preset) ?? state.ptz;
+  const skel = { imageWidth: w, imageHeight: h };
+  if (Number.isFinite(ptz?.pan)) skel.pan = ptz.pan;
+  if (Number.isFinite(ptz?.tilt)) skel.tilt = ptz.tilt;
+  if (Number.isFinite(ptz?.zoom) && ptz.zoom > 0) skel.zoom = ptz.zoom;
+  return skel;
 }
 
 /** '열기': 로컬 PtzCamRoi.json → 정규화 + 전역번호 정규화 → 미저장 버퍼(저장으로 확정). */
@@ -2646,9 +3347,17 @@ async function resetSlotSetupDb() {
 // ROI 파일 로딩: PtzCamRoi.json(바닥 ROI 정본) → DB slot_setup 전량 재구성(검출·점유·센터링은 초기값).
 async function loadRoiToDb() {
   if (!confirm('PtzCamRoi.json 으로 DB slot_setup 을 전량 재구성합니다. 기존 검출(VPD/LPD)·점유영역·센터라이징(PTZ)은 모두 사라집니다. 되돌릴 수 없습니다. 진행할까요?')) return;
+  await runLoadRoiToDb();
+}
+
+/**
+ * 재구성 본문(확인 대화 없음). '지면 격자 승인' 연쇄가 같은 경로를 재사용한다 — 후처리 순서를 복사하지 않는다.
+ * 성공하면 true, 실패하면 false(호출자가 자기 메시지 영역에 안내한다).
+ */
+async function runLoadRoiToDb() {
   const res = await fetch('/capture/slots/load-roi', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok || !data.ok) { $('cap-msg').textContent = `ROI 로딩 실패: ${data.error ?? res.status}`; return; }
+  if (!res.ok || !data.ok) { $('cap-msg').textContent = `ROI 로딩 실패: ${data.error ?? res.status}`; return false; }
   resetOverlayDisplay();           // 클라 라이브 오버레이(detect/occ/vcuboid) 정리.
   // 카메라·프리셋 드롭다운 재수신 — 서버가 camerapos.json 을 ROI 정본으로 갱신했으므로 목록·PTZ 가 바뀐다.
   // 이걸 빼면 화면은 옛 PTZ 로 이동하는데 오버레이는 새 ROI 기준이라 육면체가 어긋난 위치에 그려진다.
@@ -2667,6 +3376,7 @@ async function loadRoiToDb() {
   if (skipped.length) parts.push(`스킵 ${skipped.join(', ')}`);
   if ((data.issues ?? []).length) parts.push(`이슈 ${data.issues.join(' | ')}`);
   $('cap-msg').textContent = parts.join(' — ');
+  return true;
 }
 
 // 3D육면체 ROI생성: 지면모델로 슬롯별 육면체 앞면 중심(slot3d_front_center)을 산출해 DB 저장 + 즉시 표시.
@@ -3982,6 +4692,10 @@ function wirePanelResize() {
 function wireOverlayEditing() {
   // mousedown: floor 정점 위면 정점 드래그 시작, 아니면 슬롯 선택/해제.
   overlay.addEventListener('mousedown', (e) => {
+    // [주차면 신규 그리기] 진행 중일 때만 클릭을 소비하고 즉시 return.
+    // state.placeDraw 가 null 이면 아래 기존 코드는 **원문 그대로** 실행된다(회귀 0 의 구조적 보장).
+    if (state.placeDraw) { placeDrawClick(e); return; }
+
     // [개별 센터라이징] 콤보 선택 시 클릭을 최우선 소비 → 클릭 지점 최근접 번호판으로 센터라이징(저장 안 함).
     // 미선택(off)이면 이 분기를 건너뛰어 기존 편집 동작 100% 보존. Ctrl 은 기존 편집 제스처라 제외.
     const clickMode = $('cal-click-mode')?.value;
@@ -4021,6 +4735,17 @@ function wireOverlayEditing() {
           renderDetectSelection();
           drawRoiOverlay();
         }
+      }
+    }
+    // [주차면 정점 편집] 파일 ROI(state.placeRoi)는 artifact(state.mapping)가 없어도 존재한다 →
+    // 반드시 아래 `!state.mapping` 가드 **위**에 둔다(신규 주차장에선 그 가드 아래가 통째로 inert).
+    // #place-edit-vertex 가 꺼져 있으면 hitTestPlaceVertex 가 첫 줄에서 null → 기존 동작 변화 0.
+    if (!e.ctrlKey) {
+      const pv = hitTestPlaceVertex(nx, ny);
+      if (pv != null) {
+        dragState = { kind: 'placeVertex', index: pv, key: currentFrameKey(), idx: state.selectedPlaceIdx, last: { nx, ny } };
+        e.preventDefault();
+        return;
       }
     }
     if (state.roiHidden || !state.mapping) return;
@@ -4066,6 +4791,14 @@ function wireOverlayEditing() {
     renderSelectionInfo();
   });
 
+  // [주차면 신규 그리기] 고무줄선용 커서 추적. 오버레이에만 추가 등록하며 그리기 중이 아니면 즉시 return
+  // (아래 window mousemove 는 `if (!dragState) return;` 로 시작하므로 서로 간섭이 0이다).
+  overlay.addEventListener('mousemove', (e) => {
+    if (!state.placeDraw) return;
+    placeDrawCursor = eventToNorm(e);
+    if (state.placeDraw.points.length) drawRoiOverlay();
+  });
+
   // mousemove: 드래그 진행 중이면 kind 별 실시간 미리보기.
   window.addEventListener('mousemove', (e) => {
     if (!dragState) return;
@@ -4086,6 +4819,14 @@ function wireOverlayEditing() {
         if (!p?.quad) return;
         p.quad = moveQuadVertex(p.quad, dragState.index, ndx, ndy);
       }
+      dragState.last = { nx, ny };
+      drawRoiOverlay();
+      return;
+    }
+    // [주차면 정점 편집] 파일 ROI 편집은 mapping 과 무관하다 → 아래 `state.mapping.slots` 접근 **이전**에 반드시 return
+    // (신규 주차장은 state.mapping 이 null 이라 그 줄에 닿으면 TypeError 다).
+    if (dragState.kind === 'placeVertex') {
+      state.placeRoi = movePlaceVertex(state.placeRoi, dragState.key, dragState.idx, dragState.index, ndx, ndy);
       dragState.last = { nx, ny };
       drawRoiOverlay();
       return;
@@ -4126,8 +4867,15 @@ function wireOverlayEditing() {
   window.addEventListener('mouseup', () => {
     if (!dragState) return;
     const wasDetect = dragState.kind === 'detResize' || dragState.kind === 'detMove' || dragState.kind === 'detVertex';
+    // placeVertex 는 artifact(mapping) 가 아니라 파일 ROI 편집이다 → markDirty(artifact 미저장) 가 아니라
+    // markPlaceDirty(주차면 미저장) + 게이트 재검증으로 간다.
+    const wasPlace = dragState.kind === 'placeVertex';
+    const placeRef = wasPlace ? { key: dragState.key, idx: dragState.idx } : null;
     dragState = null;
-    if (!wasDetect) markDirty();
+    if (wasPlace) {
+      markPlaceDirty(`주차면 #${placeRef.idx} 정점 이동됨(미저장) — '저장'을 눌러야 파일에 기록됩니다`);
+      void validatePlaceQuad(placeRef.key, placeRef.idx);
+    } else if (!wasDetect) markDirty();
     drawRoiOverlay();
   });
 }
@@ -4267,6 +5015,7 @@ function wire() {
     if (e.target.checked) await loadParkingSlots();
     drawRoiOverlay();
   });
+  $('roi-auto').addEventListener('change', drawRoiOverlay); // 자동 바닥 ROI 가산 레이어 토글(기본 off → 회귀 0).
   $('roi-cuboid').addEventListener('change', drawRoiOverlay); // 3D 육면체 레이어 토글(기본 off → 회귀 0).
   $('roi-mask').addEventListener('change', drawRoiOverlay); // VPD seg 마스크 오버레이 토글(순수 렌더 — masks 는 detect 응답에 동승, 별도 로드 불필요).
   // 차량 육면체 토글(**기본 off** — 마스터 요청 2026-07-15: 시작 시 체크 해제).
@@ -4318,11 +5067,47 @@ function wire() {
   $('result-save').addEventListener('click', saveResult); // 정밀수집 결과 저장(로컬 파일)
   $('result-open').addEventListener('click', openResult); // 정밀수집 결과 열기(로컬 파일)
 
+  // 주차면 신규 그리기(캔버스 4점) + 정점 편집 토글.
+  $('place-draw').addEventListener('click', togglePlaceDraw);
+  $('place-edit-vertex').addEventListener('change', (e) => {
+    // 켜는 조작인데 바닥 토글이 꺼져 있으면 핸들이 안 나온다(표시·히트테스트가 둘 다 #roi-floor 를 요구) → '조용한 무반응' 제거.
+    if (e.target?.checked) ensureFloorVisible();
+    drawRoiOverlay(); // 정점 핸들 표시/숨김 즉시 반영.
+  });
+  $('place-clear').addEventListener('click', clearPlaceDrawing); // 찍은 점 초기화(그리는 중) / 선택 면 삭제.
+  // 그리기 전용 단축키. **기존 keydown 핸들러보다 먼저** 등록하고, 소비 시 stopImmediatePropagation 으로
+  // 검출 편집 Esc 와의 이중 발화를 막는다(그리는 중에만 소비 — 평상시엔 기존 핸들러로 그대로 통과).
+  document.addEventListener('keydown', (e) => {
+    const t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+    if (!state.placeDraw) return;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      endPlaceDraw();
+      setPlaceMsg('그리기 취소됨');
+    } else if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z')) {
+      if (!state.placeDraw.points.length) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      state.placeDraw = undoPlaceDrawPoint(state.placeDraw);
+      setPlaceMsg(`${state.placeDraw.points.length + 1}/4 — 마지막 점을 되돌렸습니다`);
+      drawRoiOverlay();
+    }
+  });
+
   // 주차면 목록·편집(PtzCamRoi 전역 인덱스): 수정·삭제·저장·열기(선택은 목록 행 클릭).
   $('place-edit').addEventListener('click', editPlaceIdx);
   $('place-delete').addEventListener('click', deletePlaceSpace);
+  $('place-clear-preset').addEventListener('click', clearCurrentPresetSpaces); // 현재 프리셋 전량(확인 필수).
+  $('place-undo').addEventListener('click', undoPlaceRoi); // 전체삭제 1단계 되돌리기.
   $('place-save').addEventListener('click', savePlaceRoi);
   $('place-open').addEventListener('click', openPlaceRoi);
+
+  // 지면 격자(자동 바닥 ROI): 미리보기 → 결과 확인 체크 → 승인 후 적용. 전부 가산(기존 경로 불변).
+  $('gg-preview').addEventListener('click', ggPreview);
+  $('gg-apply').addEventListener('click', ggApply);
+  $('gg-confirm').addEventListener('change', renderGgSelectionInfo); // 체크 없으면 적용 버튼 잠금.
 
   // [기능2] 검출 박스 편집(임시): 삭제 버튼 + 단축키(Delete/Backspace=삭제, Esc=해제).
   $('det-delete').addEventListener('click', deleteSelectedDetect);
