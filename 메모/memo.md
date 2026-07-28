@@ -28,6 +28,89 @@ memo.md에 새 항목을 추가하기 **전에** 파일 크기를 확인한다. 
 
 ---
 
+## 2026-07-28 서버 RPC화 — 외부 제어용 JSON-RPC 평면 + MCP 연동 (main 머지 완료 `e0d9c29`, **push 안 함**)
+
+**세션 요약** — 마스터 요청("서버를 RPC화. RPC 가능한 부분 설계 + 웹 클라에서만 가능한 부분 확인해 추가 + 제외할 부분 제안")을 설계→다이어그램→구현→검증→머지→MCP 연동까지 완주. 워크트리 `feat-rpc-control-plane`(**유지 중**). 최종 `tsc 0` · `vitest 3246 green`.
+
+**만든 것 — 13020 에 `POST /rpc` + `GET /rpc/catalog` (별도 프로세스·포트 없음)**
+- 자기 메서드 **70개** + `unity.*` 패스스루(13110, 실측 91개 병합) → **외부는 엔드포인트 하나만 알면 셋팅+시뮬레이터 전부 제어**.
+- 기존 `/viewer/api/rpc`(Unity 프록시)는 **의미 불변**으로 남김. 이름이 셋 다 "rpc" 라 혼동 주의: ①Unity 13110 `/rpc`(외부 서버) ②13020 `/viewer/api/rpc`(그쪽으로 가는 프록시) ③13020 `/rpc`(신규·자기 능력).
+- 문서 3종: `docs/20260728_183010_..._RPC화_설계서.md` · `20260728_184621_..._설계다이어그램.md`(mermaid 13종) · `20260728_191516_RPC제어평면_구현_영향도분석.md`.
+
+**★ 핵심 설계 = RPC 는 로직을 갖지 않는다.** 55 메서드는 `app.inject()` 로 기존 REST 라우트에 위임(코드 이동 0 → 결과가 정의상 동일), 15개만 REST 에 **대응 라우트가 없는** 승격 기능. `test/rpcParity.test.ts` 가 양방향 고정 — ①같은 작업의 REST/RPC 파일 결과 **md5 동일** ②모든 위임 URL 이 기존 라우트 경로 집합 안에 있는지 정적 검사(새 경로 만들면 실패).
+
+**★ 오류 코드로 재시도 정책을 갈랐다** — HTTP 409 하나에 섞여 있던 둘을 분리. `-32001 BUSY`(잡 점유 → 백오프 재시도) vs `-32005 CONFLICT`(가드 거부·**파일/DB 무변경** → 재시도 무의미, 사람 개입). 판정 불가 시 CONFLICT(안전측). 404 도 분리: `-32004 UNAVAILABLE`(라우트 미등록=기능 off) vs `-32002 NOT_FOUND`(값 없음).
+
+**웹 클라에만 있던 능력 9건 승격**(설계서에서 12건 발굴) — `place.space.add/update/delete`(★현행 PUT 은 **프리셋 통째 교체**라 8면→7면 소실의 구조적 원인이었다. 이제 서버가 read-modify-write 소유) · `place.preset.clear` · `place.backups/revert`(브라우저 undo 스택 → `.bak` 파일) · `place.align.apply`(자동보정 **적용 계산**이 브라우저에만 있었다) · `place.spaces.list` · `cam.preset.upsert/delete/list` · `cam.gotoPreset` · `plate.pickAt`(클릭 최근접 번호판 — 기존엔 `centerOnPoint` **내부**에만, 부수효과 동반) · `setup.mapping.autoNumber`(기본 dryRun).
+
+**삭제 두 규약 공존을 파라미터로 노출** — `mode:'clear'`(기본·`points:[]`·번호보존·DB 안전) / `mode:'remove'`(1..N 재압축·경고 동반). 두 UI(ROI편집탭 vs 제어탭)가 실제로 다른 규약을 쓰고 있어 어느 쪽도 임의로 바꾸지 않았다.
+
+**MCP 연동(후속 커밋 `e0d9c29`)** — 셸 없는 MCP 클라이언트(Claude Desktop·Codex)는 HTTP 를 못 부르므로 셋팅 제어에 닿을 방법이 **아예 없었다**. `setting_rpc` + `setting_rpc_catalog`(filter 지원) 2개만 추가 — 메서드 70개를 개별 도구로 등록하지 않은 이유는 ①카탈로그가 자기 설명적 ②RPC 늘어도 MCP 파일 불변 ③컨텍스트 절약(`unity_rpc` 와 동일 설계). `CRpcClient` 재사용(신규 클라이언트 0줄) + 옵셔널 `headers` 추가(토큰 주입, 미지정 시 기존 동작). 실증: 도구 7개, `setting_rpc → slot.list` 운영 24건. 가이드 `docs/20260728_204124_MCP_셋팅RPC연동_연결가이드.md`.
+
+**★ 테스트/검증이 잡은 실제 결함 3건**
+1. **본문 없는 POST 위임이 전부 400** — 브리지가 `content-type: application/json` 을 항상 붙여 Fastify 가 `FST_ERR_CTP_EMPTY_JSON_BODY` 로 거부. 라우트는 멀쩡한데 브리지가 만든 거짓 오류. → 본문 있을 때만 헤더.
+2. **`cam.preset.list` 가 헤드리스에서 죽음** — `GET /viewer/api/camerapos` 로 위임했는데 그 라우트는 `viewer.enabled && sources` 일 때만 등록. → 파일 정본 직접 읽기로 전환.
+3. **★ MCP 진입점 경로가 처음부터 틀려 있었다** — `llm.config` 가 `dist/mcp/server.js` 인데 `tsconfig rootDir:"."` 이라 실제 산출은 `dist/src/mcp/server.js`. **빌드해도 MCP 가 뜨지 않는다**(소비 코드가 없어 안 드러났을 뿐). 설정↔산출 경로 정합을 테스트로 고정.
+
+**라이브 검증**(워크트리 서버 13021 + Unity 13110 실기동, 마스터의 13020 은 무접촉) — `place.space.add` 실제 파일 반영(idx 25·백업 생성) → `expectTotal` 오답 `-32005` + 파일 무변경 → `place.revert` 후 **md5 완전 일치**(`77363ada…`)로 원상복구 증명. 검증 후 포트 13020 원복·`.bak` 삭제.
+
+**미완·주의 (다음 세션 필독)**
+- ⚠ **`viewer.controlToken` 이 `""` — 변이 메서드 무인증**. 게이트 코드는 완비(값만 넣고 재시작하면 발효). 단 **기존 REST 는 게이트가 4곳뿐**(`/viewer/api/move`·`rpc`·`camerapos` PUT·`llm/select`)이라 토큰을 켜도 `/capture/*`·`/calibrate/*` 는 여전히 무인증 — 외부망 노출 시 방화벽/프록시 필요. 웹은 옵션탭 `viewer-token` 입력칸으로 대응(4곳 모두 `tokenHeaders` 사용 확인).
+- **미구현 승격 3건**: `slot.occupancy.evaluate`(점유 **판정**이 `web/core.js:computeOccupancy` 에만 — 서버엔 영역 **생성**만. `src→web` 역import 안 함) · `capture.tour.*`(카메라 점유 잡 신설 필요) · `setup.slot.add/delete`(artifact coverage 검증과 얽힘).
+- **사전 존재 실패 2건은 그대로**(내 변경 무관, main 대조 확인): `roiDbLoad`·`placeRoiRuntimeInvariants` — 런타임 `PtzCamRoi.json` 에 `points:[]` 주차면이 있는데 두 테스트는 "모든 주차면 4점" 단정. **저장소 자체의 모순**(ROI편집탭 규약=기하비우기 vs 테스트 불변식). `place.space.delete{clear}` 도 같은 상태를 만든다 → 규약을 살릴지 테스트를 고칠지 **마스터 판단 대기**. (`buildTouringPlan` 은 워크트리에 `save/setup_result.json` 없어서 나는 환경 실패.)
+- **push 안 했다**(로컬 main 만 `e0d9c29`). `SettingAgent/config/tools.config.json`(154 비밀번호 실값)·`메모/memo.md` 미커밋 유지. `SettingAgent/x.json` 은 이전부터 있던 untracked.
+**▶ 다음 세션 재개 지점 (이것만 읽어도 이어갈 수 있다)**
+
+```
+main: (이 항목 커밋) ← RPC 평면 + MCP 연동 전부 반영·push 완료
+워크트리: .claude/worktrees/feat-rpc-control-plane  (유지 중 — 필요 없으면 제거해도 된다)
+서버: 13020 가동 중(nodemon). /rpc·/rpc/catalog 서빙 확인됨. dist 빌드도 되어 있다
+```
+
+착수 전 확인 한 줄: `curl -s http://localhost:13020/rpc/catalog | head -c 200` → 메서드 70개가 나오면 정상.
+
+| 우선 | 작업 | 착수점(파일·함수) | 크기 | 메모 |
+|---|---|---|---|---|
+| 1 | **인증 토큰 설정** | `config/tools.config.json` 의 `viewer.controlToken` 에 값 + 재시작 | 5분 | 코드 변경 0. ⚠ 단 **기존 REST 는 게이트가 4곳뿐**이라 `/capture/*`·`/calibrate/*` 는 토큰을 켜도 무인증 — 외부 노출엔 방화벽 필요. 웹은 옵션탭 입력칸으로 대응되나 **새로고침하면 다시 입력**(localStorage 미저장 — 붙이면 몇 줄) |
+| 2 | **`capture.tour.*` 승격** | `web/app.js:runTouringTest` 를 서버 잡으로. `PlateDiscoveryJob` 구조를 본떠 `TourJob` 신설 → `index.ts` 의 `jobBusy`/`rpcBusy` 에 추가 → `methods.ts` 에 등록 | 중 | 잡 패턴이 이미 4개라 설계 리스크 낮음. 헤드리스 셋업 검증이 열린다 |
+| 3 | **`slot.occupancy.evaluate` 승격** | `web/core.js:computeOccupancy` 를 `src/domain/` 으로 포팅 + **파리티 테스트**(이번 `test/placeRoiEdit.test.ts` 가 웹 모듈 직접 import 해 같은 입력→같은 출력 고정한 방식 그대로) | 중 | `src→web` 역import 금지가 이유였다 |
+| 4 | **`setup.slot.add/delete` 승격** | `web/app.js:addSlot/deleteSelectedSlot`. `validateArtifactBody` coverage 검증 + `slot.renumber` 와의 관계 정리가 **선행 설계 필요** | 중상 | 파일·DB 양쪽을 건드린다. 실무 수요 확인 후 착수 권장 |
+| 5 | 카탈로그 기반 MCP 도구 **자동등록**(Phase 4) | `src/mcp/server.ts` — 현재 범용 프록시 2개로 충분히 동작 중 | 중 | 컨텍스트 비용 커서 보류한 것 |
+| 6 | `camera_req_img`/`camera_req_move` 와 `unity_rpc` 기능 중복 정리 | `src/mcp/server.ts` | 소 | **임의 제거 안 함 — 마스터 판단 대기** |
+
+**마스터 판단 대기 2건**: ⓐ `points:[]` vs "4점 필수" 테스트 모순(위 사전실패 2건) — 규약을 살릴지 테스트를 고칠지 ⓑ MCP 도구 중복 정리 여부.
+
+## 2026-07-28 ROIMaker — 수동 ROI 드로잉 전용 페이지 + 비파괴 DB 저장 (main 머지·푸시 완료 `5d9aff5`)
+
+**세션 요약** — 마스터 요청 12항목("카메라 화면 위에 마우스로 ROI 를 그리는 새 페이지")을 설계→구현→라이브검증→머지→푸시까지 완주. 워크트리 `feat-roimaker`(작업 후 제거). 문서 `SettingAgent/docs/20260728_113743_ROIMaker_수동ROI드로잉_페이지_설계.md`, `20260728_132855_ROIMaker_구현_영향도분석.md`. 최종 `tsc 0` · `vitest 3142 green`.
+
+- **만든 것**: SPA 새 탭 `ROI 편집` — 좌클릭=정점 / 우클릭=폐합(3점↑) / 정지모드 정점드래그 수정 / `추가`=주차면 번호만 생성 / `삭제`=ROI 만 비움 / 보기범위 3종(현재프리셋·현재슬롯·전체) / 저장=정본+DB. 신규 `web/roimaker.js`(결선)·`web/roimakerCore.js`(순수)·`src/capture/roiSlotSync.ts`.
+- **★ 핵심 설계 = 저장이 검출·점유·센터링을 파괴하지 않는 것.** 라이브 대조 실험이 근거: 같은 DB·같은 편집에서 기존 `load-roi`(=`replaceSlotSetup` DELETE+INSERT)는 **센터링/vpd/점유 23 → 0**, 신규 `POST /capture/slots/sync-roi`(차등)는 **23 → 23 유지**. sync-roi 규칙: `slot_roi` 만 UPDATE / 신규만 INSERT / **파일에 없는 DB 행은 삭제 안 하고 orphans 보고** / `slot_id` 불일치면 전량 중단(409).
+- **삭제 = 기하 비우기**(`points:[]`, 마스터 지시). 슬롯 엔트리·전역 idx 를 남겨 **전역번호 재압축 → DB slot_id 재매핑** 위험을 원천 제거. 미저장 신규만 목록에서 완전 제거(번호 회수).
+- **`PUT /capture/place-roi` 에 옵셔널 `expectRawCount` 가드** 추가(미제공 시 현행 동작 → 기존 호출자 무영향). 07-28 기록된 8면→7면 소실 대응.
+- **격리**: 전용 캔버스 `#rm-overlay` + 전용 모듈. `app.js` 는 **+7/-1**(탭 분기 + `sv:tab` CustomEvent)뿐. 제어탭의 5개 드래그 제스처 무접촉 — 정적 봉인 테스트로 고정.
+
+**★ 라이브에서만 잡힌 결함 3건 (유닛테스트 전부 green 이었다)**
+1. **정본 `PtzCamRoi.json` 은 프리셋별 idx 를 쓴다**(cam1:preset2 가 다시 1부터). "파일 idx = 전역 1..N" 전제가 틀렸다. 로드 시 `normalizeGlobalIdx` 가 재부여하므로 **변경분만 저장하면 파일이 혼합번호가 되어 다음 로드에서 번호가 밀린다** → `markAllDirty()` 로 첫 저장에서 전 프리셋을 함께 써 전역번호로 **수렴**시킨다. **아이덴티티 가드가 DB 파괴 대신 409 로 거부해서 발견**(불일치 16건).
+2. **`expectRawCount` 를 현재 버퍼 길이로 보내 자기 저장을 막았다**(신규 1건 추가 직후 8 vs 파일 7 → 409). 가드의 의미는 "내가 읽은 뒤 파일이 바뀌었나" 이므로 **로드 시점 개수(`baseCounts`)** 가 맞다.
+3. **정밀수집 ↔ ROI 편집 정본 미갱신**(마스터 실사용 발견). 두 페이지가 각자 버퍼를 **세션 1회만** 로드(`state.placeRoiLoaded` / `rm.loaded`). → **탭 진입 시 재조회**로 양방향 수정. 단 **미저장 편집이 있으면 덮어쓰지 않고 안내**(작업 보호). `rm.loaded` 는 고아가 되어 제거.
+- 부수: 카메라·프리셋 선택 시 **실제로 이동**(`POST /viewer/api/move`)하도록 수정. 스트림 URL 의 preset 만 바꾸면 시뮬레이터는 현재 물리 위치를 계속 렌더한다(목표↔실제 PTZ 일치 확인). 대상 변경 시 그리던 draft 는 폐기(이전 프레임 좌표 혼입 차단). 바닥 ROI 체크박스 기본 OFF.
+
+**★ 병렬 세션과의 머지 (`be124dd`)** — 같은 날 다른 세션이 `feat/roi-draw-autogrid` 에 **거의 같은 문제**(주차면 신규 그리기 도구 + ground-grid 자동 ROI)를 구현해 두고 있었다. 마스터 지시 *"이 브랜치(ROIMaker)가 무조건 정본"*. 실제 충돌은 **2파일뿐이고 둘 다 모순이 아니라 가산적**이라 양쪽 기능을 모두 살렸다 — `captureRoutes.ts` PUT 은 그쪽 `create`(신규 주차장 골격) + 이쪽 `expectRawCount` 를 한 핸들러로 통합(create 경로는 가드를 안 보내므로 무간섭), `app.css` 는 인접 append.
+- 머지 중 **그쪽 기존 결함 1건 수정**: `placeDraw.test.ts` T4 가 "실데이터는 전역 1..N" 을 **커밋된** 파일에 대해 단언하는데 실제로는 프리셋별 idx 라 실패했다. 전역번호로 재작성된 **미커밋 로컬 파일에서만 통과**하던 self-invalidating 상태(골든해시 사례와 같은 유형) → 앱과 동일하게 `normalizeGlobalIdx` 를 먼저 거치도록 전제 수정.
+
+**함정·운영 유의**
+- `sync-roi` 는 FK 부모(place/camera/preset)를 만들지 않는다. **빈 DB 첫 호출은 `FOREIGN KEY constraint failed` 로 거부**(DB 무변경) — 최초 1회는 기존 `ROI 로딩`(load-roi) 버튼으로 부트스트랩한 뒤 쓴다.
+- 머지는 **워킹트리를 건드리지 않는 `git fetch . <branch>:main`** 으로 했더니 13020(메인 폴더)에 반영이 안 됐다. 메인 체크아웃이 `feat/roi-draw-autogrid` 에 있었기 때문. **브랜치 ref 이동 ≠ 디스크 반영** — 서버가 보는 건 디스크다.
+- 브랜치 전환 전 **`메모/memo.md` 회귀 위험**을 반드시 확인할 것. 그쪽 브랜치에만 memo 커밋이 있어 naive `git checkout main` 이면 작업 파일이 옛 버전으로 되돌아갔을 상황이었다(그래서 머지를 먼저 했다).
+- **`config/tools.config.json` 의 154 비밀번호 한 줄은 영구 미커밋 상태**로 남겼다(커밋본 `""`, 작업본 실값). `git checkout` 하면 날아가고 `git add .` 하면 저장소로 들어간다. `.claude/settings.json` 의 `CAM_PASS` 권한 항목은 gitignore 대상 `settings.local.json` 으로 이관.
+- `.gitignore` 에 `*.sqlite.bak-*` 추가(기존 `*.sqlite` 패턴이 `setting.sqlite.bak-<태그>` 를 못 잡아 **3MB WAL 백업**이 커밋 대기 중이었다).
+- ⚠ `settings.json` 에서 **`worktree.baseRef: "head"` 가 제거**된 채 커밋됐다(이전부터 대기 중이던 변경). CLAUDE.md 의 워크트리 정책 서술과 어긋난다 — 되살리든 문서를 고치든 정리 필요.
+
+**미검증(위장 없음)** — ① 실카(RTSP) 미검증: 프레임 고정(`freezeFrame`)이 MJPEG 아닌 경로에서 되는지 확인 안 함 ② 동시 편집 경합: `expectRawCount` 는 개수 변화만 잡고 **개수 같고 좌표만 다른 동시 수정은 못 잡는다**(나중 저장이 이긴다) ③ 별도 브라우저 창 2개는 탭 전환이 없어 갱신 신호도 없다(BroadcastChannel 미도입) ④ `normalizePtzCamRoi` 의 조용한 탈락은 여전히 근본 미수정 — 가드는 저장을 막을 뿐 탈락분을 보존하지 못한다.
+
+**인수인계** — 후속 후보: ① 두 그리기 UI(제어탭 `placeDraw` vs `ROI 편집` 탭) 통합 여부 결정 — 현재 **둘 다 살아 있다** ② config 비밀번호를 환경변수로 빼기 ③ `worktree.baseRef` 정책 정리 ④ 실카 검증.
+
 ## 2026-07-28 🔻 세션 종료 — 13030 서버 정지만 수행 (코드 변경 0)
 
 **세션 요약** — 마스터 지시 두 건뿐인 짧은 세션. ① *"13030 서버 내려줘"* → 리스닝 프로세스 **PID 15092**(`node --import tsx/loader src/index.ts`, SettingAgent 서버)를 `Stop-Process -Force` 로 종료, 포트 13030 LISTEN 없음 확인. ② 세션 종료 메모. **코드·문서 변경 0건, 커밋 0건.**
