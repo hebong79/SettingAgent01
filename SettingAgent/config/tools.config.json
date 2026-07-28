@@ -95,7 +95,7 @@
   },
   "cameraRuntime": {
     "executionMode": "typescript-native",
-    "selectedCameraId": "simulator-1"
+    "selectedCameraId": "real-camera-1"
   },
   "cameraStreaming": {
     "ffmpegPath": "ffmpeg",
@@ -117,10 +117,10 @@
     },
     {
       "id": "simulator-2",
-      "label": "시뮬레이터 2",
+      "label": "언리얼 시뮬레이터",
       "kind": "sim",
       "protocol": "unity-rpc",
-      "baseUrl": "http://localhost:13111",
+      "baseUrl": "http://192.168.0.22:8081",
       "username": "",
       "password": "",
       "rtspUrl": ""
@@ -134,7 +134,12 @@
       "username": "admin",
       "password": "admin",
       "rtspUrl": "rtsp://192.168.0.153:554/stream1",
-      "ptz": { "zoomRange": [0, 16384] }
+      "ptz": {
+        "zoomRange": [
+          0,
+          16384
+        ]
+      }
     },
     {
       "id": "real-camera-2",
@@ -145,7 +150,12 @@
       "username": "admin",
       "password": "",
       "rtspUrl": "rtsp://192.168.0.154:554/stream1",
-      "ptz": { "zoomRange": [0, 16384] }
+      "ptz": {
+        "zoomRange": [
+          0,
+          16384
+        ]
+      }
     }
   ],
   "cameraMode": "simulator"
