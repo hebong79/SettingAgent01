@@ -112,18 +112,31 @@ async function main(): Promise<void> {
     calibFile: process.env.LENS_CALIB_FILE ?? 'data/lens_calibration.json',
     resultDir: tools.store.dataDir,
   };
+  //   판정처는 하나다 — 아래 클로저를 lensCalib(시작 거부)과 RPC(requiresCamera 게이트)가 **공유**한다.
+  const jobBusy = (): { busy: boolean; who?: string } => {
+    const running = [
+      ['정밀수집', captureJob.getStatus().state],
+      ['센터라이징', calibrator.getStatus().state],
+      ['번호판 탐색', plateDiscovery.getStatus().state],
+    ].find(([, s]) => s === 'running' || s === 'stopping' || s === 'finalizing');
+    return running ? { busy: true, who: running[0] as string } : { busy: false };
+  };
   const lensCalib = new LensCalibrationJob({
     sources: tools.cameraSources ?? [],
     ...lensCalibPaths,
-    isBusy: () => {
-      const running = [
-        ['정밀수집', captureJob.getStatus().state],
-        ['센터라이징', calibrator.getStatus().state],
-        ['번호판 탐색', plateDiscovery.getStatus().state],
-      ].find(([, s]) => s === 'running' || s === 'stopping' || s === 'finalizing');
-      return running ? { busy: true, who: running[0] as string } : { busy: false };
-    },
+    isBusy: jobBusy,
   });
+
+  /**
+   * RPC 전역 점유 판정 — jobBusy(3잡) + **렌즈 캘리브레이션 자신**.
+   * lensCalib.isBusy 에 이걸 주면 자기 상태 때문에 영원히 시작 못 하므로, 확장은 RPC 쪽에만 준다.
+   */
+  const rpcBusy = (): { busy: boolean; who?: string } => {
+    const j = jobBusy();
+    if (j.busy) return j;
+    const s = lensCalib.getStatus().state;
+    return s === 'running' || s === 'stopping' ? { busy: true, who: '렌즈 캘리브레이션' } : { busy: false };
+  };
 
   const app = buildServer({
     orchestrator, repo, camera, vpd, lpd, brain, mapFiles: tools.map, discovery: tools.discovery,
@@ -139,6 +152,7 @@ async function main(): Promise<void> {
     pipeline,
     viewer: tools.viewer, sources, rpc, cameraCfg: tools.camera,
     dbFile: tools.capture.dbFile,
+    isBusy: rpcBusy, // 외부 제어(RPC)의 카메라 점유 게이트 — 잡 3종 + 렌즈 캘리브레이션.
   });
   await app.listen({ port: tools.server.port, host: '0.0.0.0' });
   logger.info(

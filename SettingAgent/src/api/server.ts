@@ -27,6 +27,7 @@ import type { PlateDiscoveryJob } from '../calibrate/PlateDiscoveryJob.js';
 import type { LensCalibrationJob } from '../calibrate/LensCalibrationJob.js';
 import type { SetupPipeline } from '../pipeline/SetupPipeline.js';
 import { registerViewerRoutes } from '../viewer/routes.js';
+import { registerRpcRoutes } from '../rpc/routes.js';
 import type { CameraSource } from '../viewer/CameraSource.js';
 import { validateArtifactBody } from './artifactSchema.js';
 import { buildArtifactFromSlotSetup } from '../setup/artifactFromSlotSetup.js';
@@ -145,6 +146,12 @@ export interface ApiDeps {
   dbFile?: string;
   /** Unity JSON-RPC 프록시 클라이언트. 주입 시 뷰어에 전달되어 /viewer/api/rpc* 라우트 등록(가산). */
   rpc?: CRpcClient;
+  /**
+   * 전역 카메라 점유 판정(RPC `system.busy` + requiresCamera 게이트).
+   * index.ts 가 lensCalib 에 주는 판정과 **같은 클로저**를 넘겨 판정처를 하나로 유지한다.
+   * 미주입 시 RPC 는 점유 검사를 건너뛴다(기존 라우트의 자체 409 가 최종 방어선 — 회귀 0).
+   */
+  isBusy?: () => { busy: boolean; who?: string };
 }
 
 /**
@@ -480,6 +487,22 @@ export function buildServer(deps: ApiDeps): FastifyInstance {
 
   // SQLite DB 뷰어(/db/*). read-only 독립 연결 — 캡처 블록과 무관하게 등록(가산, R4).
   if (deps.dbFile) registerDbRoutes(app, { dbFile: deps.dbFile });
+
+  // 외부 제어용 JSON-RPC 평면(/rpc, /rpc/catalog). **항상 등록(가산)** — 개별 메서드의 가용성은
+  // 주입된 deps 로 판정된다(미배선 메서드는 카탈로그 available:false + 호출 시 -32004).
+  // 실행은 위 라우트들로 위임하거나(bridge) REST 에 없는 승격 기능만 서비스로 처리한다(이중구현 금지).
+  registerRpcRoutes(app, {
+    viewer: deps.viewer,
+    unityRpc: deps.rpc,
+    placeRoiFile: deps.placeRoiFile,
+    cameraposFile: deps.mapFiles?.cameraposFile,
+    sources: deps.sources,
+    cameraCfg: deps.cameraCfg,
+    lpd: deps.lpd,
+    camera: deps.camera,
+    store: deps.sqlite,
+    isBusy: deps.isBusy,
+  });
 
   // 웹 뷰어 통합(SettingViewer). viewer.enabled && sources 주입 시에만 등록(헤드리스 보존, 가산).
   // registerViewerRoutes 는 async(내부 @fastify/static register) → app.register 로 감싸 buildServer 동기 유지.
