@@ -28,6 +28,57 @@ memo.md에 새 항목을 추가하기 **전에** 파일 크기를 확인한다. 
 
 ---
 
+## 2026-07-29 4건 서버 정본화(토큰·투어링·점유판정·슬롯편집) + 웹 껍데기화 (워크트리 `bd818df`, **머지·push 안 함**)
+
+**세션 요약** — 마스터 지시 *"토큰, 투어링, 점유판정, 슬롯편집 순으로 작업하고 4개 모두 서버에 적재하여 웹은 껍데기로만 연동"*. 직전 세션 memo 의 재개지점 표 우선순위 **1~4 를 그대로 완주**했다. 워크트리 `feat-server-promote-4`(브랜치 `worktree-feat-server-promote-4`, main `19d5ad2` 에서 분기, **유지 중**). 4인 팀 goal/loop B모드, 4웨이브 순차. 최종 `tsc 0` · `vitest 2 failed | 3452 passed`(실패 2건은 사전 존재) · `GET /rpc/catalog` **70 → 76**.
+
+**만든 것 (신규 7 소스 + 테스트 12)**
+| 건 | 서버 정본 | RPC | 웹 껍데기화 |
+|---|---|---|---|
+| ① 토큰 | `src/api/controlGate.ts` — **deny-by-default 전역 onRequest 훅** + 읽기전용 POST 면제목록 | (게이트) | `web/token.js` — localStorage 영속 + `mutFetch` 35곳 |
+| ② 투어링 | `setup/touringPlan.ts`·`capture/TourJob.ts`·`api/tourRoutes.ts` | `capture.tour.start/stop/status` | `runTouringTest` = 잡 시작 + 폴링 |
+| ③ 점유판정 | `domain/occupancyJudge.ts` + `POST /capture/slots/judge-occupancy` | `slot.occupancy.evaluate` | 리드로 계산 → **데이터 변경점 4곳 배치 호출** |
+| ④ 슬롯편집 | `setup/artifactSlotEdit.ts` + `/mapping/slot/add\|delete`(+뷰어 컨텍스트 2) | `setup.slot.add/delete` | 편집 계산 제거, 서버 결과 적용만 |
+
+**★ 리더 판단 4건(설계서를 덮어씀 — `_workspace/00_leader_decisions.md`)**
+- **Q3 = `dryRun` 파라미터화**(설계자의 "즉시 반영" 안 기각). 즉시 반영은 **배치 전 임시 rect 가 파일에 남고 추가 후 취소 시 쓰레기 슬롯**이 남아 기존 2단계 UX 를 깬다. 지금은 **웹 = `artifact`버퍼+`dryRun:true`(계산만) / 외부 RPC = `artifact` 없이 한 방 커밋**. 서버 정본화·껍데기화·UX 보존 **셋 다 만족**하며 정본 순수함수는 하나다.
+- **Q1 = `plate.detect` 게이트 면제 현행 유지**(별건). 단 **무인증 카메라 이동 라우트는 2개**다 — `/capture/detect` 외 **`/capture/autocorrect`**(`place.align.estimate`)도 `requestImage` 로 물리 이동한다(QA 발견). 문서에 둘 다 명시.
+- **Q2 = 상수 복제 금지**(`occupancyJudge` 가 `onPlaceFilter` 에서 import). 복제하면 파리티가 못 잡는 3번째 정의가 생긴다.
+- **Q4 = `setup.slot.add` 는 artifact 편집이지 주차면 추가가 아니다**(주차면 추가는 `place.space.add`+`slot.roi.sync`). 이름이 오해를 부르므로 카탈로그 `note`·주석 3곳에 명시.
+
+**★ 설계자가 지시문 전제 3건을 반증** — ①`buildTouringPlan` 은 서버에 **없었다**(웹 전용) → 순수함수 포팅 포함 ②슬롯편집은 DB·`Setup_*.json` 이 아니라 **`data/setup_artifact.json` 만** 건드린다. 진짜 위험은 쓰기 충돌이 아니라 **`/mapping/renumber` 가 DB 기준으로 artifact 를 덮어써 추가분이 소실되는 순서 문제**(코드로 막지 않고 `warnings[]` 로 알림) ③사전 실패는 2건이 아니라 **3건**이었다 — `buildTouringPlan.test.ts` 가 `.gitignore` 된 런타임 `save/setup_result.json` 을 읽어 ENOENT. **fixture 이관으로 해소**(런타임 산출물은 테스트 고정입력이 될 수 없다).
+
+**★★ 실제로 잡힌 결함 5건 — 전부 "green 인데 안전망은 없던" 유형**
+1. **웹 `state.ptz` 부패** — 카메라 이동을 서버로 옮기면서 **PTZ 동기화 책임을 안 옮기면** 순회 직후 이동이 옛 좌표 기준으로 나간다. `syncPtzAfterJob` 배선 + `SYNC_OWNER` 등록. **공통 규약으로 승격**(기능 이전 시 동기화 책임도 함께 이전).
+2. **미등록 라우트 2건** — `capture.startPrecise`·`capture.pipeline` 이 Fastify 기본 404. `deps` 주입 시에만 등록되는 **가산 라우트라 정적 목록으로는 원리적으로 못 잡는다**. `rpcParity` 에 **실제 등록 라우트 동적 교차검사** 신설로 적발.
+3. **★ 봉인 소실(R15)** — W1 의 `mutFetch` 도입 후 `viewerPtzSyncCoverage` 수집 정규식 `/fetch\(/` 이 **카메라 이동 라우트 9개 중 8개를 놓쳤다**(29 → 57건). 첫 단정이 "수집된 것 중 미분류"를 보므로 **덜 수집할수록 통과가 쉬워지는** 구조 — 테스트는 green 인데 봉인은 죽어 있었다. 한 글자(`[Ff]etch`) 수정, 부작용 0.
+4. **★ 투어링 성공 위장** — 리더 라이브에서 발견. 도달 불가 호스트로 붙이니 **28스텝이 전부 실패했는데 `done 28/28 · skipped 0`**. 헤드리스 검증 목적 자체를 무력화한다. → `succeeded`/`failed` 항상 노출 + `failed>0` 이면 종료 상태 **`partial`**(`done` 과 분리), 웹은 `N개 위치 이동 실패(성공 M/T)`. **`skipped`(계획 단계 제외 수) 의미는 불변**.
+5. **★ D-1 artifact 버퍼가 파일 전체를 대체**(QA 발견, 리더 Q3 설계가 만든 위험) — 파일 2슬롯 + 1슬롯 버퍼를 `dryRun` 없이 커밋하면 **파일이 2가 되고 `c1p1s2` 가 조용히 소실**, `createdAt:'TAMPERED'` 도 안착. → `rejectBufferCommit()` 로 `artifact`+`dryRun!==true` = **409/-32005**(zod 직후·저장 이전 = 구조적 파일 무변경). 허용 조합 2개 유지라 **기능 손실 0**, 웹은 이미 `dryRun:true` 라 **무영향**.
+
+**★ 파리티 봉인 판별력을 변이주입으로 측정했다(이번 세션 최대 성과)** — 독립 QA 가 변이 17건 주입 → 최초 **10 검출 / 7 미검출**. 그중 **6건이 진짜 구멍**이었다(1건은 web·src 가 같은 식이라 원리적 검출 불가). **6건 전부 영구 케이스로 편입(+7 it) 후 재주입 6/6 FAIL 실증**, 실패한 it 이름이 전부 신규 케이스임까지 확인. 최종 **17건 중 16 검출**.
+- 압권: **`groundBandRatio 오버라이드` 라는 이름의 기존 테스트 3개가 실제로는 ratio 에 둔감한 기하**라, 오버라이드가 통째로 무시돼도 통과했다(**이름이 거짓말하는 테스트**). 새 케이스는 폴리곤이 `y 0.30~0.40` 만 덮게 해 **기하가 진짜 ratio 에 민감한지를 테스트가 스스로 단정**한다 → 재퇴화 차단.
+- **§9.2 음성 대조 규약 채택**: 봉인 테스트를 추가할 땐 "이 봉인이 **실제로 실패하는 입력**"을 한 번 보여주고 원복한다. **green 이 곧 봉인 작동은 아니다**(3번으로 실증됨). 이번 라운드 모든 봉인이 이 절차를 거쳤다.
+
+**리더 라이브 실측**(워크트리 13021 · 마스터의 13020 무접촉 · 검증 후 전부 원복) — 카탈로그 76 / 토큰 게이트 무토큰 403·동봉 통과·읽기 200 / `dryRun` **파일 md5 완전 불변**(`38bcfe75…`) / 실커밋 반영 후 원복 md5 복귀 / **점유판정 웹↔서버 완전 일치**(`occupied·source·center·plateQuad` 전부) / 오류코드 `-32002`·`-32602` / 투어링 28/28 완주. QA 는 **등록 라우트 87개 전수 타격 → 403 아닌 변이 0건**, **md5 30 케이스 불변**, 웹 승격함수 **런타임 도달 불가** 확인.
+
+**함정 — "이동 1건" 착시** — 순회 28스텝인데 로그의 `goptzfpos` 가 1건이라 결함으로 의심했으나, `packetAggregator` 가 **5분 창 안의 성공 패킷은 첫 1건만 기록하고 집계**한다(실패는 항상 즉시 기록). 키가 `METHOD+쿼리제거URL+op` 라 모든 이동이 한 키. **카메라는 실제로 움직였다.** 다음에 로그로 물리 이동을 세려면 이 집계 정책을 먼저 감안할 것.
+
+**미검증(위장 없음)** — ①**브라우저 육안 확인 전무**: 투어링 폴링 라벨·완료 모달, 점유 오버레이 원/사다리꼴/뱃지, 슬롯편집 2단계 UX 체감, `localStorage` 실동작 ②**`partial` 라이브 미관측**(실장비 .153 이 `goptzfpos` 를 204 로 받아 `failed:0` 만 재현) ③성능 R7(왕복 지연) 실측 안 함 ④동시 편집 경합(D-1 이 현실화되는 시나리오).
+
+**인수인계 — 다음 세션 재개 지점**
+```
+워크트리: .claude/worktrees/feat-server-promote-4  @ bd818df  ← 이번 산출물 전부 여기
+main:     19d5ad2  ← 손대지 않았다. 머지·push 안 함
+config/tools.config.json: 무변경(HEAD 동일). x.json 은 테스트 부산물·사전 존재로 미커밋
+문서: SettingAgent/docs/20260728_231600_4건_서버정본화_{웹껍데기화_구현,영향도분석}.md
+```
+| 우선 | 작업 | 메모 |
+|---|---|---|
+| 1 | **브라우저 육안 확인 후 main 머지** | 유일하게 남은 실질 미검증. 4건을 한 화면에서 확인 가능 |
+| 2 | **`viewer.controlToken` 실제 활성화** | 이제 웹 배선(`mutFetch` 35곳)이 있어 **켜도 버튼이 안 죽는다**. ⚠ MCP 프로세스와 서버가 **같은 config** 를 읽어야 한다(다르면 전부 403) |
+| 3 | 무인증 카메라 이동 2건(`/capture/detect`·`/capture/autocorrect`) 계약 정리 | `mutating:true` 승격 여부 — **마스터 판단 대기** |
+| 4 | 사전 실패 2건 `points:[]` vs "4점 필수" 모순 | **지난 세션부터 계속 이월 중 — 마스터 판단 대기** |
+
 ## 2026-07-28 서버 RPC화 — 외부 제어용 JSON-RPC 평면 + MCP 연동 (main 머지 완료 `e0d9c29`, **push 안 함**)
 
 **세션 요약** — 마스터 요청("서버를 RPC화. RPC 가능한 부분 설계 + 웹 클라에서만 가능한 부분 확인해 추가 + 제외할 부분 제안")을 설계→다이어그램→구현→검증→머지→MCP 연동까지 완주. 워크트리 `feat-rpc-control-plane`(**유지 중**). 최종 `tsc 0` · `vitest 3246 green`.
