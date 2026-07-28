@@ -1,5 +1,5 @@
 {
-  "createdAt": "2026-07-22T14:35:11.232Z",
+  "createdAt": "2026-07-24T06:42:03.147Z",
   "items": [
     {
       "camIdx": 1,
@@ -7,11 +7,11 @@
       "slotId": "1",
       "globalIdx": 1,
       "ptz": {
-        "pan": 5.10926,
-        "tilt": 10.84341,
-        "zoom": 11.19498
+        "pan": 5.07199,
+        "tilt": 10.83914,
+        "zoom": 11.48612
       },
-      "plateWidth": 0.20934,
+      "plateWidth": 0.20595,
       "centered": true,
       "converged": true
     },
@@ -21,11 +21,11 @@
       "slotId": "2",
       "globalIdx": 2,
       "ptz": {
-        "pan": 10.82863,
-        "tilt": 10.5661,
-        "zoom": 9.82953
+        "pan": 11.14595,
+        "tilt": 10.55265,
+        "zoom": 11.51658
       },
-      "plateWidth": 0.22616,
+      "plateWidth": 0.22674,
       "centered": true,
       "converged": true
     },
@@ -35,11 +35,11 @@
       "slotId": "3",
       "globalIdx": 3,
       "ptz": {
-        "pan": 16.89278,
-        "tilt": 10.30843,
-        "zoom": 11.97971
+        "pan": 16.88931,
+        "tilt": 10.30015,
+        "zoom": 11.98393
       },
-      "plateWidth": 0.20057,
+      "plateWidth": 0.20112,
       "centered": true,
       "converged": true
     },
@@ -49,11 +49,11 @@
       "slotId": "4",
       "globalIdx": 4,
       "ptz": {
-        "pan": 22.40077,
-        "tilt": 10.0248,
-        "zoom": 12.57564
+        "pan": 22.40553,
+        "tilt": 10.00991,
+        "zoom": 12.87954
       },
-      "plateWidth": 0.2066,
+      "plateWidth": 0.20807,
       "centered": true,
       "converged": true
     },
@@ -63,11 +63,11 @@
       "slotId": "5",
       "globalIdx": 5,
       "ptz": {
-        "pan": 27.43739,
-        "tilt": 9.6224,
-        "zoom": 13.57196
+        "pan": 27.45118,
+        "tilt": 9.62083,
+        "zoom": 13.7457
       },
-      "plateWidth": 0.20262,
+      "plateWidth": 0.20597,
       "centered": true,
       "converged": true
     },
@@ -77,11 +77,11 @@
       "slotId": "6",
       "globalIdx": 6,
       "ptz": {
-        "pan": 31.63257,
-        "tilt": 9.18269,
-        "zoom": 14.87488
+        "pan": 31.61964,
+        "tilt": 9.19166,
+        "zoom": 14.69803
       },
-      "plateWidth": 0.20502,
+      "plateWidth": 0.20764,
       "centered": true,
       "converged": true
     },
@@ -91,11 +91,11 @@
       "slotId": "7",
       "globalIdx": 7,
       "ptz": {
-        "pan": 35.63996,
-        "tilt": 8.74804,
-        "zoom": 15.98148
+        "pan": 35.65925,
+        "tilt": 8.75386,
+        "zoom": 15.6159
       },
-      "plateWidth": 0.2022,
+      "plateWidth": 0.20232,
       "centered": true,
       "converged": true
     },
@@ -105,11 +105,11 @@
       "slotId": "8",
       "globalIdx": 8,
       "ptz": {
-        "pan": 36.62286,
-        "tilt": 24.65682,
-        "zoom": 5.39065
+        "pan": 36.59163,
+        "tilt": 24.67266,
+        "zoom": 5.606
       },
-      "plateWidth": 0.20006,
+      "plateWidth": 0.20697,
       "centered": true,
       "converged": true
     },
@@ -119,11 +119,11 @@
       "slotId": "9",
       "globalIdx": 9,
       "ptz": {
-        "pan": 47.0542,
-        "tilt": 21.44037,
-        "zoom": 6.87947
+        "pan": 47.03903,
+        "tilt": 21.44507,
+        "zoom": 6.94636
       },
-      "plateWidth": 0.20338,
+      "plateWidth": 0.20229,
       "centered": true,
       "converged": true
     },
@@ -133,11 +133,11 @@
       "slotId": "10",
       "globalIdx": 10,
       "ptz": {
-        "pan": 54.43507,
-        "tilt": 18.42245,
-        "zoom": 9.05455
+        "pan": 54.43127,
+        "tilt": 18.42069,
+        "zoom": 8.9586
       },
-      "plateWidth": 0.20435,
+      "plateWidth": 0.2022,
       "centered": true,
       "converged": true
     },
@@ -147,11 +147,11 @@
       "slotId": "11",
       "globalIdx": 11,
       "ptz": {
-        "pan": 59.05306,
-        "tilt": 16.09366,
-        "zoom": 11.38169
+        "pan": 59.0661,
+        "tilt": 16.08762,
+        "zoom": 11.0655
       },
-      "plateWidth": 0.20231,
+      "plateWidth": 0.20131,
       "centered": true,
       "converged": true
     },
@@ -161,11 +161,11 @@
       "slotId": "12",
       "globalIdx": 12,
       "ptz": {
-        "pan": 91.09821,
-        "tilt": 42.86858,
-        "zoom": 1.74901
+        "pan": 91.72224,
+        "tilt": 42.79492,
+        "zoom": 2.31306
       },
-      "plateWidth": 0.10693,
+      "plateWidth": 0.13847,
       "centered": true,
       "converged": false,
       "reason": "plate_lost"
@@ -176,11 +176,11 @@
       "slotId": "13",
       "globalIdx": 13,
       "ptz": {
-        "pan": 91.13355,
-        "tilt": 25.49914,
-        "zoom": 4.53136
+        "pan": 91.08612,
+        "tilt": 25.49772,
+        "zoom": 4.62619
       },
-      "plateWidth": 0.20039,
+      "plateWidth": 0.2015,
       "centered": true,
       "converged": true
     },
@@ -190,11 +190,11 @@
       "slotId": "14",
       "globalIdx": 14,
       "ptz": {
-        "pan": 128.71688,
-        "tilt": 9.07848,
-        "zoom": 15.96736
+        "pan": 128.67512,
+        "tilt": 9.10828,
+        "zoom": 15.9497
       },
-      "plateWidth": 0.20622,
+      "plateWidth": 0.20149,
       "centered": true,
       "converged": true
     },
@@ -204,11 +204,11 @@
       "slotId": "15",
       "globalIdx": 15,
       "ptz": {
-        "pan": 124.51586,
-        "tilt": 9.42391,
-        "zoom": 12.63434
+        "pan": 124.52283,
+        "tilt": 9.26394,
+        "zoom": 12.33439
       },
-      "plateWidth": 0.20578,
+      "plateWidth": 0.20243,
       "centered": true,
       "converged": true
     },
@@ -218,11 +218,11 @@
       "slotId": "16",
       "globalIdx": 16,
       "ptz": {
-        "pan": 119.7607,
-        "tilt": 10.15652,
-        "zoom": 13.29806
+        "pan": 119.72173,
+        "tilt": 10.16141,
+        "zoom": 13.49067
       },
-      "plateWidth": 0.20327,
+      "plateWidth": 0.20936,
       "centered": true,
       "converged": true
     },
@@ -232,11 +232,11 @@
       "slotId": "17",
       "globalIdx": 17,
       "ptz": {
-        "pan": 114.95167,
-        "tilt": 10.58484,
-        "zoom": 12.22738
+        "pan": 114.92095,
+        "tilt": 10.57924,
+        "zoom": 12.71903
       },
-      "plateWidth": 0.20764,
+      "plateWidth": 0.20601,
       "centered": true,
       "converged": true
     },
@@ -246,11 +246,11 @@
       "slotId": "18",
       "globalIdx": 18,
       "ptz": {
-        "pan": 109.20293,
-        "tilt": 11.05983,
-        "zoom": 12.32909
+        "pan": 109.38793,
+        "tilt": 11.06131,
+        "zoom": 11.2918
       },
-      "plateWidth": 0.22792,
+      "plateWidth": 0.20466,
       "centered": true,
       "converged": true
     },
@@ -260,11 +260,11 @@
       "slotId": "19",
       "globalIdx": 19,
       "ptz": {
-        "pan": 102.9442,
-        "tilt": 11.37802,
-        "zoom": 10.51262
+        "pan": 102.94624,
+        "tilt": 11.37268,
+        "zoom": 10.83433
       },
-      "plateWidth": 0.20388,
+      "plateWidth": 0.20389,
       "centered": true,
       "converged": true
     },
@@ -274,14 +274,13 @@
       "slotId": "20",
       "globalIdx": 20,
       "ptz": {
-        "pan": 142.69732,
-        "tilt": 20.55928,
-        "zoom": 4.62521
+        "pan": 142.68393,
+        "tilt": 20.55073,
+        "zoom": 6.52664
       },
-      "plateWidth": 0.12824,
+      "plateWidth": 0.20964,
       "centered": true,
-      "converged": false,
-      "reason": "plate_lost"
+      "converged": true
     },
     {
       "camIdx": 2,
@@ -289,11 +288,11 @@
       "slotId": "21",
       "globalIdx": 21,
       "ptz": {
-        "pan": 134.696,
-        "tilt": 18.34883,
-        "zoom": 7.70773
+        "pan": 134.73896,
+        "tilt": 18.34755,
+        "zoom": 7.83639
       },
-      "plateWidth": 0.20627,
+      "plateWidth": 0.20927,
       "centered": true,
       "converged": true
     },
@@ -303,11 +302,11 @@
       "slotId": "22",
       "globalIdx": 22,
       "ptz": {
-        "pan": 128.55151,
-        "tilt": 16.1477,
-        "zoom": 9.52146
+        "pan": 128.49122,
+        "tilt": 16.14169,
+        "zoom": 9.64664
       },
-      "plateWidth": 0.20205,
+      "plateWidth": 0.20723,
       "centered": true,
       "converged": true
     },
@@ -317,11 +316,11 @@
       "slotId": "23",
       "globalIdx": 23,
       "ptz": {
-        "pan": 123.43579,
-        "tilt": 14.28957,
-        "zoom": 11.86351
+        "pan": 123.4637,
+        "tilt": 14.32909,
+        "zoom": 11.77075
       },
-      "plateWidth": 0.20954,
+      "plateWidth": 0.20147,
       "centered": true,
       "converged": true
     }

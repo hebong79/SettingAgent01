@@ -1,0 +1,303 @@
+{
+  "sourceId": "real-camera-1",
+  "mode": "full",
+  "measuredAt": "2026-07-27T04:23:16.133Z",
+  "calibration": {
+    "zoomHfov": [
+      {
+        "z": 0,
+        "h": 57.66
+      },
+      {
+        "z": 2000,
+        "h": 47.98
+      },
+      {
+        "z": 3000,
+        "h": 43.54
+      },
+      {
+        "z": 5129,
+        "h": 34.17
+      },
+      {
+        "z": 8000,
+        "h": 22.68
+      },
+      {
+        "z": 10338,
+        "h": 14.6
+      },
+      {
+        "z": 12161,
+        "h": 9.66
+      },
+      {
+        "z": 14000,
+        "h": 6.18
+      },
+      {
+        "z": 15000,
+        "h": 4.77
+      },
+      {
+        "z": 15400,
+        "h": 4.35
+      },
+      {
+        "z": 15800,
+        "h": 3.64
+      },
+      {
+        "z": 16100,
+        "h": 3.22
+      },
+      {
+        "z": 16384,
+        "h": 2.49
+      }
+    ],
+    "centeringGain": [
+      {
+        "z": 0,
+        "k": 0.989
+      },
+      {
+        "z": 2000,
+        "k": 1.053
+      },
+      {
+        "z": 3000,
+        "k": 1.073
+      },
+      {
+        "z": 5129,
+        "k": 1.097
+      },
+      {
+        "z": 8000,
+        "k": 1.107
+      },
+      {
+        "z": 10338,
+        "k": 1.094
+      },
+      {
+        "z": 12161,
+        "k": 1.091
+      },
+      {
+        "z": 14000,
+        "k": 1.104
+      },
+      {
+        "z": 15000,
+        "k": 1.061
+      },
+      {
+        "z": 15400,
+        "k": 1.063
+      },
+      {
+        "z": 15800,
+        "k": 1
+      },
+      {
+        "z": 16100,
+        "k": 0.937
+      },
+      {
+        "z": 16384,
+        "k": 0.785
+      }
+    ],
+    "measuredAt": "2026-07-27T04:23:10.924Z",
+    "residual": {
+      "beforePx": 131.2,
+      "fitRmsPx": 31.7,
+      "byZoom": {
+        "0": 5.2,
+        "2000": 24.3,
+        "3000": 32.6,
+        "5129": 42.3,
+        "8000": 46.5,
+        "10338": 41.3,
+        "12161": 40.1,
+        "14000": 45.3,
+        "15000": 27.8,
+        "15400": 28.4,
+        "15800": 0,
+        "16100": 32.4,
+        "16384": 131.2
+      }
+    }
+  },
+  "points": [
+    {
+      "zoom": 0,
+      "hfov": 57.66039,
+      "gain": 0.98921,
+      "focalTrue": 1744.05576,
+      "focalFirmware": 1745.89716,
+      "residualSlope": -0.01091,
+      "residualPx": 5.23514,
+      "fitRmsPx": 5.75383,
+      "samples": 6,
+      "of": 8
+    },
+    {
+      "zoom": 2000,
+      "hfov": 47.97662,
+      "gain": 1.05335,
+      "focalTrue": 2157.37987,
+      "focalFirmware": 2280.26492,
+      "residualSlope": 0.05064,
+      "residualPx": 24.30905,
+      "fitRmsPx": 3.30577,
+      "samples": 7,
+      "of": 8
+    },
+    {
+      "zoom": 3000,
+      "hfov": 43.54473,
+      "gain": 1.07277,
+      "focalTrue": 2403.53269,
+      "focalFirmware": 2588.86672,
+      "residualSlope": 0.06783,
+      "residualPx": 32.5582,
+      "fitRmsPx": 3.49092,
+      "samples": 7,
+      "of": 8
+    },
+    {
+      "zoom": 5129,
+      "hfov": 34.17291,
+      "gain": 1.09655,
+      "focalTrue": 3123.156,
+      "focalFirmware": 3429.01569,
+      "residualSlope": 0.08805,
+      "residualPx": 42.26335,
+      "fitRmsPx": 4.16331,
+      "samples": 8,
+      "of": 8
+    },
+    {
+      "zoom": 8000,
+      "hfov": 22.67514,
+      "gain": 1.10718,
+      "focalTrue": 4787.98885,
+      "focalFirmware": 5307.72976,
+      "residualSlope": 0.0968,
+      "residualPx": 46.46582,
+      "fitRmsPx": 5.34985,
+      "samples": 8,
+      "of": 8
+    },
+    {
+      "zoom": 10338,
+      "hfov": 14.60438,
+      "gain": 1.09418,
+      "focalTrue": 7491.70123,
+      "focalFirmware": 8220.62651,
+      "residualSlope": 0.08608,
+      "residualPx": 41.31722,
+      "fitRmsPx": 7.4942,
+      "samples": 7,
+      "of": 8
+    },
+    {
+      "zoom": 12161,
+      "hfov": 9.66312,
+      "gain": 1.09125,
+      "focalTrue": 11357.30642,
+      "focalFirmware": 12453.19559,
+      "residualSlope": 0.08362,
+      "residualPx": 40.13875,
+      "fitRmsPx": 10.31991,
+      "samples": 8,
+      "of": 8
+    },
+    {
+      "zoom": 14000,
+      "hfov": 6.18136,
+      "gain": 1.10414,
+      "focalTrue": 17779.43933,
+      "focalFirmware": 19531.11619,
+      "residualSlope": 0.09432,
+      "residualPx": 45.27432,
+      "fitRmsPx": 10.02397,
+      "samples": 7,
+      "of": 8
+    },
+    {
+      "zoom": 15000,
+      "hfov": 4.77292,
+      "gain": 1.0614,
+      "focalTrue": 23035.02896,
+      "focalFirmware": 24554.11233,
+      "residualSlope": 0.05785,
+      "residualPx": 27.76578,
+      "fitRmsPx": 6.78284,
+      "samples": 7,
+      "of": 8
+    },
+    {
+      "zoom": 15400,
+      "hfov": 4.3536,
+      "gain": 1.06297,
+      "focalTrue": 25256.08179,
+      "focalFirmware": 26856.27963,
+      "residualSlope": 0.05924,
+      "residualPx": 28.43632,
+      "fitRmsPx": 23.31634,
+      "samples": 7,
+      "of": 8
+    },
+    {
+      "zoom": 15800,
+      "hfov": 3.63612,
+      "gain": 1.00003,
+      "focalTrue": 30244.04244,
+      "focalFirmware": 29634.73573,
+      "residualSlope": 0.00003,
+      "residualPx": 0.01496,
+      "fitRmsPx": 22.44735,
+      "samples": 7,
+      "of": 8
+    },
+    {
+      "zoom": 16100,
+      "hfov": 3.22137,
+      "gain": 0.93669,
+      "focalTrue": 34140.3909,
+      "focalFirmware": 32430.64828,
+      "residualSlope": -0.06759,
+      "residualPx": 32.44223,
+      "fitRmsPx": 24.3426,
+      "samples": 7,
+      "of": 8
+    },
+    {
+      "zoom": 16384,
+      "hfov": 2.48834,
+      "gain": 0.78535,
+      "focalTrue": 44202.43116,
+      "focalFirmware": 35078.19347,
+      "residualSlope": -0.27331,
+      "residualPx": 131.18922,
+      "fitRmsPx": 31.73601,
+      "samples": 4,
+      "of": 8
+    }
+  ],
+  "skipped": [
+    {
+      "zoom": 22000,
+      "usable": 2,
+      "of": 8,
+      "why": "이 배율에서 화면을 읽을 수 없습니다 (1개는 너무 어둡고 5개는 미세 디테일이 없어 위치를 특정할 수 없고) — 야간·저조도면 영상이 뭉개져 고배율일수록 심합니다. 밝을 때 다시 시도하세요"
+    }
+  ],
+  "usable": 92,
+  "of": 112
+}
