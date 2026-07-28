@@ -28,6 +28,7 @@
 
 * 프리셋 정보
 3. preset_info
+ - id               : 순서
  - preset_id        : 프리셋 id
  - preset_name      : 프리셋 이름
  - cam_id           : 카메라 id

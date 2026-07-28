@@ -1,0 +1,20 @@
+{
+  "name": "@baro/centering",
+  "version": "1.0.0",
+  "description": "광각 PTZ CCTV 클릭 센터링 보정 + 렌즈 캘리브레이션 (의존성 없음)",
+  "type": "module",
+  "main": "./index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./*": "./src/*.mjs"
+  },
+  "files": ["index.mjs", "src", "examples", "README.md"],
+  "sideEffects": false,
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "example:click": "node examples/01-click-to-center.mjs",
+    "example:project": "node examples/02-projection.mjs",
+    "example:calibrate": "node examples/03-calibrate.mjs"
+  },
+  "license": "UNLICENSED"
+}

@@ -28,6 +28,23 @@ memo.md에 새 항목을 추가하기 **전에** 파일 크기를 확인한다. 
 
 ---
 
+## 2026-07-28 🔻 세션 종료 — 13030 서버 정지만 수행 (코드 변경 0)
+
+**세션 요약** — 마스터 지시 두 건뿐인 짧은 세션. ① *"13030 서버 내려줘"* → 리스닝 프로세스 **PID 15092**(`node --import tsx/loader src/index.ts`, SettingAgent 서버)를 `Stop-Process -Force` 로 종료, 포트 13030 LISTEN 없음 확인. ② 세션 종료 메모. **코드·문서 변경 0건, 커밋 0건.**
+
+**종료 시점 상태 (다음 세션이 먼저 읽을 것)**
+
+```
+브랜치: feat/roi-draw-autogrid  @ c4d31bf   ← 직전 세션 산출물 전부 여기, push 안 했다
+main:   1d38f9e                              ← 손대지 않았다
+13030 서버: 정지 (내려가 있음 — 재개하려면 다시 띄워야 한다)
+```
+
+- **★ 병렬 세션 `feat-roimaker` 가 커밋됐다 — 직전 메모 정보 갱신**: 아래 항목엔 *"커밋 0건·전량 미커밋"* 으로 적혀 있으나, 지금 확인하니 `worktree-feat-roimaker` 에 **`34e244a feat(roimaker): 카메라 화면 위 수동 ROI 드로잉 페이지 + 비파괴 DB 저장 경로`** 1건이 올라와 있다(1d38f9e 기준 분기). **충돌 파일 6개·"어느 쪽이 정본인가" 는 그대로 미해소**이며 여전히 **마스터 판단 대기**다.
+- 워크트리 현황: `feat-lens-calib-web-ui`(1d38f9e, locked) · `feat-roimaker`(34e244a, locked) · `preset-summary-20260724`(6959cdb).
+- 세션 이전부터 있던 미커밋(`.claude/settings.json`·`SettingAgent/config/*.json`·`data/*.json`·`Docs/MyThink/my_db_table.md`·`_workspace_*` 삭제 다수 등)은 **이번에도 손대지 않았다**.
+- **재개 우선순위는 아래 항목의 "재개 시 최우선 3가지" 를 그대로 승계**한다(실카 자동ROI 격자 스케일이 1순위). 다음 세션은 `EnterWorktree` 부터.
+
 ## 2026-07-28 ⏸ 보류 — 브랜치 `feat/roi-draw-autogrid` 로 커밋 후 중단 (재개 지점)
 
 **세션 종료 상태 (다음 세션이 먼저 읽을 것)**
