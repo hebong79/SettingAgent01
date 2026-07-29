@@ -797,12 +797,6 @@ body.resizing {
   color: #ff6b6b;
 }
 
-/* 지면 격자 패널의 게이트 사유 — 작은 회색 문구는 눈에 띄지 않아 '무반응'으로 읽힌다(리더 실측). */
-.gg-warn {
-  color: #ffb300;
-  font-weight: 700;
-}
-
 /* 카메라 PTZ 프리셋 편집(생성/수정/삭제) 컨테이너. */
 .preset-edit {
   margin-top: 10px;
@@ -814,10 +808,7 @@ body.resizing {
   overflow: auto;
 }
 
-.an-manual-help,
-/* 지면 격자(자동 바닥 ROI) 패널 안내문. .an-manual-help 와 동일 스타일이되 클래스는 분리한다 —
-   test/manualTableMarkup.test.ts 가 '첫 번째 .an-manual-help' 를 수동 매핑표 안내문으로 봉인하기 때문. */
-.gg-help {
+.an-manual-help {
   margin: 0 0 8px;
   color: var(--muted);
   font-size: 12px;
