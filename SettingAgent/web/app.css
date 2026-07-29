@@ -808,7 +808,10 @@ body.resizing {
   overflow: auto;
 }
 
-.an-manual-help {
+.an-manual-help,
+/* 패널 안내문 공용 스타일. .an-manual-help 와 동일하되 클래스는 분리한다 —
+   test/manualTableMarkup.test.ts 가 '첫 번째 .an-manual-help' 를 수동 매핑표 안내문으로 봉인하기 때문. */
+.gg-help {
   margin: 0 0 8px;
   color: var(--muted);
   font-size: 12px;

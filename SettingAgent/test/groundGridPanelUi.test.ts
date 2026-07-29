@@ -51,9 +51,9 @@ describe('지면 격자 패널 제거(뷰어 UI 잔재 0)', () => {
     }
   });
 
-  it('app.css 에 패널 전용 클래스가 없다(.an-manual-help 는 유지)', () => {
-    expect(css).not.toContain('.gg-warn');
-    expect(css).not.toContain('.gg-help');
+  it('app.css 에 패널 전용 강조 클래스가 없다(.gg-help 는 공용 안내문 스타일로 유지)', () => {
+    expect(css).not.toContain('.gg-warn'); // 게이트 경고 — 패널과 함께 사라졌다.
+    // .gg-help 는 다른 패널 안내문이 쓰는 공용 스타일이라 남긴다(이름만 격자 유래).
     expect(css).toContain('.an-manual-help');
   });
 
