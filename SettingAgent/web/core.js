@@ -1714,3 +1714,27 @@ export function buildTouringPlan(setupResult) {
   }
   return { steps, skipped };
 }
+
+/**
+ * 프리셋 드롭다운 항목 결정(순수).
+ *
+ * 실카는 **장비에 저장된 프리셋**(EV1 …)이 목록이다 — 서버 `listCameras()` 는 실카에 대해 「현재 위치」
+ * 1개만 내려주기 때문이다(장비 프리셋은 `/viewer/api/presets` 로만 알 수 있다. Hucoms CGI 에는
+ * 프리셋 조회 명령이 자체가 없어 서버가 ONVIF 로 읽는다).
+ *
+ * 규약 둘:
+ *  - 아직 못 읽었거나 장비에 프리셋이 없으면 **카메라 목록 프리셋으로 강등**한다(빈 드롭다운 금지).
+ *  - 이동 번호가 없는 항목(비수치 토큰)은 **뺀다** — 고를 수는 있는데 이동이 안 되는 항목을 만들지 않는다.
+ *
+ * 장비는 프리셋의 PTZ 를 주지 않으므로 pan/tilt/zoom 은 붙이지 않는다(이동은 gopreset 이 하고,
+ * PTZ 는 이동 후 실측해 표시한다).
+ *
+ * @param {{cameraPresets?: Array<Object>, devicePresets?: Array<Object>, isReal?: boolean}} input
+ * @returns {Array<{presetIdx: number, label: string}>}
+ */
+export function presetOptions({ cameraPresets = [], devicePresets = [], isReal = false } = {}) {
+  if (isReal && (devicePresets ?? []).some((p) => p && p.number)) {
+    return devicePresets.filter((p) => p && p.number).map((p) => ({ presetIdx: p.number, label: p.name }));
+  }
+  return cameraPresets ?? [];
+}

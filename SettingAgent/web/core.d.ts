@@ -579,3 +579,8 @@ export type TouringStep =
 export function buildTouringPlan(
   setupResult: { slots?: TouringSetupSlot[] } | null | undefined,
 ): { steps: TouringStep[]; skipped: number };
+export function presetOptions(input?: {
+  cameraPresets?: Array<{ presetIdx: number; label: string; pan?: number; tilt?: number; zoom?: number }>;
+  devicePresets?: Array<{ token: string; name: string; number?: number }>;
+  isReal?: boolean;
+}): Array<{ presetIdx: number; label: string }>;
