@@ -104,6 +104,9 @@ const state = {
   cam: 1,
   preset: 1,
   ptz: { pan: 0, tilt: 0, zoom: 1 }, // 현재 카메라 위치(명령 기준: 프리셋 이동·PTZ 제어로 갱신)
+  ptzNative: null, // 장비 원시 PTZ({pan,tilt,zoom} = panpos/tiltpos/zoompos). 실카에서만 채워진다(표시 전용).
+  devicePresets: [], // 장비에 저장된 프리셋 목록(GET /viewer/api/presets). 이름·번호만 — PTZ 는 장비가 주지 않는다.
+  devicePresetPtz: {}, // 프리셋 번호 → 이동 후 **실측**한 {ptz,native}. 세션 메모리 전용(파일·DB 무기록).
   cameras: [], // CameraList.cameras
   mapping: null, // SetupArtifact
   roiHidden: false, // true 면 ROI/선택 오버레이를 그리지 않음(초기화·수집 시작 시).
@@ -323,7 +326,125 @@ function updatePtzControlUi() {
   $('btn-ptz-refresh').hidden = false;
   $('login-box').hidden = !real;
   $('ptz-control-status').textContent = real ? '실카메라 현재 PTZ를 불러오거나 로그인해 주세요.' : '';
+  // 장비 프리셋·원시 PTZ 는 실카(hucoms)에만 있는 개념이다. 시뮬레이터에서는 칸 자체를 감춘다.
+  $('device-preset-box').hidden = !real;
+  $('ptz-native-row').hidden = !real;
+  if (!real) {
+    state.devicePresets = [];
+    state.devicePresetPtz = {};
+    state.ptzNative = null;
+    renderDevicePresetSelect();
+    updatePtzNativeDisplay();
+  }
   updatePtzControlEnabled();
+}
+
+// --- 장비 프리셋(카메라가 들고 있는 프리셋) --------------------------------
+//
+// ★ '대상 선택'의 프리셋(camerapos.json)과 **다른 것**이다: 저쪽은 우리가 파일로 관리하는 뷰어 프리셋이고,
+//   이쪽은 카메라 장비 자체에 저장된 프리셋(EV1 …)이다.
+// ★ 목록은 서버가 ONVIF GetPresets 로 읽는다 — Hucoms CGI 에는 조회 명령이 없다.
+// ★ 장비는 프리셋의 PTZ 를 알려주지 않는다 → 이동한 뒤 실측한 값만 표시한다(추정하지 않는다).
+
+/** 장비 프리셋 select 렌더. 이동 실측이 있는 프리셋은 PTZ 를 라벨에 함께 보여준다. */
+function renderDevicePresetSelect() {
+  const sel = $('dev-preset-sel');
+  if (!sel) return;
+  const previous = Number(sel.value);
+  sel.innerHTML = '';
+  for (const p of state.devicePresets) {
+    const o = document.createElement('option');
+    o.value = p.number ?? '';
+    o.textContent = devicePresetLabel(p, state.devicePresetPtz[p.number]);
+    o.disabled = !p.number; // 수치 토큰이 아니면 Hucoms gopreset 으로 이동할 수 없다.
+    sel.appendChild(o);
+  }
+  if (state.devicePresets.some((p) => p.number === previous)) sel.value = String(previous);
+  updatePtzControlEnabled();
+}
+
+/** 프리셋 표시 라벨. 실측 PTZ 가 있으면 장비 원시값을 덧붙인다(없으면 '미측정'). */
+function devicePresetLabel(preset, measured) {
+  const head = `${preset.name} (#${preset.number ?? preset.token})`;
+  const native = measured?.native;
+  if (!native) return head;
+  return `${head} — P ${native.pan} / T ${native.tilt} / Z ${native.zoom}`;
+}
+
+/** 장비 프리셋 목록 조회(읽기 — 카메라를 움직이지 않는다). */
+async function loadDevicePresets({ quiet = false } = {}) {
+  if (!selectedSourceIsReal()) return false;
+  const status = $('dev-preset-status');
+  if (!quiet) status.textContent = '장비 프리셋 목록을 읽는 중…';
+  try {
+    const p = new URLSearchParams({ source: state.source, cam: state.cam });
+    const res = await fetch(api(`/presets?${p.toString()}`), { cache: 'no-store' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+    state.devicePresets = Array.isArray(data.presets) ? data.presets : [];
+    renderDevicePresetSelect();
+    status.textContent = state.devicePresets.length
+      ? `장비 프리셋 ${state.devicePresets.length}개`
+      : '장비에 저장된 프리셋이 없습니다.';
+    return true;
+  } catch (err) {
+    state.devicePresets = [];
+    renderDevicePresetSelect();
+    status.textContent = `장비 프리셋 조회 실패: ${err instanceof Error ? err.message : err}`;
+    return false;
+  }
+}
+
+/**
+ * 선택한 장비 프리셋으로 **실제 이동**하고, 이동 후 장비가 보고하는 PTZ 를 표시한다.
+ * 서버가 정착(정지)을 확인한 뒤 실측값을 돌려주므로 여기서 추가 대기를 하지 않는다.
+ */
+async function gotoDevicePreset() {
+  const number = Number($('dev-preset-sel').value);
+  if (!Number.isInteger(number) || number < 1) {
+    $('dev-preset-status').textContent = '이동할 장비 프리셋을 선택하세요.';
+    return false;
+  }
+  if (state.ptzBusy) return false;
+  setPtzBusy(true);
+  $('dev-preset-status').textContent = `프리셋 #${number} 으로 이동 중…`;
+  try {
+    const res = await mutFetch(api('/preset/goto'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ source: state.source || undefined, cam: state.cam, number }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+    if (data.ptz) {
+      state.ptz = data.ptz;
+      updatePtzDisplay();
+    }
+    state.ptzNative = data.native ?? null;
+    updatePtzNativeDisplay();
+    state.ptzStateReady = true; // 장비 실측을 받았으므로 이후 상대 이동의 기준이 선다.
+    state.devicePresetPtz[number] = { ptz: data.ptz, native: data.native };
+    renderDevicePresetSelect();
+    $('dev-preset-sel').value = String(number);
+    $('dev-preset-status').textContent = data.settled
+      ? `프리셋 #${number} 이동 완료.`
+      : `프리셋 #${number} 이동 명령 완료 — 장비 정지를 확인하지 못했습니다(값이 이동 중일 수 있음).`;
+    reconnectLiveIfActive(); // 실카는 물리 이동 후 RTSP 를 다시 연결한다(정지 프레임 방지).
+    return true;
+  } catch (err) {
+    $('dev-preset-status').textContent = `프리셋 이동 실패: ${err instanceof Error ? err.message : err}`;
+    return false;
+  } finally {
+    setPtzBusy(false);
+  }
+}
+
+/** 장비 원시 PTZ 표시 갱신(없으면 '-'). */
+function updatePtzNativeDisplay() {
+  const native = state.ptzNative;
+  $('ptz-native-pan').textContent = native ? String(native.pan) : '-';
+  $('ptz-native-tilt').textContent = native ? String(native.tilt) : '-';
+  $('ptz-native-zoom').textContent = native ? String(native.zoom) : '-';
 }
 
 function updatePtzControlEnabled() {
@@ -331,6 +452,13 @@ function updatePtzControlEnabled() {
   const canMove = !state.ptzBusy && !state.touringActive && (!selectedSourceIsReal() || state.ptzStateReady);
   document.querySelectorAll('[data-dir], #btn-abs').forEach((button) => { button.disabled = !canMove; });
   $('btn-ptz-refresh').disabled = state.ptzBusy;
+  // 장비 프리셋: 목록 조회는 카메라를 움직이지 않으므로 '현재 PTZ 미확보' 상태에서도 허용한다.
+  // 이동은 다른 이동 버튼과 같은 조건(순회 중·명령 진행 중 금지)으로 막는다.
+  const gotoBtn = $('dev-preset-goto');
+  if (gotoBtn) {
+    gotoBtn.disabled = state.ptzBusy || state.touringActive || !Number($('dev-preset-sel')?.value);
+    $('dev-preset-load').disabled = state.ptzBusy;
+  }
 }
 
 function setPtzBusy(busy) {
@@ -348,9 +476,11 @@ async function refreshCurrentPtz({ quiet = false } = {}) {
     const data = await res.json().catch(() => ({}));
     if (!res.ok || !data.ptz) throw new Error(data.error ?? `HTTP ${res.status}`);
     state.ptz = data.ptz;
+    state.ptzNative = data.native ?? null; // 장비 원시 PTZ(가산 — 미지원 소스면 null 로 남는다).
     state.ptzStateReady = true;
     updatePtzControlEnabled();
     updatePtzDisplay();
+    updatePtzNativeDisplay();
     if (!quiet) $('ptz-control-status').textContent = `${sourceName} 현재 PTZ를 불러왔습니다.`;
     return true;
   } catch (err) {
@@ -433,6 +563,7 @@ async function loadSources() {
       sel.value = state.source;
       updateLensTarget(); // 최초 소스 확정 시점에도 캘리브레이션 대상 배지를 맞춘다.
       updatePtzControlUi();
+      void loadDevicePresets({ quiet: true }); // 실카면 장비 프리셋 목록을 미리 채운다(읽기 전용·무이동).
     }
   } catch {
     /* ignore */
@@ -5127,6 +5258,7 @@ function wire() {
     updatePtzControlUi();
     await loadCameras();
     await refreshCurrentPtz({ quiet: true });
+    void loadDevicePresets({ quiet: true }); // 장비 프리셋 목록(실카 전용·무이동). 실패해도 나머지 UI 는 살아있다.
     reconnectLiveIfActive();
   });
   $('sel-cam').addEventListener('change', (e) => {
@@ -5157,6 +5289,10 @@ function wire() {
   $('btn-start').addEventListener('click', () => startLive());
   $('btn-stop').addEventListener('click', () => stopLive());
   $('btn-goto').addEventListener('click', () => { gotoPreset(); reconnectLiveIfActive(); }); // 프리셋 이동 후 새 PTZ 로 스트림 재연결.
+  // 장비 프리셋(실카 전용): 목록 조회는 무이동, 이동은 Hucoms gopreset 물리 이동.
+  $('dev-preset-load').addEventListener('click', () => loadDevicePresets());
+  $('dev-preset-goto').addEventListener('click', () => gotoDevicePreset());
+  $('dev-preset-sel').addEventListener('change', () => updatePtzControlEnabled());
   $('preset-save').addEventListener('click', () => savePreset(false)); // 선택 프리셋을 현재 PTZ로 갱신
   $('preset-new').addEventListener('click', () => savePreset(true)); // 현재 PTZ를 새 프리셋으로 추가
   $('preset-delete').addEventListener('click', deletePreset); // 선택 프리셋 삭제

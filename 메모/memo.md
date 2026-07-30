@@ -28,6 +28,35 @@ memo.md에 새 항목을 추가하기 **전에** 파일 크기를 확인한다. 
 
 ---
 
+## 2026-07-30 휴컴스 **장비 프리셋 조회 + 프리셋/PTZ 이동** — 정보수집 페이지 PTZ 제어에 배선
+
+마스터 지시: *"휴컴스 카메라의 api로 프리셋 정보를 가져와 UI에 출력. 프리셋 이동 또는 ptz 이동 형태로 구현(ptz값 UI 표시) — 정보수집페이지의 ptz 컨트롤 부분에 적용. 브랜치·워크트리 따로."*
+작업 위치: 워크트리 `.claude/worktrees/feat-hucoms-preset-ptz` (브랜치 `worktree-feat-hucoms-preset-ptz`). **미커밋**(지시 없음).
+
+### ★ 이 세션의 핵심 발견 — 휴컴스 API 에는 프리셋 **조회**가 없다
+- 문서 §8.4 `preset_control.cgi` = `setpreset`/`gopreset`/`clearpreset` **셋뿐**. 실측 probe 도 `get*` 계열 전부 **204 빈 응답**, `preset.cgi`·`presetname.cgi` 류는 **404**.
+- **같은 장비의 ONVIF `GetPresets` 는 동작한다** → **목록만 ONVIF, 이동은 종전 Hucoms `gopreset`** 으로 갈랐다(정착 대기·실측·로그가 붙은 검증 경로를 둘로 늘리지 않는다).
+- ★★ **장비는 프리셋의 PTZ 를 주지 않는다** — `GetPresets` 의 `PTZPosition` 이 전 프리셋 0/0/0(cam1·cam2 동일). → **이동한 뒤 실측한 값만** 표시한다(추정 금지).
+- ★ 장비는 **255칸 전부** 반환. 미설정 칸 이름은 「3자리 번호의 첫 글자가 제어문자(0x0A)로 바뀐」 형태(`021→"
+21"`, `254→"
+54"`), 설정 칸은 `"EV1
+"` 처럼 **개행이 뒤**. 이 비대칭이 유일한 판별 근거(한계: 이름을 번호 뒤2자리로 지으면 오판).
+
+### 구현 (신규 2 + 수정 7)
+- 신규 `src/clients/onvif/{presetParse.ts,OnvifPtzClient.ts}` — 의존성 0(node:crypto + fetch + 정규식). WS-Security digest = `base64(sha1(nonce+created+pw))`. Fault 는 **경로 재시도 없이 즉시 포기**(인증 반복 실패 방지).
+- `CameraSource` 에 optional 3종(`getNativePtz`/`listDevicePresets`/`gotoDevicePreset`) → 다른 소스 구현 **무변경**.
+- 라우트 `GET /viewer/api/presets`(읽기·무게이트) · `POST /viewer/api/preset/goto`(변이 — `/move` 와 **동일 게이트**) · `GET /viewer/api/ptz` 에 `native` **가산**.
+- 뷰어: PTZ 제어 패널 안에 **장비 프리셋** 블록(목록·불러오기·이동) + ‘현재 PTZ’ 아래 **장비 원시 PTZ** 줄. 실카에서만 열린다. 실측 PTZ 는 세션 메모리만(파일·DB 무기록).
+
+### 검증
+- vitest 신규 **5파일 51케이스**, 전체 **297파일 3773 green**, `tsc` exit 0. (골든 픽스처는 main 에 junction)
+- **실카 라이브**(192.168.0.153): 프리셋 **24개**(EV1~EV5·EX1-0~EX5-2·test·preset131·preset1×2) · 조회 전후 PTZ 동일(**무이동**) · `goto` #1/#2/#3 전부 `settled:true`(원시 `7034/2760/8155`, `8245/2098/12686`, `4877/1611/8998`) · **원위치 복귀 차이 0/0/0**. 검증 서버는 **13030** 임시 기동(마스터 13020 무접촉) 후 종료·설정 원복.
+- ★ 곁가지 대조: OSD `70/27/x35` = 원시 `panpos 7034`/`tiltpos 2760`(centidegree)/`zoompos 8155` — 원시값을 UI 에 띄운 이유가 이것이다(뷰어 좌표로는 장비 로그·OSD 와 대조가 안 된다).
+- **미검증(은닉 금지)**: 브라우저 육안 확인은 마스터 몫(저장소에 DOM 자동화 없음 — UI 는 소스 봉인 테스트로 지킴) · ONVIF 인증실패 실장비 재현 없음 · `setpreset`/`clearpreset`(파괴적)은 미구현 · 외부 제어자용 RPC 미승격.
+
+### 문서
+`SettingAgent/docs/20260730_205652_휴컴스_장비프리셋_조회와_프리셋PTZ이동_구현.md`(설계 근거·계약·영향도 전문).
+
 ## 2026-07-30 **세션 종료** — 커밋·머지 완료 · 21회차 인계서 · 예약캡처 5건 성공 확인
 
 마스터 지시: *"커밋 머지 해주고, 메모 남겨주고 다음 세션으로 이전작업을 위한 md 파일을 만들어줘"*

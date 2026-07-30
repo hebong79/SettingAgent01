@@ -1,9 +1,11 @@
 import { HucomsClient } from '../clients/hucoms/HucomsClient.js';
+import { OnvifPtzClient } from '../clients/onvif/OnvifPtzClient.js';
+import type { DevicePreset } from '../clients/onvif/presetParse.js';
 import type { CameraSourceConfig } from '../config/toolsConfig.js';
 import { logger } from '../util/logger.js';
 import { SimulatorMjpegAdapter } from '../stream/SimulatorMjpegAdapter.js';
 import type { StreamAdapter } from '../stream/StreamAdapter.js';
-import type { CameraList, CameraSource, Ptz, SnapshotOpts, SnapshotResult } from './CameraSource.js';
+import type { CameraList, CameraSource, DevicePresetGoto, Ptz, SnapshotOpts, SnapshotResult } from './CameraSource.js';
 import { IDENTITY_CORRECTOR, type LensCorrector } from '../calibrate/lensCorrection.js';
 
 /** HTTP API Hucoms V1.22 원시 PTZ 범위. */
@@ -164,6 +166,18 @@ export class RealPtzSource implements CameraSource {
    * 실제 보정기를 주입한다.
    */
   private readonly lensCorrector: LensCorrector;
+  /**
+   * 장비 프리셋 **목록 조회** 전용 ONVIF 클라이언트(지연 생성).
+   *
+   * ★ Hucoms CGI 에는 프리셋 조회 명령이 없다(HTTP API v1.22 §8.4 = set/go/clear 뿐. 실측 probe 도 204).
+   *   같은 장비의 ONVIF `GetPresets` 는 이름까지 돌려주므로 **목록만** 그쪽에서 읽는다.
+   *   이동은 종전 Hucoms `gopreset` 그대로다 — 정착 대기·PTZ 실측이 붙은 검증된 경로를 둘로 늘리지 않는다.
+   */
+  private onvifClient?: OnvifPtzClient | Pick<OnvifPtzClient, 'getPresets'>;
+  private readonly onvifInjected: boolean;
+  private readonly baseUrl: string;
+  private readonly timeoutMs: number;
+  private credentials: { username?: string; password?: string };
 
   constructor(
     private cfg: CameraSourceConfig,
@@ -171,11 +185,17 @@ export class RealPtzSource implements CameraSource {
     streamAdapter?: StreamAdapter,
     settle: RealPtzSettleOptions = {},
     lensCorrector: LensCorrector = IDENTITY_CORRECTOR,
+    onvifClient?: Pick<OnvifPtzClient, 'getPresets'>,
   ) {
     const host = cfg.host ?? '127.0.0.1';
     const port = cfg.port ?? 80;
+    this.baseUrl = cfg.baseUrl ?? `http://${host}:${port}`;
+    this.timeoutMs = timeoutMs;
+    this.credentials = { username: cfg.username, password: cfg.password };
+    this.onvifClient = onvifClient;
+    this.onvifInjected = onvifClient !== undefined;
     this.client = new HucomsClient({
-      baseUrl: cfg.baseUrl ?? `http://${host}:${port}`,
+      baseUrl: this.baseUrl,
       username: cfg.username,
       password: cfg.password,
       timeoutMs,
@@ -200,11 +220,55 @@ export class RealPtzSource implements CameraSource {
     this.client.setCredentials(user, pass);
     try {
       await this.client.getServerName();
+      // ONVIF 는 같은 자격증명을 쓰지만 클라이언트가 별개다 — 로그인으로 바뀐 자격증명을 반영해야
+      // 프리셋 목록이 옛 비밀번호로 401 나지 않는다.
+      this.credentials = { username: user, password: pass };
+      if (!this.onvifInjected) this.onvifClient = undefined;
       return true;
     } catch {
       this.client.clearCredentials();
       return false;
     }
+  }
+
+  /** 프리셋 목록 조회용 ONVIF 클라이언트(지연 생성·자격증명 변경 시 재생성). */
+  private onvif(): Pick<OnvifPtzClient, 'getPresets'> {
+    if (!this.onvifClient) {
+      this.onvifClient = new OnvifPtzClient({
+        baseUrl: this.baseUrl,
+        username: this.credentials.username,
+        password: this.credentials.password,
+        timeoutMs: this.timeoutMs,
+      });
+    }
+    return this.onvifClient;
+  }
+
+  /** 장비에 저장된 프리셋 목록(미설정 슬롯 제외). 실패는 그대로 전파한다 — 빈 목록으로 위장하지 않는다. */
+  async listDevicePresets(_camera: number): Promise<DevicePreset[]> {
+    return this.onvif().getPresets();
+  }
+
+  /**
+   * 장비 프리셋 번호로 실제 이동(Hucoms `gopreset`).
+   *
+   * ★ 목표 PTZ 를 **모른 채** 움직이는 이동이다 — 장비가 프리셋의 PTZ 를 알려주지 않기 때문이다
+   *   (ONVIF GetPresets 의 PTZPosition 은 실측상 전부 0). 그래서 목표 근접이 아니라 `waitUntilStopped`
+   *   (정지 확인)로 정착을 판정하고, **이동 후 실측**한 PTZ 를 프리셋의 PTZ 로 돌려준다.
+   */
+  async gotoDevicePreset(_camera: number, presetNumber: number): Promise<DevicePresetGoto> {
+    await this.client.goPreset(presetNumber);
+    const settled = await this.waitUntilStopped();
+    const native = await this.readNativePtz().catch(() => undefined);
+    const ptz = await this.currentPtz();
+    return { number: presetNumber, ptz, ...(native ? { native } : {}), settled };
+  }
+
+  /** 장비 원시 PTZ(panpos/tiltpos/zoompos). 불완전 응답은 예외로 올린다(위장 금지). */
+  async getNativePtz(_camera: number): Promise<NativePtz> {
+    const native = await this.readNativePtz();
+    if (!native) throw new Error('카메라 PTZF 위치 응답이 완전하지 않습니다');
+    return native;
   }
 
   async health(): Promise<boolean> {

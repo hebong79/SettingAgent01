@@ -570,6 +570,26 @@ body.resizing {
   color: var(--accent);
 }
 
+/* 장비 원시 PTZ 줄(실카 전용) — '현재 PTZ' 아래에 한 줄로 붙는다. 뷰어 좌표와 시각적으로 구분. */
+.ptz-summary {
+  flex-wrap: wrap;
+}
+
+.ptz-native {
+  flex-basis: 100%;
+}
+
+.ptz-native span {
+  border-style: dashed;
+}
+
+/* 장비 프리셋 블록 — PTZ 제어 섹션 안의 하위 블록임을 구분선으로 표시. */
+.device-preset {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid #2a3742;
+}
+
 .control-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
