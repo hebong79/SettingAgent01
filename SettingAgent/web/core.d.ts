@@ -282,6 +282,8 @@ export function buildFlatSlotRows(args: {
   // 서버 점유 판정 캐시(POST /capture/slots/judge-occupancy 적재분 = app.js:state.occComputeByKey).
   // 이 함수는 판정하지 않고 조회만 한다 — 판정 정본은 src/domain/occupancyJudge.ts 다.
   occByKey?: Record<string, { spaces?: Array<{ id: number; occupied: boolean }> }> | null;
+  /** 지정 시 그 `cam:preset` 만 남긴다('이 프리셋만' 보기). 전역 인덱스는 전체 기준 그대로 유지된다. */
+  onlyKey?: string | null;
 }): FlatSlotRow[];
 
 export interface SlotLike {

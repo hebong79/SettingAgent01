@@ -699,10 +699,13 @@ export function removePlaceSpace(placeRoi, idx) {
  * 반환: [{ globalIdx, cam, preset, key, occupied, vpd, lpd }] — globalIdx 오름차순.
  * throw 금지 — placeRoi null/빈 → [](graceful).
  */
-export function buildFlatSlotRows({ placeRoi, parkingSlotsByKey, occByKey }) {
+export function buildFlatSlotRows({ placeRoi, parkingSlotsByKey, occByKey, onlyKey }) {
   if (!placeRoi || typeof placeRoi !== 'object') return [];
   const rows = [];
   for (const key of Object.keys(placeRoi)) {
+    // onlyKey 지정 시 그 프리셋만(= '이 프리셋만' 보기). 미지정이면 종전대로 전 프리셋 평면 목록.
+    // 전역 인덱스는 **거르지 않은 전체 기준 그대로** 둔다 — 걸러 보인다고 번호가 바뀌면 '수정'(번호 변경)이 어긋난다.
+    if (onlyKey && key !== onlyKey) continue;
     const [cam, preset] = key.split(':').map(Number);
     const spaces = Array.isArray(placeRoi[key]) ? placeRoi[key] : [];
     const occSpaces = occByKey?.[key]?.spaces ?? [];

@@ -45,3 +45,18 @@ export function movePlaceVertex(
   dx: number,
   dy: number,
 ): PlaceRoiMap;
+export function importAutoQuads(
+  placeRoi: Record<string, Array<{ idx: number; points: Array<{ x: number; y: number }> }>> | null,
+  key: string,
+  quads: Array<Array<{ x: number; y: number }>>,
+): {
+  placeRoi: Record<string, Array<{ idx: number; points: Array<{ x: number; y: number }> }>>;
+  added: number;
+  skipped: number;
+  firstIdx: number | null;
+};
+export function hitTestPlaceSpace(
+  placeRoi: Record<string, Array<{ idx: number; points: Array<{ x: number; y: number }> }>> | null,
+  key: string,
+  pt: { x: number; y: number },
+): number | null;

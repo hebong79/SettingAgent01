@@ -189,7 +189,13 @@
           <!-- 1행 = '지금 그리는 것'(비파괴). 2행 = '목록·파일'(파괴 있음). 행이 곧 범위다. -->
           <div class="roi-edit-bar toolbar">
             <button id="place-draw" title="캔버스를 4번 클릭해 주차면 1개를 새로 그린다(원근 사다리꼴). Esc=취소 / Ctrl+Z=마지막 점 되돌리기. 그린 면은 메모리에만 남고 '저장'을 눌러야 PtzCamRoi.json 에 기록된다">면 그리기</button>
-            <label title="선택된 주차면의 4정점을 드래그해 미세조정한다(기본 꺼짐 — 켜야 캔버스 정점 드래그가 열린다)"><input id="place-edit-vertex" type="checkbox" /> 정점 편집</label>
+            <!--
+              자동검출(도색선) 결과로 **이 프리셋 목록을 교체**한다(검출 버튼을 누르면 자동으로도 일어난다).
+              범위는 지금 보고 있는 cam:preset 하나이고, 파일·DB 는 안 건드린다 — 확정은 '저장', 복구는 '되돌리기'.
+            -->
+            <button id="place-import-auto" title="'도색선 자동검출' 결과로 이 프리셋(지금 보고 있는 cam:preset)의 목록을 통째로 교체한다. 기존 면은 목록에서 지워지고 검출된 면만 남는다('되돌리기'로 1단계 복구 가능). 검출 결과가 0면이면 아무것도 지우지 않는다. [검출] 버튼을 누르면 이 교체가 자동으로 일어나므로, 이 버튼은 되돌린 뒤 다시 적용할 때 쓴다. 파일에 남기려면 '저장'이 필요하다">검출결과로 교체</button>
+            <label title="선택된 주차면의 4정점을 드래그해 미세조정한다(목록에서 면을 고르거나 새로 그리면 자동으로 켜진다)"><input id="place-edit-vertex" type="checkbox" /> 정점 편집</label>
+            <label title="아래 목록을 지금 보고 있는 카메라·프리셋 것만 보여준다. 끄면 전 프리셋을 전역 번호순으로 함께 본다(번호는 어느 쪽이든 전체 기준 그대로다)"><input id="place-only-preset" type="checkbox" checked /> 이 프리셋만</label>
             <button id="place-clear" title="그리는 중이면 찍은 점만 전부 지운다(그리기 모드는 유지). 그리는 중이 아니면 선택된 주차면 1개를 삭제한다('되돌리기' 로 복구 가능). 파일은 건드리지 않는다 — '저장' 필요">초기화</button>
             <span id="place-sel-info" class="sel-slot-info">선택된 주차면 없음</span>
           </div>

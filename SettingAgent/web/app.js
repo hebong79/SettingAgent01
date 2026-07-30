@@ -78,6 +78,8 @@ import {
   clearPresetSpaces, // 한 프리셋의 주차면 전부 제거(순수, core.removePlaceSpace 전량 위임 → 1..N 재압축)
   placeQuadOf, // 프리셋 키 + 전역 idx → 4점(순수)
   movePlaceVertex, // 주차면 정점 1개 이동(순수, core.moveQuadVertex 위임)
+  importAutoQuads, // 자동검출 quad → 주차면 목록에 추가(순수, 중복 건너뜀)
+  hitTestPlaceSpace, // 캔버스 클릭 지점 → 그 안의 주차면 전역 idx(순수, core.pointInQuad 위임)
 } from './placeDraw.js';
 import { mutFetch, getControlToken, setControlToken } from './token.js'; // 변이 요청 토큰 부착·보관(서버 변이 게이트 대응).
 // 도색선 자동검출(roi.auto.*) 응답 → 그릴 목록·요약 변환(순수). 뷰어는 서버 산출을 옮길 뿐 추정하지 않는다.
@@ -1444,10 +1446,13 @@ function renderSlotList() {
   if (finalized || fileMode) {
     // 점유는 서버 판정 캐시(state.occComputeByKey)를 그대로 읽는다 — 오버레이 원과 **같은 소스**라
     // 목록 뱃지와 오버레이가 구조적으로 갈리지 않는다(판정기 주입이 하던 역할을 캐시가 대신한다).
+    // '이 프리셋만'(기본 켜짐) — 지금 보고 있는 cam:preset 의 면만 나열한다. 끄면 종전 전 프리셋 평면 목록.
+    const onlyKey = $('place-only-preset')?.checked ? currentFrameKey() : null;
     const rows = buildFlatSlotRows({
       placeRoi: state.placeRoi,
       parkingSlotsByKey: state.parkingSlotsByKey,
       occByKey: state.occComputeByKey,
+      onlyKey,
     });
     for (const r of rows) {
       const div = document.createElement('div');
@@ -1461,7 +1466,10 @@ function renderSlotList() {
     if (!rows.length) {
       const div = document.createElement('div');
       div.className = 'slot-empty';
-      div.textContent = '표시할 주차면 없음 — PtzCamRoi.json 확인';
+      // 필터가 켜져 있으면 "이 프리셋에 없다"와 "아예 없다"를 구분해 준다 — 안 그러면 필터를 의심하지 못한다.
+      div.textContent = onlyKey
+        ? `${onlyKey} 에 주차면 없음 — '면 그리기' 또는 '검출결과로 교체'(전체 ${placeSpaceCount()}면)`
+        : '표시할 주차면 없음 — PtzCamRoi.json 확인';
       box.appendChild(div);
     }
     // ★ 파일 목록이 artifact 슬롯 목록을 **대체하지 않는다** — 둘 다 있으면 아래에 이어 그린다(병기).
@@ -2480,6 +2488,9 @@ async function apRun(mode) {
       }),
     );
     $('roi-autopaint').checked = true; // 결과를 냈으면 바로 보이게(사용자 명시 조작 직후에만. 가산 레이어라 기존 렌더는 그대로).
+    // ★ [검출] 은 목록을 **교체**한다(마스터 요청). [검출 + 채점]은 하지 않는다 —
+    //   채점은 자동 결과를 **수동 정본과 비교**하는 것이라, 그 수동 목록을 지우면 비교 기준 자체가 사라진다.
+    if (mode === 'detect') replaceListWithAutoDetect({ auto: true });
   } catch (e) {
     state.autoPaint = null;
     renderApIssues(null);
@@ -2550,6 +2561,53 @@ function selectPlaceSpace(row) {
   // 네 번째 진입점: 바닥 토글이 꺼진 채 목록에서 면을 고르면 하이라이트도 정점 핸들도 안 나온다
   // (표시·히트테스트가 둘 다 #roi-floor 를 요구) → 선택했는데 화면이 안 변하는 '조용한 무반응'. 렌더 **앞**에 둔다.
   ensureFloorVisible();
+  // 선택 = 크기 조절의 시작이다(마스터 요청). '면 그리기' 직후와 같은 상태로 만들어 4정점 핸들을 바로 잡게 한다.
+  // 토글은 그대로 남으므로 원치 않으면 끄면 된다(안전장치 유지).
+  const vtx = $('place-edit-vertex');
+  if (vtx) vtx.checked = true;
+  drawRoiOverlay();
+  renderSlotList();
+}
+
+/**
+ * **검출결과로 이 프리셋 목록을 통째로 교체**한다(마스터 요청 2026-07-31:
+ * "검출버튼을 누르면 UI의 주차면 리스트는 모두 지워지고 새로 생성된 것만 리스트에 추가한다").
+ *
+ * 자동검출 패널은 결과를 시안 오버레이로만 그렸다 — 선택도 편집도 안 되는 그림이었다. 교체 후에는
+ * 목록·선택·정점 드래그·삭제가 전부 열린다.
+ *
+ * 규약 셋(전부 의도적):
+ * - **범위는 지금 보고 있는 `cam:preset` 하나뿐이다.** 검출이 그 프리셋 화면에서만 이뤄지므로
+ *   다른 프리셋의 수작업을 검출 한 번으로 지우지 않는다.
+ * - **검출 결과가 0면이면 기존 목록을 지우지 않는다.** 검출 실패로 데이터를 잃는 쪽이 훨씬 나쁘다.
+ * - **파일·DB 무접촉**(메모리 교체) + **되돌리기 1단계 스냅샷**. 확정은 기존 '저장'.
+ *
+ * @param {{auto?: boolean}} opt auto=true 면 검출 직후 자동 호출(결과 없음은 조용히 넘어간다).
+ */
+function replaceListWithAutoDetect({ auto = false } = {}) {
+  const key = currentFrameKey();
+  const view = autoPaintViewFor(state.autoPaint, key);
+  const quads = autoQuadItems(view).map((q) => q.quadNorm);
+  const before = (state.placeRoi?.[key] ?? []).length;
+  if (!quads.length) {
+    // 지우지 않는다 — "검출 0면"으로 기존 목록을 날리면 복구는 되돌리기 1단계에만 의존하게 된다.
+    if (!auto) setPlaceMsg(`${key} 의 자동검출 결과가 없습니다 — '도색선 자동검출'에서 [검출]을 먼저 실행하세요(기존 ${before}면은 그대로 둡니다)`);
+    return;
+  }
+  snapshotPlaceRoi(`${key} 검출결과 교체`);
+  const r = importAutoQuads(clearPresetSpaces(state.placeRoi, key), key, quads);
+  state.placeRoi = r.placeRoi;
+  state.selectedPlaceIdx = r.firstIdx; // 첫 면을 선택 상태로 — 바로 정점 조절로 이어진다.
+  const gidx = $('place-gidx');
+  if (gidx) gidx.value = String(r.firstIdx);
+  const vtx = $('place-edit-vertex');
+  if (vtx) vtx.checked = true;
+  ensureFloorVisible();
+  sealPlaceRoiUndo();
+  markPlaceDirty(
+    `${key} 목록을 검출결과 ${r.added}면으로 교체했습니다(기존 ${before}면 제거, #${r.firstIdx}부터) — ` +
+      `'되돌리기' 로 복구 가능 · 정점을 드래그해 맞춘 뒤 '저장'을 눌러야 파일에 기록됩니다`,
+  );
   drawRoiOverlay();
   renderSlotList();
 }
@@ -5014,6 +5072,25 @@ function wireOverlayEditing() {
         e.preventDefault();
         return;
       }
+      // [주차면 선택] 화면의 면 **안쪽을 클릭하면 그 면이 선택**된다(마스터 요청 2026-07-31) —
+      // 목록 행 클릭과 결과가 같다(선택 + 정점 핸들 열림). 정점 히트테스트 **뒤**에 두는 것이 계약이다:
+      // 핸들은 면 안쪽에도 걸치므로 순서가 뒤집히면 핸들을 잡을 수 없다(= 크기 조절이 죽는다).
+      // 바닥 레이어가 꺼져 있으면 건너뛴다 — 그려지지 않는 것을 집게 하면 '보이지 않는 선택'이 된다.
+      // 그리는 중에도 건너뛴다(그때의 클릭은 '점 찍기'다).
+      if (!state.placeDraw && $('roi-floor').checked) {
+        const pKey = currentFrameKey();
+        const pHit = hitTestPlaceSpace(state.placeRoi, pKey, { x: nx, y: ny });
+        if (pHit != null && pHit !== state.selectedPlaceIdx) {
+          const [pCam, pPreset] = pKey.split(':').map(Number);
+          selectPlaceSpace({ globalIdx: pHit, cam: pCam, preset: pPreset, key: pKey });
+          e.preventDefault();
+          return;
+        }
+        if (pHit != null) {
+          e.preventDefault(); // 이미 선택된 면을 다시 눌렀다 — 아래 해제 분기로 흘러 선택이 풀리지 않게 여기서 끊는다.
+          return;
+        }
+      }
     }
     if (state.roiHidden || !state.mapping) return;
     const key = presetKey(state.cam, state.preset);
@@ -5339,6 +5416,8 @@ function wire() {
 
   // 주차면 신규 그리기(캔버스 4점) + 정점 편집 토글.
   $('place-draw').addEventListener('click', togglePlaceDraw);
+  $('place-import-auto').addEventListener('click', () => replaceListWithAutoDetect()); // 검출결과로 이 프리셋 목록 교체
+  $('place-only-preset').addEventListener('change', renderSlotList); // '이 프리셋만' 필터 토글
   $('place-edit-vertex').addEventListener('change', (e) => {
     // 켜는 조작인데 바닥 토글이 꺼져 있으면 핸들이 안 나온다(표시·히트테스트가 둘 다 #roi-floor 를 요구) → '조용한 무반응' 제거.
     if (e.target?.checked) ensureFloorVisible();

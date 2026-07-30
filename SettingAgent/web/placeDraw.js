@@ -4,7 +4,7 @@
 // ★ idx 보장: `appendPlaceSpace` 는 idx 를 **인자로 받지 않는다**. 호출자가 idx 를 누락시킬 방법이 없다.
 //   (idx 없는 주차면은 normalizePtzCamRoi 에서 조용히 탈락하고 통째 교체 저장 시 파일에서 사라진다.)
 
-import { moveQuadVertex, removePlaceSpace } from './core.js';
+import { moveQuadVertex, pointInQuad, removePlaceSpace } from './core.js';
 
 /** 영속화 규약과 동일한 소수 5자리 반올림(round5 동등 — 그린 좌표가 저장 전후로 흔들리지 않게). */
 function r5(n) {
@@ -95,4 +95,69 @@ export function movePlaceVertex(placeRoi, key, idx, vertexIndex, dx, dy) {
   });
   if (!hit) return placeRoi;
   return { ...map, [key]: next };
+}
+
+/**
+ * 자동 생성된 주차면(도색선 자동검출 결과 quad)을 **주차면 목록에 넣는다**(불변).
+ *
+ * 자동검출 패널은 결과를 오버레이로만 그린다 — 목록·편집 대상이 아니었다. 이 함수가 그 결과를
+ * 편집 가능한 주차면(placeRoi)으로 옮긴다. 파일은 건드리지 않는다(메모리 편집 → 기존 '저장'이 확정).
+ *
+ * 규약:
+ * - **끝 append**(`appendPlaceSpace` 위임) — 기존 면 번호를 하나도 흔들지 않는다.
+ * - **중복은 건너뛴다**: 같은 프리셋에 이미 있는 면과 4점이 소수 5자리까지 같으면 넣지 않는다.
+ *   (검출 버튼을 두 번 눌러도 목록이 두 배가 되지 않게 — 되돌리기 부담을 만들지 않는다.)
+ * - 4점이 아닌 quad 는 무시한다(입력 방어. 자동검출은 사각형만 낸다).
+ *
+ * @param {Object|null} placeRoi cam:preset → [{idx, points}]
+ * @param {string} key `cam:preset`
+ * @param {Array<Array<{x:number,y:number}>>} quads 정규화(0~1) 4점 배열들
+ * @returns {{placeRoi: Object, added: number, skipped: number, firstIdx: number|null}}
+ */
+export function importAutoQuads(placeRoi, key, quads) {
+  const sig = (pts) => (pts ?? []).map((p) => `${r5(p.x)},${r5(p.y)}`).join('|');
+  let map = placeRoi ?? {};
+  const seen = new Set(((map[key] ?? [])).map((sp) => sig(sp?.points)));
+  let added = 0;
+  let skipped = 0;
+  let firstIdx = null;
+  for (const quad of quads ?? []) {
+    if (!Array.isArray(quad) || quad.length !== 4) {
+      skipped += 1;
+      continue;
+    }
+    const s = sig(quad);
+    if (seen.has(s)) {
+      skipped += 1;
+      continue;
+    }
+    seen.add(s);
+    const r = appendPlaceSpace(map, key, quad);
+    map = r.placeRoi;
+    if (firstIdx === null) firstIdx = r.idx;
+    added += 1;
+  }
+  return { placeRoi: map, added, skipped, firstIdx };
+}
+
+/**
+ * 캔버스 클릭 지점이 들어있는 주차면의 **전역 idx**(없으면 null).
+ *
+ * 목록 행 클릭 말고 **화면의 면을 직접 눌러 고르기** 위한 히트테스트다(마스터 요청).
+ * 겹쳐 있으면 **배열 뒤쪽(=나중에 그려진, 위에 보이는) 것**을 고른다 — 화면에서 위에 보이는 것을
+ * 집는 것이 사용자의 기대이기 때문이다. 판정은 core.pointInQuad 에 위임한다(구현 중복 0).
+ *
+ * @param {Object|null} placeRoi cam:preset → [{idx, points}]
+ * @param {string} key `cam:preset`
+ * @param {{x:number,y:number}} pt 정규화(0~1) 좌표
+ * @returns {number|null}
+ */
+export function hitTestPlaceSpace(placeRoi, key, pt) {
+  const spaces = (placeRoi ?? {})[key];
+  if (!Array.isArray(spaces) || !pt || !Number.isFinite(pt.x) || !Number.isFinite(pt.y)) return null;
+  for (let i = spaces.length - 1; i >= 0; i--) {
+    const sp = spaces[i];
+    if (Number.isInteger(sp?.idx) && pointInQuad(pt.x, pt.y, sp.points ?? [])) return sp.idx;
+  }
+  return null;
 }
