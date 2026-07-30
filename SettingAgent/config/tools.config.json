@@ -148,7 +148,7 @@
       "protocol": "hucoms-v1.22",
       "baseUrl": "http://192.168.0.154:80",
       "username": "admin",
-      "password": "",
+      "passwordEnv": "CAM_REAL2_PASSWORD",
       "rtspUrl": "rtsp://192.168.0.154:554/stream1",
       "ptz": {
         "zoomRange": [

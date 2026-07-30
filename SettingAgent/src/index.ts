@@ -158,6 +158,8 @@ async function main(): Promise<void> {
     tourJob,
     pipeline,
     viewer: tools.viewer, sources, rpc, cameraCfg: tools.camera,
+    // camera 가 감싼 소스 id — RPC 응답이 "어느 소스로 찍었는가"를 말할 수 있게 한다(17회차).
+    selectedCameraId: selectedEntry?.[0] as string | undefined,
     dbFile: tools.capture.dbFile,
     isBusy: rpcBusy, // 외부 제어(RPC)의 카메라 점유 게이트 — 잡 3종 + 렌즈 캘리브레이션.
   });

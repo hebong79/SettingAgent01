@@ -180,6 +180,8 @@ export interface ApiDeps {
   sources?: Map<string, CameraSource>;
   /** 카메라 설정(zoom 클램프). sources 로 요청별 CameraSourceClient 를 조립할 때 사용. */
   cameraCfg?: ToolsConfig['camera'];
+  /** `camera` 가 감싼 소스 id(cameraRuntime.selectedCameraId). RPC 응답의 `usedSource` 표기용. */
+  selectedCameraId?: string;
   /** 웹 옵션 페이지(/settings) 편집 대상 config 파일 경로. 미지정 시 기본 config 경로. */
   settingsPaths?: SettingsPaths;
   /** DB 뷰어(/db/*) read-only 조회 대상 SQLite 파일. 주입 시에만 등록(가산·독립, R4). */
@@ -705,6 +707,7 @@ export function buildServer(deps: ApiDeps): FastifyInstance {
     placeRoiFile: deps.placeRoiFile,
     cameraposFile: deps.mapFiles?.cameraposFile,
     sources: deps.sources,
+    selectedCameraId: deps.selectedCameraId,
     cameraCfg: deps.cameraCfg,
     lpd: deps.lpd,
     camera: deps.camera,

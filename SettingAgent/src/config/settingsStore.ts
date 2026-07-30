@@ -5,6 +5,7 @@ import {
   LpdSchema,
   CameraExecutionModeSchema,
   CameraSourceConfigSchema,
+  resolveCameraPassword,
 } from './toolsConfig.js';
 import { LlmSchema } from './llmConfig.js';
 
@@ -151,7 +152,8 @@ export function readEditableSettings(paths: SettingsPaths = DEFAULT_SETTINGS_PAT
     port: source.port,
     username: source.username,
     rtspUrl: editableRtspUrl(source.rtspUrl),
-    passwordSet: typeof source.password === 'string' && source.password.length > 0,
+    // passwordEnv(환경변수 이름)로 옮긴 비밀번호도 "저장됨"으로 본다. 값 자체는 여전히 노출하지 않는다.
+    passwordSet: (resolveCameraPassword(source) ?? '').length > 0,
   }));
   return {
     llm: { provider: llm.provider, model: llm.model, baseUrl: llm.baseUrl, apiKeyEnv: llm.apiKeyEnv },

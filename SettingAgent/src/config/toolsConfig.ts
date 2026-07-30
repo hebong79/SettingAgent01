@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { readFileSync, existsSync } from 'node:fs';
+import { loadDotEnvOnce } from './env.js';
 
 /**
  * MCP 도구(능력 엔드포인트) + 기타 설정 (llm.config 와 역할 분리).
@@ -236,6 +237,7 @@ export const CameraExecutionModeSchema = z.enum(['typescript-native']);
 /**
  * 카메라 소스 설정(다중 소스). 미설정 시 camera(단일 sim)로 폴백(하위호환).
  * password는 독립형 폐쇄망 배포를 위해 선택적으로 저장할 수 있지만 GET /settings에는 절대 노출하지 않는다.
+ * 저장소에 평문을 남기지 않으려면 passwordEnv(환경변수 이름)를 쓴다 — apiKeyEnv 와 같은 규약.
  */
 export const CameraSourceConfigSchema = z.object({
   id: z.string().min(1),
@@ -249,6 +251,8 @@ export const CameraSourceConfigSchema = z.object({
   port: z.number().int().positive().optional(),
   username: z.string().optional(),
   password: z.string().optional(),
+  /** 비밀번호를 담은 환경변수 **이름**(값 아님). 설정 시 password 보다 우선한다(resolveCameraPassword). */
+  passwordEnv: z.string().optional(),
   /** 영상 소비자가 직접 사용할 스트림 주소. Hucoms HTTP 제어에는 사용하지 않는다. */
   rtspUrl: z.string().url().or(z.literal('')).optional(),
   /** @deprecated Hucoms V1.22는 별도 login CGI가 없으며 id/passwd query 인증을 사용한다. */
@@ -270,6 +274,15 @@ export const CameraSourceConfigSchema = z.object({
     .optional(),
 });
 export type CameraSourceConfig = z.infer<typeof CameraSourceConfigSchema>;
+
+/**
+ * 카메라 비밀번호 해석 — `passwordEnv` 가 가리키는 환경변수 값이 비어있지 않으면 그 값,
+ * 아니면 `password`(평문, 하위호환). 값은 config 파일이 아니라 process.env 에만 존재한다.
+ */
+export function resolveCameraPassword(src: Pick<CameraSourceConfig, 'password' | 'passwordEnv'>): string | undefined {
+  const fromEnv = src.passwordEnv ? process.env[src.passwordEnv] : undefined;
+  return fromEnv ? fromEnv : src.password;
+}
 
 export const CameraRuntimeSchema = z.object({
   executionMode: CameraExecutionModeSchema.default('typescript-native'),
@@ -415,6 +428,20 @@ export const DEFAULT_TOOLS_CONFIG: ToolsConfig = {
   // realCamera 는 기본값 미설정(cameraMode='real' 전환 시 사용자가 추가).
 };
 
+/**
+ * 비밀값 해석을 **여기 한 곳에서만** 한다. 카메라 비밀번호 소비자(sourceRegistry·RealPtzSource·
+ * hucomsCameraPort·LensCalibrationJob)는 모두 loadToolsConfig 산출물을 받으므로, 각자 해석하면
+ * 규칙이 중복된다. 반대로 설정 조회/저장(settingsStore)은 raw 파일을 읽으므로 해석값이 파일로
+ * 역유출되지 않는다.
+ */
+function resolveSecrets(cfg: ToolsConfig): ToolsConfig {
+  loadDotEnvOnce();
+  const withPassword = <T extends CameraSourceConfig>(src: T): T => ({ ...src, password: resolveCameraPassword(src) });
+  if (cfg.cameraSources) cfg.cameraSources = cfg.cameraSources.map(withPassword);
+  if (cfg.realCamera) cfg.realCamera = withPassword(cfg.realCamera);
+  return cfg;
+}
+
 /** tools.config.json 을 로드한다. 파일이 없으면 기본값을 검증해 반환. 섹션 단위 병합. */
 export function loadToolsConfig(path = 'config/tools.config.json'): ToolsConfig {
   if (existsSync(path)) {
@@ -433,7 +460,7 @@ export function loadToolsConfig(path = 'config/tools.config.json'): ToolsConfig 
     if (raw.cameraSources !== undefined) merged.cameraSources = raw.cameraSources;
     if (raw.cameraRuntime !== undefined) merged.cameraRuntime = raw.cameraRuntime;
     if (raw.realCamera !== undefined) merged.realCamera = raw.realCamera;
-    return ToolsConfigSchema.parse(merged);
+    return resolveSecrets(ToolsConfigSchema.parse(merged));
   }
-  return ToolsConfigSchema.parse(DEFAULT_TOOLS_CONFIG);
+  return resolveSecrets(ToolsConfigSchema.parse(DEFAULT_TOOLS_CONFIG));
 }

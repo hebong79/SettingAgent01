@@ -797,10 +797,73 @@ body.resizing {
   color: #ff6b6b;
 }
 
-/* 지면 격자 패널의 게이트 사유 — 작은 회색 문구는 눈에 띄지 않아 '무반응'으로 읽힌다(리더 실측). */
-.gg-warn {
-  color: #ffb300;
-  font-weight: 700;
+/* 자동검출 메시지만 줄바꿈을 살린다 — '⚠' 경고(단일점 화각표·틸트 부호 가정)를 요약과 같은 줄에 붙이면 읽히지 않는다. */
+#ap-msg {
+  white-space: pre-line;
+}
+
+/* ★ 21회차 — 자동검출 실행 진행바. 새 색을 만들지 않고 기존 토큰만 쓴다(--accent/--line-soft/--faint). */
+.ap-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.ap-progress-track {
+  position: relative;
+  flex: 1;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--line-soft);
+  overflow: hidden;
+}
+
+.ap-progress-fill {
+  height: 100%;
+  width: 0;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 0.2s linear;
+}
+
+/* 불확정 — 폭을 진행률로 읽으면 안 되므로 **좁은 띠가 왕복**한다(채우지 않는다). */
+.ap-progress-track.indeterminate .ap-progress-fill {
+  width: 28%;
+  transition: none;
+  animation: ap-progress-slide 1.1s ease-in-out infinite;
+}
+
+@keyframes ap-progress-slide {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(357%);
+  }
+}
+
+.ap-progress-label {
+  font-size: 11px;
+  color: var(--faint);
+  min-width: 128px;
+  text-align: right;
+}
+
+/* 완료·실패 요약이 막대 자리를 대신할 때는 왼쪽 정렬로 전 폭을 쓴다(문장이 길다). */
+.ap-progress-label.done {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  color: var(--muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ap-progress-track.indeterminate .ap-progress-fill {
+    animation: none;
+    width: 100%;
+    opacity: 0.45;
+  }
 }
 
 /* 카메라 PTZ 프리셋 편집(생성/수정/삭제) 컨테이너. */
@@ -815,7 +878,7 @@ body.resizing {
 }
 
 .an-manual-help,
-/* 지면 격자(자동 바닥 ROI) 패널 안내문. .an-manual-help 와 동일 스타일이되 클래스는 분리한다 —
+/* 패널 안내문 공용 스타일. .an-manual-help 와 동일하되 클래스는 분리한다 —
    test/manualTableMarkup.test.ts 가 '첫 번째 .an-manual-help' 를 수동 매핑표 안내문으로 봉인하기 때문. */
 .gg-help {
   margin: 0 0 8px;

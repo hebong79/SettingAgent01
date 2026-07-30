@@ -3,12 +3,11 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 /**
- * L3 후속 Loop 1/4 — 지면 격자 패널 UX 회귀 가드(DOM/렌더 계층은 순수함수로 못 잡아 소스 텍스트로 봉인.
- * 선례: test/dbViewSourceSwitch.test.ts · test/viewerToggleGating.test.ts).
+ * 지면 격자(자동 바닥 ROI) **패널 제거** 회귀 가드(마스터 요청 2026-07-29).
  *
- * 리더 실측: 서버는 정상(bootstrap ok:true, matched 7/7, IoU 0.9999768)이고 결함은 **클라이언트 UX 하나**였다 —
- * `gg-apply` 에는 disabled 게이트가 있는데 `gg-preview` 에는 없어, 기준 주차면 미선택 시 눌러도 캔버스·표가
- * 안 변해 **눈에는 완전한 무반응**이었다.
+ * 이전 라운드(L3 후속 Loop 1/4)는 이 패널의 '무반응' UX 를 소스 텍스트로 봉인하고 있었다.
+ * 이번 변경으로 **뷰어 UI 에서만** 패널·자동ROI 토글·전용 렌더/배선이 사라졌으므로 그 봉인들은 폐기하고,
+ * 그 자리에 **되살아나지 않음**(잔재 0) 과 **서버 경로는 그대로**(MCP·RPC 회귀 0) 를 봉인한다.
  */
 const app = readFileSync(fileURLToPath(new URL('../web/app.js', import.meta.url)), 'utf-8');
 const html = readFileSync(fileURLToPath(new URL('../web/index.html', import.meta.url)), 'utf-8');
@@ -26,115 +25,63 @@ function functionBody(src: string, name: string): string {
   throw new Error(`${name} 본문 파싱 실패`);
 }
 
-describe('미리보기 버튼 게이트(무반응 결함 봉인)', () => {
-  const sel = functionBody(app, 'renderGgSelectionInfo');
-
-  it('T1 renderGgSelectionInfo 가 gg-preview 의 disabled 를 갱신한다', () => {
-    expect(sel).toMatch(/\$\('gg-preview'\)/);
-    expect(sel).toMatch(/\.disabled\s*=/);
+describe('지면 격자 패널 제거(뷰어 UI 잔재 0)', () => {
+  it('index.html 에 gg-* 요소와 자동ROI 토글이 없다', () => {
+    for (const id of ['gg-sel-info', 'gg-cols', 'gg-rows', 'gg-colstart', 'gg-preview', 'gg-confirm', 'gg-apply', 'gg-msg', 'gg-table', 'roi-auto']) {
+      expect(html, `#${id} 제거`).not.toContain(`id="${id}"`);
+    }
+    expect(html).not.toContain('지면 격자');
   });
 
-  it('T2 그 조건은 ggRefSpace() 결과다(기준 주차면 선택 여부)', () => {
-    expect(sel).toContain('const ref = ggRefSpace();');
-    expect(sel).toMatch(/prev\.disabled\s*=\s*!ref/);
+  it('app.js 에 패널 로직·자동ROI 렌더·배선이 없다', () => {
+    for (const token of [
+      'ggPreview',
+      'ggApply',
+      'ggRefSpace',
+      'ggBody',
+      'renderGgTable',
+      'renderGgSelectionInfo',
+      'setGgMsg',
+      'setGgGate',
+      'drawAutoRoi',
+      'state.autoRoi',
+      "$('roi-auto')",
+    ]) {
+      expect(app, `${token} 제거`).not.toContain(token);
+    }
   });
 
-  it('T3 index.html 의 gg-preview 는 초기 disabled(최초 로드=선택 없음 과 일치)', () => {
-    const tag = html.match(/<button id="gg-preview"[^>]*>/)?.[0];
-    expect(tag, 'gg-preview 버튼 존재').toBeTruthy();
-    expect(tag).toContain('disabled');
+  it('app.css 에 패널 전용 강조 클래스가 없다(.gg-help 는 공용 안내문 스타일로 유지)', () => {
+    expect(css).not.toContain('.gg-warn'); // 게이트 경고 — 패널과 함께 사라졌다.
+    // .gg-help 는 다른 패널 안내문이 쓰는 공용 스타일이라 남긴다(이름만 격자 유래).
+    expect(css).toContain('.an-manual-help');
   });
 
-  it('T4 renderPlaceSelectionInfo 가 renderGgSelectionInfo() 를 호출한다(사슬 유지)', () => {
-    expect(functionBody(app, 'renderPlaceSelectionInfo')).toContain('renderGgSelectionInfo()');
-  });
-
-  it('T5 selectPlaceSpace 가 renderSlotList() 를 호출한다(경로 A)', () => {
-    expect(functionBody(app, 'selectPlaceSpace')).toContain('renderSlotList()');
-  });
-
-  it('T6 renderSlotList 의 **모든** 분기가 renderPlaceSelectionInfo() 로 끝난다(구멍 B 재발 방지)', () => {
-    const body = functionBody(app, 'renderSlotList');
-    const hits = body.match(/renderPlaceSelectionInfo\(\)/g) ?? [];
-    expect(hits.length, 'fileMode/finalized 분기 + else 분기 = 2회').toBeGreaterThanOrEqual(2);
-  });
-
-  it('T7 ggPreview 미선택 early-return 은 안내 문구를 남긴다(이중 방어 유지)', () => {
-    const body = functionBody(app, 'ggPreview');
-    expect(body).toMatch(/if \(!ref\)/);
-    expect(body).toContain('기준 주차면을 주차면 목록에서 먼저 선택하세요');
-  });
-
-  it('T8 게이트 사유는 눈에 띄게 강조된다(.gg-warn)', () => {
-    expect(sel).toContain('setGgGate(');
-    const gate = functionBody(app, 'setGgGate');
-    expect(gate).toContain("classList.add('gg-warn')");
-    expect(gate).toContain("classList.remove('gg-warn')");
-    expect(css).toContain('.gg-warn');
-  });
-
-  it('T8b 게이트 해제 시 텍스트를 지우지 않는다(미리보기 성공 문구 보존)', () => {
-    const gate = functionBody(app, 'setGgGate');
-    // else 분기(=해제)에는 textContent 대입이 없어야 한다.
-    const elseBranch = gate.slice(gate.indexOf('} else {'));
-    expect(elseBranch).not.toContain('textContent');
+  it('남은 UI 는 자기 자신만 부른다(끊긴 호출 0)', () => {
+    // 선택 갱신 사슬에서 패널 동기화 호출이 빠졌는지 — 남아 있으면 ReferenceError 로 목록 렌더가 죽는다.
+    expect(functionBody(app, 'renderPlaceSelectionInfo')).not.toContain('Gg');
+    expect(functionBody(app, 'drawRoiOverlay')).not.toContain('AutoRoi');
   });
 });
 
-describe('승인 = _auto 기록 → 백업 → 정본 갱신 → DB 전량 재구성 (정직성 강제)', () => {
-  const apply = functionBody(app, 'ggApply');
-
-  it('confirm 본문에 3단계와 **복구되지 않는 것**이 문장으로 들어 있다', () => {
-    expect(apply).toContain('confirm(');
-    expect(apply).toContain('PtzCamRoi_auto.json');
-    expect(apply).toContain('백업(.bak)');
-    expect(apply).toContain('slot_setup 을 전량 재구성');
-    // Q3 정직성: 무엇이 복구되고 무엇이 안 되는가를 분리해 적는다.
-    expect(apply).toContain('slot_roi 는 복구되지만 검출·점유·센터링 데이터는 복구되지 않습니다');
-    expect(apply).toContain('DELETE+INSERT');
+describe('서버 경로는 그대로(UI 제거는 UI 에서 끝난다)', () => {
+  it('groundGridRoutes.ts 는 남아 있고 /capture/ground-grid/* 를 그대로 제공한다', () => {
+    const routes = readFileSync(fileURLToPath(new URL('../src/api/groundGridRoutes.ts', import.meta.url)), 'utf-8');
+    expect(routes).toContain('/capture/ground-grid/bootstrap');
+    expect(routes).toContain('/capture/ground-grid/apply');
   });
 
-  it('기존 재구성 경로를 재사용한다(60줄 복사 금지 — runLoadRoiToDb 호출)', () => {
-    expect(apply).toContain('runLoadRoiToDb()');
-    // 자체 fetch 로 load-roi 를 직접 부르지 않는다(후처리 순서 중복 금지).
-    expect(apply).not.toContain('/capture/slots/load-roi');
-  });
-
-  it('loadRoiToDb 는 confirm + 추출된 본문 호출로만 남는다', () => {
-    const body = functionBody(app, 'loadRoiToDb');
-    expect(body).toContain('confirm(');
-    expect(body).toContain('runLoadRoiToDb()');
-    expect(body).not.toContain('fetch(');
-  });
-
-  it('S6 실패는 "파일 갱신 · DB 는 이전 상태 유지" 로 안내한다(안전 실패 모드)', () => {
-    expect(apply).toContain('파일은 갱신됐으나 DB 재구성 실패');
-    expect(apply).toContain('현재 DB 는 이전 상태 유지');
-  });
-
-  it('성공 메시지에 백업 파일명과 _auto 기록이 드러난다(되돌리기 근거)', () => {
-    expect(apply).toContain('data.backupFile');
-    expect(apply).toContain('data.autoFile');
-  });
-
-  it('거부 시 사유가 숫자로 보인다(detail.nextSlots/currentSlots/missingIdx)', () => {
-    expect(apply).toContain('data.detail.nextSlots');
-    expect(apply).toContain('data.detail.currentSlots');
-    expect(apply).toContain('missingIdx');
-  });
-
-  // G5 거부는 idx 집합에 안 나타난다 — 프리셋별 raw 개수를 보여주지 않으면 사용자가 원인을 알 수 없다.
-  it('G5 거부의 소실 프리셋·개수(droppedRaw)가 화면에 드러난다', () => {
-    expect(apply).toContain('data.detail.droppedRaw');
-    expect(apply).toContain('소실 위험');
+  it('groundGridRoutes 는 DB 를 전혀 모른다(store import 0 · replaceSlotSetup 호출 0)', () => {
+    const src = readFileSync(fileURLToPath(new URL('../src/api/groundGridRoutes.ts', import.meta.url)), 'utf-8');
+    expect(src).not.toMatch(/\.replaceSlotSetup\s*\(/);
+    expect(src).not.toMatch(/import .*SqliteStore/);
   });
 });
 
 describe('replaceSlotSetup 호출자 봉인(신규 파괴 경로 0)', () => {
   /**
-   * 이번 변경은 `replaceSlotSetup` 호출자를 **1곳도 늘리지 않는다** — 승인은 기존 `POST /capture/slots/load-roi`
-   * 를 연쇄 호출할 뿐이다. 아래 3곳은 전부 **기존**이다(리더 지시의 2곳 = 런타임 서버 경로,
-   * `tools/migrateToSettingDb.ts` 는 1회성 CLI 이관 도구로 설계 §3 M 항목에 이미 잡혀 있다).
+   * 패널 제거는 `replaceSlotSetup` 호출자를 **1곳도 늘리거나 줄이지 않는다** —
+   * 패널의 승인은 기존 `POST /capture/slots/load-roi` 를 연쇄 호출할 뿐이었고, 그 라우트는 그대로 남는다.
    */
   it('src 전체에서 store.replaceSlotSetup(...) 호출부는 기존 3곳뿐', async () => {
     const { readdirSync, statSync } = await import('node:fs');
@@ -159,9 +106,10 @@ describe('replaceSlotSetup 호출자 봉인(신규 파괴 경로 0)', () => {
     expect(hits.sort()).toEqual(['capture/Finalizer.ts', 'capture/roiDbLoad.ts', 'tools/migrateToSettingDb.ts']);
   });
 
-  it('groundGridRoutes 는 DB 를 전혀 모른다(store import 0 · replaceSlotSetup 호출 0)', () => {
-    const src = readFileSync(fileURLToPath(new URL('../src/api/groundGridRoutes.ts', import.meta.url)), 'utf-8');
-    expect(src).not.toMatch(/\.replaceSlotSetup\s*\(/);
-    expect(src).not.toMatch(/import .*SqliteStore/);
+  it("'ROI 파일 로딩' 은 confirm + 추출된 본문 호출로만 남는다(패널 제거와 무관하게 유지)", () => {
+    const body = functionBody(app, 'loadRoiToDb');
+    expect(body).toContain('confirm(');
+    expect(body).toContain('runLoadRoiToDb()');
+    expect(body).not.toContain('fetch(');
   });
 });

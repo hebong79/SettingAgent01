@@ -79,6 +79,9 @@ import {
   movePlaceVertex, // 주차면 정점 1개 이동(순수, core.moveQuadVertex 위임)
 } from './placeDraw.js';
 import { mutFetch, getControlToken, setControlToken } from './token.js'; // 변이 요청 토큰 부착·보관(서버 변이 게이트 대응).
+// 도색선 자동검출(roi.auto.*) 응답 → 그릴 목록·요약 변환(순수). 뷰어는 서버 산출을 옮길 뿐 추정하지 않는다.
+import { autoPaintViewFor, autoPaintViews, autoQuadItems, slotScoreItems, autoPaintSummaryText, autoPaintIssues } from './autoPaint.js';
+import { apDoneSummary, apEta, apProgressAria, apProgressState } from './apProgress.js';
 // 점유 판정(OccupancyJudge)·점유영역 생성(computeOccupancyRegions)은 **서버 정본**으로 옮겼다
 // (POST /capture/slots/judge-occupancy — src/domain/occupancyJudge.ts + occupancyRegion.ts).
 // web/occupancy.js·web/occupancyRegion.js 는 서버 포팅본의 **파리티 기준변**이라 파일 자체는 남는다.
@@ -128,9 +131,9 @@ const state = {
   // '이 프리셋 전체삭제' 직전 **전체 맵** 스냅샷 { label, placeRoi }. '저장' 성공 시 소진. 1단계만(다중 undo 없음).
   // placeRoiBackup(자동보정 전용·프리셋 단위)과 절대 공유하지 않는다 — 전체삭제는 **다른 프리셋의 전역번호까지** 바꾼다.
   placeRoiUndo: null,
-  // 지면 격자 자동 ROI 미리보기(POST /capture/ground-grid/bootstrap 응답). 미리보기 전에는 null.
-  // 가산 레이어 전용 — 파일 ROI(state.placeRoi)를 **대체하지 않는다**(#roi-auto off 면 렌더 픽셀 동일).
-  autoRoi: null, // { camId, presetIdx, cols, rows, colStart, presets:[{presetIdx,pairs,unmatchedAuto,...}], constants, grid }
+  // 도색선 자동검출(roi.auto.detect / roi.auto.score) 최근 응답. 검출 전에는 null.
+  // 가산 레이어 전용 — 파일 ROI(state.placeRoi)를 **대체하지 않는다**(#roi-autopaint off 면 렌더 픽셀 동일).
+  autoPaint: null, // roi.auto.* result 원문 { presets:[...], summary? }
   parkingSlotsByKey: null, // 최종화 후 slot_setup(cam:preset → 행배열, GET /capture/slots). renderSlotList 소스(§06 H7).
   dbTablesLoaded: false, // DB 탭 콤보 1회 채움 가드.
   dbTable: '', // 현재 선택된 DB 테이블명.
@@ -311,6 +314,7 @@ function selectedSourceIsReal() {
 function updatePtzControlUi() {
   const real = selectedSourceIsReal();
   state.ptzStateReady = !real;
+  updateApSpecLabels(); // 화각 칸의 의미가 소스 종류에 따라 다르다(기준화각 vs 유효화각).
   $('ptz-control-mode').textContent = real ? '실카메라 · Hucoms PTZF' : '시뮬레이터 · Unity PTZ';
   $('ptz-control-mode').classList.toggle('real', real);
   $('ptz-control-note').textContent = real
@@ -447,7 +451,7 @@ function drawRoiOverlay() {
   drawOccupancyOverlay(ctx); // 점유율 오버레이 — mapping 미최종화(수집 중)에도 유효 → mapping 가드 이전.
   drawFileFloorRoi(ctx); // 파일 기반 바닥 ROI(PtzCamRoi.json) — 파일 모드 바닥 레이어 → mapping 가드 이전.
   drawDetectOverlay(ctx); // 라이브 VPD/LPD 검출 오버레이(§04) — 수집 중/미최종화에도 표시 → mapping 가드 이전.
-  drawAutoRoi(ctx); // 지면 격자 자동 바닥 ROI(가산 레이어, 주황) — #roi-auto off 면 기존 렌더와 픽셀 동일.
+  drawAutoPaint(ctx); // 도색선 자동검출(가산 레이어, 시안) — #roi-autopaint off 면 기존 렌더와 픽셀 동일.
   drawPlaceDrawOverlay(ctx); // 주차면 신규 그리기 미리보기·정점 핸들(가산) — mapping 없는 신규 주차장에서도 보여야 하므로 가드 이전.
   drawCuboidOverlay(ctx); // 3D 육면체(가산 레이어) — 산출물 없이도(수집 중/파일 모드) 그린다 → mapping 가드 이전.
   drawVehicleCuboidOverlay(ctx); // 차량 3D 육면체(det 권위 + seg 마스크 접지선) — 토글 off 면 기존 렌더와 픽셀 동일.
@@ -455,6 +459,7 @@ function drawRoiOverlay() {
   updateGroundBadge(); // 어느 지면모델이 표시 중인지 항상 안다(소스 배지).
   updateAnchorBadge(); // 2 DOF 앵커 지표(차량 접지선 vs 슬롯 격자).
   updateVehicleCuboidBadge(); // ⚠️ 화면이 거짓말하지 않게 — "미검증 추정" + 정합 요약을 **항상** 드러낸다.
+  renderApTarget(); // 도색선 자동검출의 대상(현재 cam:preset)을 항상 보이게(신규 엘리먼트만 갱신 — 기존 렌더 무영향).
   if (state.roiHidden || !state.mapping) return; // 초기화/수집 중엔 ROI(차량/번호판/바닥) 표시 안 함.
   const key = presetKey(state.cam, state.preset);
   const showVehicle = $('roi-vehicle').checked;
@@ -727,18 +732,17 @@ function drawPlaceDrawOverlay(ctx) {
 }
 
 /**
- * 지면 격자 자동 바닥 ROI 오버레이(#roi-auto) — **가산 레이어**.
- * 파일 ROI(초록 #39ff14)를 대체하지 않고 **겹쳐** 그린다(겹쳐보기가 목적). 색은 주황으로 구분한다.
- * 근거는 서버 미리보기(state.autoRoi) 하나뿐 — 뷰어는 격자를 추정하지 않는다(추정은 전부 서버 소유).
- * 기존 슬롯과 매칭된 quad 는 실선(라벨=전역 idx), 매칭 없는 신규 후보는 점선(라벨=셀 좌표)으로 구분한다.
+ * 도색선 자동검출 오버레이(#roi-autopaint) — **가산 레이어**.
+ * 근거는 서버 응답(state.autoPaint) 하나뿐이다. 뷰어는 quad 를 만들지도 IoU 를 재계산하지도 않는다.
+ * · 실선 시안 = 자동 산출 quad(라벨 = 격자 인덱스). 색은 파일 초록·격자 주황·육면체 보라와 구분한다.
+ * · 채점(roi.auto.score)했을 때만 **수동 슬롯**을 점선 시안으로 덧그리고 그 위에 `IoU 0.97` 을 쓴다
+ *   — IoU 는 수동 슬롯 기준으로 측정된 값이고, 자동 quad ↔ 슬롯 귀속은 응답에 없다(autoPaint.js slotScoreItems 주석).
  */
-function drawAutoRoi(ctx) {
-  if (!$('roi-auto')?.checked || !state.autoRoi) return;
+function drawAutoPaint(ctx) {
+  if (!$('roi-autopaint')?.checked || !state.autoPaint) return;
   const key = currentFrameKey();
-  const [cam, preset] = key.split(':').map(Number);
-  if (cam !== state.autoRoi.camId) return; // 다른 카메라 프레임 → 표시 안 함.
-  const p = (state.autoRoi.presets ?? []).find((x) => x.presetIdx === preset);
-  if (!p) return;
+  const view = autoPaintViewFor(state.autoPaint, key);
+  if (!view) return; // 다른 카메라·프리셋 프레임 → 표시 안 함.
   ctx.save();
   const stroke = (quad, dashed, label) => {
     const pts = toPixelQuad(quad, overlay.width, overlay.height);
@@ -746,14 +750,19 @@ function drawAutoRoi(ctx) {
     ctx.beginPath();
     pts.forEach((q, i) => (i ? ctx.lineTo(q.px, q.py) : ctx.moveTo(q.px, q.py)));
     ctx.closePath();
-    ctx.strokeStyle = '#ff9f1c'; // 자동=주황(파일 초록·육면체 보라와 구분).
+    ctx.strokeStyle = '#00e5ff'; // 도색선 자동=시안.
     ctx.lineWidth = 2;
     ctx.stroke();
-    ctx.fillStyle = '#ff9f1c';
+    ctx.fillStyle = '#00e5ff';
     ctx.fillText(label, pts[0].px + 2, pts[0].py - 4);
   };
-  for (const pair of p.pairs ?? []) stroke(pair.quadNorm, false, `auto#${pair.slotIdx} IoU ${pair.iou.toFixed(2)}`);
-  for (const u of p.unmatchedAuto ?? []) stroke(u.quadNorm, true, `신규? ${u.cell}`);
+  for (const q of autoQuadItems(view)) stroke(q.quadNorm, false, q.label);
+  // 면별 점수는 채점했을 때만 나온다(검출만 했으면 slots 가 비어 루프가 돌지 않는다 → 검출 라벨은 인덱스뿐).
+  for (const s of slotScoreItems(view)) {
+    const quad = placeQuadOf(state.placeRoi, key, s.slotIdx);
+    if (!quad?.length) continue; // 정본에 그 면이 없으면 붙일 자리가 없다 → 조용히 skip.
+    stroke(quad, true, s.label);
+  }
   ctx.restore();
 }
 
@@ -1324,7 +1333,7 @@ function renderSlotList() {
   const finalized = !!(state.parkingSlotsByKey && Object.keys(state.parkingSlotsByKey).length);
   // 파일 ROI 에 면이 하나라도 있으면 artifact(state.mapping) 유무와 무관하게 이 평면 목록을 쓴다.
   // 근거: 이 조건이 없으면 artifact 가 있는 환경에서 **새로 그린 파일 ROI 면이 목록에 안 보여** 선택할 수 없고,
-  //       선택이 없으면 지면격자 미리보기(ggRefSpace)에 도달할 수 없다. 오버레이(drawFileFloorRoi)는 이미
+  //       선택이 없으면 수정·삭제·정점 편집에 도달할 수 없다. 오버레이(drawFileFloorRoi)는 이미
   //       mapping 과 무관하게 파일 ROI 를 그리고 있었으므로 목록을 그 소스에 맞추는 쪽이 정합이다.
   const fileMode = !FLOOR_ROI_USE_LLM && (state.roiHidden || !state.mapping || placeSpaceCount() > 0);
   if (finalized || fileMode) {
@@ -2108,218 +2117,268 @@ async function deletePreset() {
   }
 }
 
-// --- 지면 격자(자동 바닥 ROI) 패널 — 미리보기·승인 적용 -------------------------
-// 정본 흐름: 격자 → PtzCamRoi.json → slot_setup(파생). 뷰어는 서버 산출을 표시만 한다(추정 0).
-// 수동 경로('면 그리기' — 캔버스 4점, placeDraw.js)와는 **가산 관계**다. 이 패널은 어떤 기존 동작도 바꾸지 않는다.
+// --- 도색선 자동검출 패널(roi.auto.detect / roi.auto.score) — **읽기 전용** ----------
+// 위 '지면 격자' 와 근거가 다르다: 격자는 기준 주차면 1개를 씨앗으로 펼치고, 이쪽은 바닥 도색선만으로 4점을 세운다.
+// ★ `roi.auto.apply`(정본 PtzCamRoi.json 덮어쓰기)는 **여기에 배선하지 않는다** — 마스터 별도 승인 사항이다.
 
-function setGgMsg(text) {
-  const el = $('gg-msg');
+let apTimer = null; // 진행 경과 타이머. 다시점 합의는 프리셋당 ~70초라 표시가 없으면 멈춘 화면으로 보인다.
+
+/**
+ * POST `/rpc` — **SettingAgent 자신의 RPC 평면**(src/rpc/routes.ts, JSON-RPC 2.0).
+ *
+ * ★ 왜 기존 `callRpc` 를 안 쓰는가: 그쪽은 `/viewer/api/rpc` = **Unity 프록시**다(옵션탭 RPC 콘솔 전용).
+ *   `roi.auto.*` 는 셋팅 서버 자신의 메서드라 경로가 다르고, callRpc 를 고치면 Unity 콘솔이 깨진다.
+ * 토큰 규약은 동일하다 — POST 이므로 mutFetch 로 보낸다(웹 규약: 변이 fetch 는 전부 mutFetch, token.js).
+ */
+async function settingRpc(method, params) {
+  const res = await mutFetch('/rpc', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: Date.now(), method, params: params ?? {} }),
+  });
+  const data = await res.json().catch(() => ({}));
+  return { status: res.status, result: data.result ?? null, error: data.error ?? null };
+}
+
+function setApMsg(text) {
+  const el = $('ap-msg');
   if (el) el.textContent = text;
 }
 
 /**
- * 게이트 사유 표시. text 가 있으면 `#gg-msg` 에 문구 + 경고 강조(.gg-warn),
- * 비면 **강조만 해제**하고 텍스트는 건드리지 않는다(미리보기 성공 문구가 지워지면 안 된다).
+ * 대상 표시 — 별도 입력 없이 **현재 화면의 소스 + cam:preset** 을 쓴다는 사실을 눈에 보이게 한다.
+ * ★ 소스를 함께 적는 이유(17회차 사고): 소스를 안 보내던 시절 서버는 기동 시 고정된 카메라로 찍었고,
+ *   실카 화면 위에 시뮬 프레임으로 계산한 사각형이 그려졌다. 화면이 대상 소스를 말하지 않으면 재발한다.
  */
-function setGgGate(text) {
-  const el = $('gg-msg');
-  if (!el) return;
-  if (text) {
-    el.textContent = text;
-    el.classList.add('gg-warn');
-  } else {
-    el.classList.remove('gg-warn');
+function renderApTarget() {
+  const el = $('ap-target');
+  if (el) el.textContent = `대상 ${state.source || '(기본)'} · ${currentFrameKey()} (현재 화면)`;
+}
+
+/** 패널 숫자 입력 1건. 비었거나 숫자가 아니면 undefined(= 서버 자동 해석). */
+function apNum(id) {
+  const raw = $(id)?.value?.trim();
+  if (!raw) return undefined;
+  const v = Number(raw);
+  return Number.isFinite(v) ? v : undefined;
+}
+
+/**
+ * 카메라 제원 입력 3종 → 서버 파라미터. **빈 칸은 보내지 않는다**(비우면 서버가 자동 해석).
+ *
+ * ★ 20회차 — 화각 칸의 **의미가 소스 종류에 따라 다르다**:
+ *   시뮬 계열 → `baseHfovDeg`(줌 1 기준). 서버가 `f = f@zoom1 × zoom` 으로 현재 줌을 곱한다.
+ *   실카      → `hfovDeg`(그 프레임의 유효 화각). 실카 `zoomHfov` 실측표가 이미 유효 화각이고,
+ *              뷰어 zoom 과 실카 광학 배율의 관계는 **미측정**이라 ×zoom 할 근거가 없다.
+ *   서버가 조용히 재해석하지 않도록 보내는 쪽에서 가른다(서버는 `baseHfovDeg`+실카를 명시 거부한다).
+ */
+function apCameraSpec() {
+  const spec = {};
+  const heightM = apNum('ap-height');
+  const tiltDeg = apNum('ap-tilt');
+  const hfovDeg = apNum('ap-hfov');
+  if (heightM !== undefined) spec.heightM = heightM;
+  if (tiltDeg !== undefined) spec.tiltDeg = tiltDeg;
+  if (hfovDeg !== undefined) {
+    if (selectedSourceIsReal()) spec.hfovDeg = hfovDeg;
+    else spec.baseHfovDeg = hfovDeg;
+  }
+  return Object.keys(spec).length ? spec : undefined;
+}
+
+/** 화각 칸의 라벨·placeholder 를 소스 종류에 맞춘다(위 apCameraSpec 의 분기와 같은 근거). */
+function updateApSpecLabels() {
+  const real = selectedSourceIsReal();
+  const label = $('ap-hfov-label');
+  const input = $('ap-hfov');
+  if (label) label.textContent = real ? '수평화각(유효)' : '기준 수평화각(줌1)';
+  // ★ 21회차 D3 — 실카는 **비우는 것이 정답**이다(실측표가 그 줌의 유효 화각을 준다). 예시값을 보여 주면
+  //   광각단 사양값(58°)을 유효 화각으로 넣는 함정을 유도한다 — 마스터가 실제로 그렇게 했다.
+  if (input) input.placeholder = real ? '비워라(실측표 자동)' : '줌1 기준 · 예 58';
+  const tiltInput = $('ap-tilt');
+  if (tiltInput) tiltInput.placeholder = real ? '비워라(장비 tiltpos 자동)' : '도 · 양수=아래';
+}
+
+/** 응답이 밝힌 **실제로 찍은 소스**. 이 표기가 없으면 어느 카메라의 산출물인지 화면에서 알 수 없다. */
+function apUsedSourceText(result) {
+  const u = result?.usedSource;
+  return u ? `소스 ${u.id}${u.kind ? `(${u.kind})` : ''}` : '소스 —';
+}
+
+/** 요청 소스 ≠ 사용 소스면 경고를 앞에 붙인다(17회차 사고의 조기 경보). 일치하면 빈 문자열. */
+function apMismatchWarn(result, requested) {
+  const used = result?.usedSource?.id ?? null;
+  if (!requested || !used || used === requested) return '';
+  return `⚠️ 소스 불일치 — 요청 ${requested} / 실제 ${used}. 화면과 다른 카메라의 결과다. `;
+}
+
+/**
+ * 서버가 '⚠' 로 시작해 올린 issues 를 접이식 상자 밖으로 끌어낸다.
+ * ★ 이유: 단일점 화각표(줌 무반영)·틸트 부호 가정 같은 사실은 접혀 있으면 아무도 안 본다 —
+ *   조용히 두면 나중에 원인 불명 실패가 된다.
+ */
+function apCriticalWarnings(result) {
+  const out = [];
+  for (const g of result ? autoPaintIssues(result) : []) {
+    for (const i of g.issues) if (typeof i === 'string' && i.startsWith('⚠')) out.push(i);
+  }
+  return out;
+}
+
+/** issues 접이식 — 지상고 자가보정·재적합 로그가 여기 담긴다(진단 핵심). 없으면 상자를 숨긴다. */
+function renderApIssues(result) {
+  const box = $('ap-issues-box');
+  const el = $('ap-issues');
+  const groups = result ? autoPaintIssues(result) : [];
+  if (el) {
+    el.innerHTML = groups
+      .map((g) => `<div><strong>${escapeHtml(g.key)}</strong><ul>${g.issues.map((i) => `<li>${escapeHtml(i)}</li>`).join('')}</ul></div>`)
+      .join('');
+  }
+  if (box) box.hidden = groups.length === 0;
+}
+
+/**
+ * ★ 21회차 — 진행바 렌더(가산 레이어). 판정은 전부 `apProgress.js`(순수·테스트됨)가 하고
+ * 이 함수는 **DOM 반영만** 한다.
+ *
+ * ★ 불확정 구간에서는 `aria-valuenow` 를 **DOM 에서 제거**한다 — 남겨 두면 스크린리더에 거짓 진행률을 말한다.
+ */
+function renderApProgress(pstate) {
+  const box = $('ap-progress');
+  const track = $('ap-progress-track');
+  const fill = $('ap-progress-fill');
+  const label = $('ap-progress-label');
+  if (!box || !track || !fill || !label) return;
+  box.hidden = false;
+  track.hidden = false;
+  track.classList.toggle('indeterminate', !pstate.determinate);
+  fill.style.width = pstate.determinate ? `${pstate.percent}%` : '';
+  label.textContent = pstate.label;
+  label.classList.remove('done');
+  const aria = apProgressAria(pstate);
+  for (const k of ['role', 'aria-valuemin', 'aria-valuemax', 'aria-valuetext', 'aria-valuenow']) {
+    if (k in aria) track.setAttribute(k, aria[k]);
+    else track.removeAttribute(k); // 불확정 → aria-valuenow 제거.
   }
 }
 
-/** 선택된 주차면(기준 면) → { camId, presetIdx, quad } 또는 null. */
-function ggRefSpace() {
-  if (state.selectedPlaceIdx == null) return null;
-  for (const [key, spaces] of Object.entries(state.placeRoi ?? {})) {
-    const sp = (spaces ?? []).find((s) => s.idx === state.selectedPlaceIdx);
-    if (sp && sp.points?.length === 4) {
-      const [camId, presetIdx] = key.split(':').map(Number);
-      return { camId, presetIdx, quad: sp.points };
-    }
-  }
-  return null;
+/** 완료·실패 — 막대를 지우고 **결과 요약**으로 대체한다(시간이 아니라 결과를 말한다). */
+function renderApDone(text) {
+  const box = $('ap-progress');
+  const track = $('ap-progress-track');
+  const label = $('ap-progress-label');
+  if (!box || !track || !label) return;
+  box.hidden = false;
+  track.hidden = true;
+  track.classList.remove('indeterminate');
+  track.removeAttribute('aria-valuenow');
+  label.textContent = text;
+  label.classList.add('done');
 }
 
-/** 기준 주차면 선택 상태 표시 + 적용 버튼 잠금 갱신. */
-function renderGgSelectionInfo() {
-  const info = $('gg-sel-info');
-  if (!info) return;
-  const ref = ggRefSpace();
-  info.textContent = ref
-    ? `기준 주차면: #${state.selectedPlaceIdx} (cam${ref.camId} preset${ref.presetIdx})`
-    : '기준 주차면 미선택';
-  // 미리보기도 적용과 **같은 규약**으로 잠근다 — 미선택 시 눌러도 아무 일이 없던 '조용한 무반응'을 없앤다.
-  const prev = $('gg-preview');
-  if (prev) prev.disabled = !ref;
-  // 서버는 **파일**(PtzCamRoi.json)을 읽는다 — 메모리 버퍼의 미저장 편집은 부트스트랩에 반영되지 않는다.
-  if (ref && state.placeRoiDirty) setGgGate("미저장 편집이 있습니다 — '저장' 후 미리보기하세요(서버는 파일을 읽습니다)");
-  else setGgGate(ref ? '' : '기준 주차면을 주차면 목록에서 먼저 선택하세요(4점 폴리곤 1개) — 선택하면 미리보기가 열립니다');
-  const apply = $('gg-apply');
-  if (apply) apply.disabled = !($('gg-confirm')?.checked && state.autoRoi);
-}
-
-/** 미리보기·적용 공통 요청 본문. */
-function ggBody(ref) {
-  return {
-    camId: ref.camId,
-    presetIdx: ref.presetIdx,
-    quad: ref.quad,
-    cols: Math.max(1, Number($('gg-cols').value) || 1),
-    rows: Math.max(1, Number($('gg-rows').value) || 1),
-    colStart: Number($('gg-colstart').value) || 0,
-  };
-}
-
-/** 프리셋별 미리보기 표(생성 수 · 파일 수 · 매칭 · 평균 IoU · 적용 가능 · issues). */
-function renderGgTable(presets) {
-  const el = $('gg-table');
-  if (!el) return;
-  const rows = (presets ?? [])
-    .map(
-      (p) =>
-        `<tr><td>${p.presetIdx}</td><td>${p.generated}</td><td>${p.fileCount}</td><td>${p.matched}</td>` +
-        // 격자정합: matched=0 일 때 원인을 구분한다. onLattice=0 이면 '다른 주차열'(창을 옮겨도 안 됨).
-        `<td>${p.onLattice ?? '-'}/${p.fileCount}</td>` +
-        `<td>${p.medianResidM == null ? '-' : `${p.medianResidM.toFixed(2)}m`}</td>` +
-        `<td>${p.avgIoU == null ? '-' : p.avgIoU.toFixed(4)}</td>` +
-        `<td>${p.applicable ? 'OK' : '거부'}</td>` +
-        `<td>${(p.issues ?? []).join(' / ')}</td></tr>`,
-    )
-    .join('');
-  el.innerHTML =
-    '<table class="an-table"><thead><tr><th>프리셋</th><th>생성</th><th>파일</th><th>매칭</th>' +
-    '<th title="파일 슬롯 중 이 격자의 무한격자 위에 있는 수. 0 이면 다른 주차열이라 창을 어떻게 옮겨도 매칭 불가">격자정합</th>' +
-    '<th title="파일 슬롯 중심의 격자점 이탈 거리 중앙값">이탈</th>' +
-    '<th>평균 IoU</th><th>적용</th><th>issues</th></tr></thead><tbody>' +
-    (rows || '<tr><td colspan="9">결과 없음</td></tr>') +
-    '</tbody></table>';
-}
-
-/** '미리보기': 부트스트랩 + 전 프리셋 자동 quad 산출. **파일을 쓰지 않는다**. */
-async function ggPreview() {
-  const ref = ggRefSpace();
-  if (!ref) {
-    setGgMsg('기준 주차면을 주차면 목록에서 먼저 선택하세요(4점 폴리곤 1개)');
-    return;
-  }
-  if (state.placeRoiDirty) {
-    setGgMsg("미저장 편집이 있습니다 — 먼저 '저장'을 누르세요(서버는 메모리가 아니라 PtzCamRoi.json 파일을 읽습니다)");
-    return;
-  }
-  setGgMsg('미리보기 계산 중…');
-  try {
-    const res = await mutFetch('/capture/ground-grid/bootstrap', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(ggBody(ref)),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok || !data.ok) {
-      state.autoRoi = null;
-      renderGgTable([]);
-      // ⚠️ 알려진 한계(이번 범위로 해결 불가): 수동으로 그린 **단일 quad** 는 소실점 초점추정(focalFromVPs)이
-      //    f²≤0 로 실패할 수 있고, 폴백은 **같은 카메라의 다른 프리셋**을 요구한다. 1면뿐인 신규 주차장은
-      //    그 폴백 재료가 없다 → 실패를 숨기지 말고 사용자가 할 수 있는 행동을 준다.
-      setGgMsg(
-        `미리보기 실패: ${data.error ?? res.status}${data.issues?.length ? ` — ${data.issues.join(' / ')}` : ''}` +
-          ' · 같은 카메라의 다른 프리셋에도 주차면을 1개 그린 뒤 저장하고 다시 시도하세요(초점 추정에 프리셋 2개 이상이 필요할 수 있습니다)',
-      );
-      renderGgSelectionInfo();
-      drawRoiOverlay();
-      return;
-    }
-    state.autoRoi = { camId: ref.camId, ...data };
-    renderGgTable(data.presets);
-    const c = data.constants ?? {};
-    setGgMsg(
-      `부트스트랩: 카메라고 d=${Number(c.d).toFixed(3)}m · fovBaseV=${Number(c.fovBaseV).toFixed(3)}° · ` +
-        `격자 θ=${Number(data.grid?.thetaDeg).toFixed(2)}° ${data.grid?.rows}행×${data.grid?.cols}열 ` +
-        `(피치 ${data.grid?.colPitchM}m/${data.grid?.rowPitchM}m). '자동ROI' 토글로 겹쳐보기.` +
-        (data.issues?.length ? ` ⚠ ${data.issues.join(' / ')}` : ''),
+/**
+ * '검출' / '검출 + 채점' 실행. 대상은 현재 프리셋 1건이고 파일·DB 를 쓰지 않는다.
+ * mode: 'detect' | 'score'.
+ */
+async function apRun(mode) {
+  const [cam, preset] = currentFrameKey().split(':').map(Number);
+  const consensus = Boolean($('ap-consensus')?.checked);
+  // ★ 20회차 — 「검출」의 기본은 **현재 화면 그대로**(체크박스 기본 checked). 채점은 수동 정본 대비라
+  //   프리셋 종속이므로 현재뷰를 지원하지 않는다(서버가 거부한다) → score 는 항상 preset.
+  const currentView = mode !== 'score' && Boolean($('ap-currentview')?.checked);
+  const label = mode === 'score' ? '검출 + 채점' : '검출';
+  const buttons = [$('ap-detect'), $('ap-score')];
+  const started = Date.now();
+  // ★ 21회차 — 예상 시간은 **실측 근거를 가진 한 곳**(apProgress.js)에서 받는다. 문구는 종전과 동일하고
+  //   실카(RTSP 스냅샷이 ~2.5초 느리다)만 새로 갈린다. 진행바가 같은 값을 쓰므로 표시와 막대가 어긋나지 않는다.
+  const etaInfo = apEta({ currentView, consensus, real: selectedSourceIsReal() });
+  const eta = etaInfo.text;
+  const elapsed = () => Math.round((Date.now() - started) / 1000);
+  const source = state.source || undefined; // 뷰어가 **보고 있는 그 소스**로 찍게 한다(미지정 시 서버 기본 카메라).
+  // ★ 21회차 D1 — 칸에 `0` 이 있으면 `apNum` 은 0 을 그대로 준다(빈 칸만 undefined). 서버 스키마는
+  //   `int().min(1)` 이라 **invalid params 로 거부**된다(마스터가 실제로 본 에러). 서버 의미로 **0 = 「모른다」**
+  //   이므로(`coverageDenom` 이 `expectedBays >= 1` 로 갈린다) 1 미만·비정수는 **보내지 않는다.**
+  //   ★ 조용히 무시하지 않는다 — 무엇을 어떻게 처리했는지 화면에 적는다.
+  const baysRaw = apNum('ap-bays');
+  const expectedBays = Number.isInteger(baysRaw) && baysRaw >= 1 ? baysRaw : undefined;
+  const baysDropped = baysRaw !== undefined && expectedBays === undefined;
+  for (const b of buttons) if (b) b.disabled = true;
+  // ★ 21회차 — 「예상 주차면 수」는 **선택**이다. 비우면 서버가 커버리지 분모를 위상 불변식으로 바꿔
+  //   개수를 아예 쓰지 않는다(A 조건 실측: bays 1~16 전 구간 재현율 0.6000 동일). 종전 필수 경고는 제거했다.
+  //   값을 넣으면 구 방식(면수 기반)으로 검출한다 — 회귀 비교용이며 20b 의 민감도가 그대로 남는다.
+  const baysWarn = baysDropped
+    ? `⚠️ 예상 주차면 수 ${baysRaw} 은 **미지정으로 처리했다**(1 이상 정수만 쓴다 — 0 은 「모른다」와 같은 뜻이다). 개수를 쓰지 않고 검출한다. `
+    : expectedBays !== undefined
+      ? '⚠️ 예상 주차면 수를 입력했다 — 구 방식(면수 기반 커버리지)으로 검출한다. 비우면 개수를 쓰지 않는다. '
+      : '';
+  const tick = () => {
+    // 기존 텍스트 메시지는 **한 글자도 바꾸지 않는다**(가산 레이어).
+    setApMsg(
+      `${baysWarn}${label} 중… ${elapsed()}초 경과 (예상 ${eta} · ${source ?? '기본 소스'} · cam ${cam} ` +
+        `${currentView ? '현재 화면 그대로' : `preset ${preset}`})`,
     );
-    $('roi-auto').checked = true; // 미리보기를 냈으면 바로 보이게 한다(가산 레이어라 기존 렌더는 그대로).
-  } catch (e) {
-    state.autoRoi = null;
-    setGgMsg(`미리보기 실패(네트워크): ${e}`);
-  }
-  renderGgSelectionInfo();
-  drawRoiOverlay();
-}
-
-/** '승인 후 적용': 적용 가능한 프리셋만 PtzCamRoi.json 에 반영. 실패 시 파일 무변경(서버 게이트). */
-async function ggApply() {
-  const ref = ggRefSpace();
-  if (!ref || !state.autoRoi) {
-    setGgMsg('먼저 미리보기를 실행하세요');
-    return;
-  }
-  const targets = (state.autoRoi.presets ?? []).filter((p) => p.applicable).map((p) => p.presetIdx);
-  if (!targets.length) {
-    setGgMsg('적용 가능한 프리셋이 없습니다(표의 issues 확인) — 파일 무변경');
-    return;
-  }
-  // ★ 파괴 성질을 사용자가 읽을 문장으로 명시한다(문서에만 적고 UI 에서 빼지 않는다).
-  if (
-    !confirm(
-      '자동 ROI 를 적용합니다.\n\n' +
-        `1) PtzCamRoi_auto.json 에 자동 산출분을 기록합니다(감사 기록 — 삭제하지 않습니다).\n` +
-        '2) PtzCamRoi.json 을 백업(.bak)한 뒤 갱신합니다.\n' +
-        `3) DB slot_setup 을 전량 재구성합니다(preset ${targets.join(',')}).\n\n` +
-        '★ 3)에서 기존 검출(VPD/LPD)·점유영역·센터라이징(PTZ)은 모두 사라집니다.\n' +
-        '   나중에 수동 소스로 재구성하면 slot_roi 는 복구되지만 검출·점유·센터링 데이터는 복구되지 않습니다\n' +
-        '   (replaceSlotSetup 이 DELETE+INSERT 이므로 — 재수집·재센터링이 필요합니다).\n\n' +
-        '진행할까요?',
-    )
-  ) {
-    setGgMsg('적용 취소됨 — 파일·DB 무변경');
-    return;
-  }
-  setGgMsg(`적용 중… (preset ${targets.join(',')})`);
-  let head = '';
+    renderApProgress(apProgressState(Date.now() - started, etaInfo.ms));
+  };
+  tick();
+  // 막대는 1초 간격 텍스트보다 촘촘히 움직여야 "멈춘 것"으로 보이지 않는다(텍스트 갱신 주기는 종전 1초 유지).
+  apTimer = setInterval(tick, 250);
   try {
-    const res = await mutFetch('/capture/ground-grid/apply', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ ...ggBody(ref), confirm: true, presets: targets, refSpaceIdx: state.selectedPlaceIdx ?? undefined }),
+    const { status, result, error } = await settingRpc(mode === 'score' ? 'roi.auto.score' : 'roi.auto.detect', {
+      camId: cam,
+      presetIdx: preset,
+      consensus, // 스키마 기본이 true 라 **항상 명시**한다(체크 해제 = 단일 시점).
+      // 와이어 기본값은 'preset'(하위호환) 이므로 화면의 기본(현재뷰)을 **항상 명시 전송**한다.
+      view: currentView ? 'current' : 'preset',
+      source,
+      expectedBays, // 비면 undefined → 직렬화에서 빠진다(서버가 정본 면수를 쓴다 = 기존 동작).
+      cameraSpec: apCameraSpec(), // 비면 undefined → JSON 직렬화에서 빠진다(서버가 자동 해석).
     });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok || !data.ok) {
-      const detail = data.detail
-        ? ` (대상 ${data.detail.nextSlots}면 / 현재 ${data.detail.currentSlots}면` +
-          (data.detail.missingIdx?.length ? ` · 사라진 idx ${data.detail.missingIdx.join(',')}` : '') +
-          // G5: idx 없는 주차면은 idx 집합에 안 나타나므로 프리셋별 raw 개수로 보여준다.
-          (data.detail.droppedRaw?.length ? ` · 소실 위험 ${data.detail.droppedRaw.map((e) => `${e.key} ${e.from}→${e.to}면`).join(' ')}` : '') +
-          ')'
-        : '';
-      setGgMsg(`적용 실패(파일 무변경): ${data.error ?? res.status}${detail}${data.issues?.length ? ` — ${data.issues.join(' / ')}` : ''}`);
+    if (error || !result) {
+      state.autoPaint = null;
+      renderApIssues(null);
+      // 서버 문구를 그대로 보여준다(진단 일원화) — BUSY(카메라 점유)·UNAVAILABLE(미배선)이 여기로 온다.
+      setApMsg(`${label} 실패: ${error?.message ?? `HTTP ${status}`}${error?.data ? ` — ${JSON.stringify(error.data)}` : ''}`);
       return;
     }
-    head =
-      `적용됨: ${data.applied.map((a) => `preset${a.presetIdx}(${a.spaceCount}면)`).join(' ')} — ` +
-      `${data.autoFile ?? 'PtzCamRoi_auto.json'} 기록 · 백업 ${data.backupFile ?? '-'} · PtzCamRoi.json 갱신` +
-      (data.issues?.length ? ` ⚠ ${data.issues.join(' / ')}` : '');
+    // ★ 제원 미상 거부 — 서버가 **검출을 수행하지 않았다**. 무엇이 없는지 화면에 그대로 보여준다.
+    //   여기서 이전 결과를 남겨두면 거부 메시지 아래에 옛 사각형이 계속 그려져 화면이 거짓말을 한다.
+    if (result.rejected) {
+      state.autoPaint = null;
+      renderApIssues(null);
+      setApMsg(`${label} 거부 — ${apUsedSourceText(result)}: ${(result.missing ?? []).join(' / ')}${result.note ? ` — ${result.note}` : ''}`);
+      renderApDone(apDoneSummary({ ok: false, reason: `거부 — ${(result.missing ?? []).join(' / ') || result.gradeReason || '제원 부족'}`, elapsedMs: Date.now() - started }));
+      return;
+    }
+    state.autoPaint = result;
+    renderApIssues(result);
+    const warns = apCriticalWarnings(result);
+    setApMsg(
+      `${baysWarn}${apMismatchWarn(result, source)}${autoPaintSummaryText(result)} · ${apUsedSourceText(result)} · ${elapsed()}초 소요` +
+        (warns.length ? `\n${warns.join('\n')}` : ''),
+    );
+    // ★ 진행바 → 결과 요약(검출 면수 · 프레임 해시 · 실제 소요). 값은 서버 산출을 그대로 옮긴다.
+    const doneView = autoPaintViews(result)[0] ?? null;
+    renderApDone(
+      apDoneSummary({
+        ok: true,
+        quads: doneView ? doneView.quads.length : null,
+        frameHash: doneView ? doneView.frameHash : null,
+        elapsedMs: Date.now() - started,
+      }),
+    );
+    $('roi-autopaint').checked = true; // 결과를 냈으면 바로 보이게(사용자 명시 조작 직후에만. 가산 레이어라 기존 렌더는 그대로).
   } catch (e) {
-    setGgMsg(`적용 실패(네트워크): ${e}`);
-    return;
-  }
-  // 승인 1회가 재구성까지 수행한다 — 기존 라우트를 그대로 연쇄 호출(신규 DB 경로 0).
-  setGgMsg(`${head} — DB slot_setup 재구성 중…`);
-  const dbOk = await runLoadRoiToDb();
-  if (!dbOk) {
-    // 안전 실패 모드: 파일은 앞서고 DB 는 직전 정상값을 유지한다(재시도로 수렴).
-    setGgMsg(`${head} — 파일은 갱신됐으나 DB 재구성 실패 — 'ROI 파일 로딩' 으로 재시도하세요(현재 DB 는 이전 상태 유지)`);
-    state.placeRoiLoaded = false;
-    await loadPlaceRoi(); // 갱신된 파일을 다시 읽어 화면(초록 파일 ROI)을 정본과 맞춘다.
-    renderSlotList();
+    state.autoPaint = null;
+    renderApIssues(null);
+    setApMsg(`${label} 실패(네트워크): ${e}`);
+    renderApDone(apDoneSummary({ ok: false, reason: `네트워크 — ${e}`, elapsedMs: Date.now() - started }));
+  } finally {
+    clearInterval(apTimer);
+    apTimer = null;
+    for (const b of buttons) if (b) b.disabled = false;
     drawRoiOverlay();
-    return;
   }
-  setGgMsg(`${head} — DB slot_setup 전량 재구성 완료`);
 }
 
 // --- 주차면 목록 편집(PtzCamRoi.json 전역 인덱스) — 선택·수정·삭제·저장·열기(R4) ---
@@ -2354,12 +2413,10 @@ function renderPlaceSelectionInfo() {
   if (state.selectedPlaceIdx == null) {
     info.textContent = '선택된 주차면 없음';
     delBtn.disabled = true;
-    renderGgSelectionInfo();
     return;
   }
   info.textContent = `선택: #${state.selectedPlaceIdx}`;
   delBtn.disabled = false;
-  renderGgSelectionInfo(); // 지면 격자 패널의 '기준 주차면' 표시를 같은 선택에 동기화(가산).
 }
 
 /** 총 주차면 수(전역 인덱스 N). */
@@ -2526,7 +2583,7 @@ function undoPlaceRoi() {
 
 /**
  * 바닥 표시 토글(#roi-floor)을 켠다 — **사용자 명시 조작 직후에만** 호출한다
- * (ggPreview 가 `$('roi-auto').checked = true` 로 강제 ON 하는 것과 같은 규약. 자동 폴링·렌더 루프에서는 절대 호출 금지).
+ * (자동 폴링·렌더 루프에서는 절대 호출 금지).
  * 이 토글이 꺼져 있으면 drawFileFloorRoi(초록 파일 ROI)와 정점 핸들이 통째로 사라져 "찍어도 아무 일이 없다" 로 보인다.
  */
 function ensureFloorVisible() {
@@ -2590,7 +2647,7 @@ function placeDrawClick(e) {
   const points = draw.points;
   const { placeRoi, idx } = appendPlaceSpace(state.placeRoi, key, points);
   state.placeRoi = placeRoi;
-  state.selectedPlaceIdx = idx; // 지면격자 '기준 주차면'(ggRefSpace) 성립 — 미리보기 잠금 해제.
+  state.selectedPlaceIdx = idx; // 그린 직후 선택 상태로 둔다 — 수정·삭제·정점 편집이 바로 열린다.
   const gidx = $('place-gidx');
   if (gidx) gidx.value = String(idx);
   const vtx = $('place-edit-vertex');
@@ -3447,7 +3504,7 @@ async function loadRoiToDb() {
 }
 
 /**
- * 재구성 본문(확인 대화 없음). '지면 격자 승인' 연쇄가 같은 경로를 재사용한다 — 후처리 순서를 복사하지 않는다.
+ * 재구성 본문(확인 대화 없음). 확인 대화와 분리해 둔다 — 다른 호출자가 후처리 순서를 복사하지 않게.
  * 성공하면 true, 실패하면 false(호출자가 자기 메시지 영역에 안내한다).
  */
 async function runLoadRoiToDb() {
@@ -5113,7 +5170,7 @@ function wire() {
     if (e.target.checked) await loadParkingSlots();
     drawRoiOverlay();
   });
-  $('roi-auto').addEventListener('change', drawRoiOverlay); // 자동 바닥 ROI 가산 레이어 토글(기본 off → 회귀 0).
+  $('roi-autopaint').addEventListener('change', drawRoiOverlay); // 도색선 자동검출 가산 레이어 토글(기본 off → 회귀 0).
   $('roi-cuboid').addEventListener('change', drawRoiOverlay); // 3D 육면체 레이어 토글(기본 off → 회귀 0).
   $('roi-mask').addEventListener('change', drawRoiOverlay); // VPD seg 마스크 오버레이 토글(순수 렌더 — masks 는 detect 응답에 동승, 별도 로드 불필요).
   // 차량 육면체 토글(**기본 off** — 마스터 요청 2026-07-15: 시작 시 체크 해제).
@@ -5202,10 +5259,10 @@ function wire() {
   $('place-save').addEventListener('click', savePlaceRoi);
   $('place-open').addEventListener('click', openPlaceRoi);
 
-  // 지면 격자(자동 바닥 ROI): 미리보기 → 결과 확인 체크 → 승인 후 적용. 전부 가산(기존 경로 불변).
-  $('gg-preview').addEventListener('click', ggPreview);
-  $('gg-apply').addEventListener('click', ggApply);
-  $('gg-confirm').addEventListener('change', renderGgSelectionInfo); // 체크 없으면 적용 버튼 잠금.
+  // 도색선 자동검출: 검출 / 검출+채점. **읽기 전용**(roi.auto.apply 는 배선하지 않는다 — 마스터 별도 승인).
+  $('ap-detect').addEventListener('click', () => apRun('detect'));
+  $('ap-score').addEventListener('click', () => apRun('score'));
+  renderApTarget(); // 초기 1회 — 첫 렌더 전에도 대상이 비어 보이지 않게.
 
   // [기능2] 검출 박스 편집(임시): 삭제 버튼 + 단축키(Delete/Backspace=삭제, Esc=해제).
   $('det-delete').addEventListener('click', deleteSelectedDetect);

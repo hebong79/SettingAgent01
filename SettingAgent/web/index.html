@@ -43,8 +43,8 @@
             <label><input id="roi-floor" type="checkbox" /> 바닥</label>
             <label><input id="roi-occupancy" type="checkbox" checked /> 점유</label>
             <label title="체크하면 차량(VPD)·번호판(LPD)·점유영역·센터라이징 위치의 소스를 DB(slot_setup)로 전환해 표시한다(라이브 검출 대체). 켤 때마다 DB를 재조회한다. 표시는 각 항목 체크박스(차량/번호판/점유)를 따르며, DB에 값이 없는 항목(예: vpd_bbox=null)은 아무것도 그려지지 않는다"><input id="roi-db" type="checkbox" /> DB 보기</label>
-            <label title="지면 격자에서 자동 생성한 바닥 ROI를 주황색으로 **겹쳐** 표시(가산 레이어 — 파일 ROI를 대체하지 않는다). '지면 격자' 패널에서 미리보기를 만든 뒤 켜면 보인다">
-              <input id="roi-auto" type="checkbox" /> 자동ROI
+            <label title="도색선 기반 자동 주차면 검출(roi.auto.*) 결과를 시안색으로 **겹쳐** 표시(가산 레이어 — 파일 ROI를 대체하지 않는다). '도색선 자동검출' 패널에서 검출을 실행하면 자동으로 켜진다">
+              <input id="roi-autopaint" type="checkbox" /> 도색선
             </label>
             <label title="주차면을 3D 육면체로 표시(지면모델 기반). 기존 바닥 ROI 는 그대로 유지">
               <input id="roi-cuboid" type="checkbox" /> 육면체
@@ -176,33 +176,66 @@
         </section>
 
         <!--
-          지면 격자(자동 바닥 ROI). 주차면 1개를 그려서 **그 주차열** 전 슬롯을 자동 생성한다.
-          ⚠️ 한계: 하나의 격자 = 하나의 주차열이다. 카메라가 여러 주차열을 보면 열마다 1면씩 그려야 한다
-             (다른 열의 위상·방위는 1면으로 알 수 없다). 사선주차·불규칙 배치는 범위 밖 —
-             위 '주차면 목록 · 편집' 의 **면 그리기**(캔버스 4점)로 한 면씩 직접 그린다.
-          정본 흐름: 격자 → PtzCamRoi.json → slot_setup(파생). 적용은 승인 버튼에서만 일어난다.
+          도색선 자동검출(roi.auto.detect / roi.auto.score). 근거는 **바닥 도색선 이미지**뿐이다
+          (수동 ROI 좌표를 검출 입력으로 쓰지 않는다 — hold-out. 베이 개수·카메라 제원만 쓴다).
+          ★ 여기에는 정본을 쓰는 버튼이 없다. `roi.auto.apply`(PtzCamRoi.json 덮어쓰기)는 마스터 별도 승인 사항이라
+             UI 에 노출하지 않는다 — 이 패널은 **읽기 전용**이다(파일·DB 무접촉).
         -->
         <section class="panel-section">
-          <div class="section-title">지면 격자 (자동 바닥 ROI)</div>
+          <div class="section-title">도색선 자동검출 (읽기 전용)</div>
           <p class="gg-help">
-            기준 주차면 1개를 <strong>주차면 목록에서 선택</strong>한 뒤 열/행 수를 지정해 미리보기 →
-            결과를 확인하고 승인하면 <strong>3단계</strong>가 한 번에 실행된다:
-            ① <code>PtzCamRoi_auto.json</code> 기록(감사 기록 — 삭제하지 않는다)
-            ② <code>PtzCamRoi.json</code> 백업(<code>.bak</code>) 후 갱신
-            ③ DB <code>slot_setup</code> 전량 재구성. ③에서 기존 검출·점유영역·센터라이징은 사라진다.
-            자동 ROI 는 <strong>자동ROI</strong> 토글로 주황색 겹쳐보기가 된다.
+            바닥 <strong>도색선</strong>만으로 현재 프리셋의 주차면 4점을 세운다. 결과는
+            <strong>도색선</strong> 토글로 시안색 겹쳐보기가 된다(파일 ROI 초록과 구분).
+            <strong>검출 + 채점</strong>은 수동 정본 대비 IoU 를 같이 받아 면별 점수를 화면에 표시한다.
+            <strong>정본(PtzCamRoi.json)·DB 를 쓰지 않는다.</strong>
           </p>
           <div class="roi-edit-bar toolbar">
-            <span id="gg-sel-info" class="sel-slot-info">기준 주차면 미선택</span>
-            <label class="field">열 <input id="gg-cols" class="slot-insert-idx" type="number" min="1" max="200" value="7" title="폭 방향(피치 2.5m) 칸 수" /></label>
-            <label class="field">행 <input id="gg-rows" class="slot-insert-idx" type="number" min="1" max="50" value="1" title="깊이 방향(피치 5.0m) 칸 수. 주차통로가 있으면 행 확장은 틀린다 — 보통 1" /></label>
-            <label class="field">열시작 <input id="gg-colstart" class="slot-insert-idx" type="number" min="-200" max="200" value="0" title="기준 주차면을 0으로 볼 때 시작 열(선호값). 서버가 기존 슬롯 위치를 보고 자동 선택하므로 보통 0 그대로 두면 된다 — 동점일 때만 이 값이 쓰인다" /></label>
-            <button id="gg-preview" disabled title="부트스트랩 + 전 프리셋 미리보기(파일을 쓰지 않는다). 기준 주차면을 목록에서 선택해야 열린다">미리보기</button>
-            <label title="위 결과(생성 수·IoU·issues)를 확인했음을 확인한다. 체크해야 적용 버튼이 열린다"><input id="gg-confirm" type="checkbox" /> 결과 확인함</label>
-            <button id="gg-apply" class="primary" disabled title="승인 1회로 3단계: ① PtzCamRoi_auto.json 기록(감사) ② PtzCamRoi.json 백업(.bak) 후 갱신 ③ DB slot_setup 전량 재구성. ③에서 기존 검출(VPD/LPD)·점유영역·센터라이징은 모두 사라진다(수동 소스로 재구성해도 slot_roi 만 복구된다). 기존 슬롯 순서·번호는 보존되고 좌표만 교체된다">승인 후 적용</button>
+            <span id="ap-target" class="sel-slot-info">대상 —</span>
+            <button id="ap-detect" title="현재 프리셋 1건을 검출한다(roi.auto.detect). 파일·DB 무접촉">검출</button>
+            <button id="ap-score" title="검출 + 수동 정본 대비 채점(roi.auto.score). 면별 IoU 를 화면에 표시한다. 파일·DB 무접촉">검출 + 채점</button>
+            <label title="카메라를 프리셋으로 이동시키지 않고 지금 보이는 화면 그대로 검출한다(현재 PTZ 를 읽어 그 값으로 되쓰므로 이동 0). 끄면 종전대로 프리셋 위치로 이동한 뒤 찍는다(회귀 비교용). 실카에는 프리셋이 없으므로 켜야 한다. 켜면 다시점 합의는 무시된다(화면을 흔들지 않는다)">
+              <input id="ap-currentview" type="checkbox" checked /> 현재 화면 그대로
+            </label>
+            <label title="고정 디더 6시점을 찍어 행 선택을 다수결한다. 카메라를 6번 흔들어 찍으므로 소요시간이 6배다 — off ≈ 12초 / on ≈ 70초. 실카(hucoms)에서는 PTZ 이동을 보내지 않으므로 서버가 단일 시점으로 내린다. '현재 화면 그대로' 에서도 무시된다">
+              <input id="ap-consensus" type="checkbox" /> 다시점 합의
+            </label>
+            <label class="field" title="★ 21회차부터 비워도 된다(선택). 비우면 서버가 개수를 쓰지 않는 위상 불변 커버리지로 검출한다 — A 조건 실측에서 bays 1~16 전 구간 재현율 0.6000·매칭 IoU 0.92783 동일. 값을 넣으면 구 방식(면수 기반)으로 검출하며 20b 민감도가 남는다(같은 화면인데 6은 IoU 0.940, 8 이상은 반칸 어긋나 재현율 0). 회귀 비교용으로만 채워라. 프리셋 모드에서 비우면 기존 동작 = 정본 면수">예상 주차면 수 (선택·구방식 비교용)
+              <input id="ap-bays" type="number" step="1" min="1" max="200" placeholder="비워라(개수 미사용)" />
+            </label>
           </div>
-          <div id="gg-msg" class="map-msg"></div>
-          <div id="gg-table" class="an-table-wrap"></div>
+          <!--
+            카메라 제원 수동 지정(17회차). 비우면 서버가 자동 해석한다(시뮬 = PtzCamRoi.json 메타).
+            ★ 실카는 자동 해석으로 채울 수 없는 값이 있어(설치고 실측 없음 · 틸트 미검증) 비워두면 **검출이 거부**된다.
+               거부 사유(무엇이 없는지)는 아래 메시지에 그대로 표시된다.
+          -->
+          <div class="roi-edit-bar toolbar">
+            <span class="sel-slot-info">카메라 제원(비우면 자동)</span>
+            <label class="field" title="카메라 설치고(m). metric 스케일의 유일한 담지자다">설치고
+              <input id="ap-height" type="number" step="0.01" min="0" placeholder="m" />
+            </label>
+            <label class="field" title="하향 틸트(도) — 지평선 기준 아래로 내려다본 각이며 **양수 = 아래**다. ★ 실카는 비워 두는 것이 정답이다: 장비 PTZ 피드백(tiltpos ÷ 100)이 자동으로 쓰인다. ★ 위 PTZ 패널의 tilt 표시값을 여기 옮겨 적지 마라 — 그 값은 각도가 아니라 네이티브 tiltpos 를 [-90,90] 에 맞춘 위치다(실측: 뷰어 -29.978 = tiltpos 1668 = 하향 16.68°). 그대로 넣으면 하향이 음수가 되어 검출이 실패한다(서버가 그 경우를 알아보고 자동값으로 되돌리며 경고를 남긴다)">틸트
+              <input id="ap-tilt" type="number" step="0.1" placeholder="비워라(실카=장비 자동)" />
+            </label>
+            <label class="field" id="ap-hfov-field" title="줌 1 일 때의 수평화각(도). 유효 화각이 아니다 — 서버가 현재 줌을 곱한다(f = f@zoom1 × zoom). 비우면 시뮬은 프리셋 메타에서 파생하고, 실카는 lens_calibration.json 의 zoomHfov 실측표를 현재 줌으로 보간한다. ★ 실카는 비워 두는 것이 정답이다: 광각단 사양값(예 58°)을 유효 화각으로 넣으면 초점거리가 크게 어긋난다(real-camera-1 실측: 줌 11.59 의 실제 유효 화각 34.931° → 58° 를 넣으면 f 가 0.568배). 자동값과 15% 이상 다르면 서버가 경고한다"><span id="ap-hfov-label">기준 수평화각(줌1)</span>
+              <input id="ap-hfov" type="number" step="0.01" min="0" placeholder="줌1 기준 · 예 58" />
+            </label>
+          </div>
+          <!--
+            ★ 21회차 — 실행 진행바(마스터 요청). **기존 텍스트 메시지(#ap-msg)는 그대로 두고 위에 얹는다.**
+            거짓 진행률 금지: 예상 시간까지는 확정 폭, 넘기면 불확정 애니메이션으로 바뀌고 aria-valuenow 를 뗀다
+            (web/apProgress.js 가 그 판정을 하고 test/apProgress.test.ts 가 봉인한다).
+          -->
+          <div id="ap-progress" class="ap-progress" hidden>
+            <div id="ap-progress-track" class="ap-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100">
+              <div id="ap-progress-fill" class="ap-progress-fill"></div>
+            </div>
+            <span id="ap-progress-label" class="ap-progress-label"></span>
+          </div>
+          <div id="ap-msg" class="map-msg"></div>
+          <details id="ap-issues-box" hidden>
+            <summary>issues (지상고 자가보정·재적합 로그 — 진단 핵심)</summary>
+            <div id="ap-issues" class="an-table-wrap"></div>
+          </details>
         </section>
 
         <!-- 정밀 수집(장기 관측·반복 수집) 패널. precise 탭에서 표시. -->

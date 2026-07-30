@@ -39,6 +39,12 @@ export interface RpcDeps {
   cameraposFile?: string;
   /** 카메라 소스 레지스트리(plate.pickAt·cam.gotoPreset 의 source 지정). */
   sources?: Map<string, CameraSource>;
+  /**
+   * `camera`(파이프라인 기본 카메라)가 감싸고 있는 소스 id(= cameraRuntime.selectedCameraId).
+   * **응답에 "실제로 어느 소스로 찍었는가"를 적기 위한 값**이다 — 이게 없으면 소스 미지정 호출의
+   * 산출물이 어느 카메라의 것인지 사후에 알 수 없다(17회차: 실카 화면에 시뮬 검출을 그린 사고).
+   */
+  selectedCameraId?: string;
   cameraCfg?: ToolsConfig['camera'];
   /** 번호판 검출 클라이언트(plate.pickAt). */
   lpd?: import('../clients/LpdClient.js').LpdClient;

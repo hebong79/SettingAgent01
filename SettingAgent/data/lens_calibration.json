@@ -5,7 +5,12 @@
       "id": "real-camera-2",
       "host": "192.168.0.154",
       "model": "cam-001",
-      "enabled": true
+      "enabled": true,
+      "cameraSpec": {
+        "_comment": "roi.auto.* 지면모델 제원(17b회차). RPC 파라미터 cameraSpec 과 같은 필드명이며 그 기본값이다 — UI 입력이 있으면 UI 가 이긴다.",
+        "_zoomHfov": "★ 17c회차 — 자체 화각표를 두지 않는다. 위의 model:'cam-001' 로 내장 실측표(13점, HNR-2036LA 2026-07-14)를 상속한다. 근거: data/lens_calib_result_real-camera-2.json 이 이 카메라를 cam-001 캘리브로 검증해 verdict:'pass'(usable 17/18, worstPx 8.4, 2026-07-27). 직전 17b 의 단일점 58.5° 는 광각단(z=0) 사양값이라 현재 운용 줌(zoompos 1만대)에서 초점거리를 4.6배 작게 만들었다. 자체 표를 여기(또는 최상위)에 두면 그 값이 상속을 이긴다.",
+        "heightM": 13
+      }
     },
     {
       "id": "real-camera-1",

@@ -23,6 +23,7 @@ import {
 import { camGotoPreset, camPresetDelete, camPresetList, camPresetUpsert } from './services/cameraPresets.js';
 import { platePickAt } from './services/platePick.js';
 import { mappingAutoNumber } from './services/mappingAuto.js';
+import { roiAutoApply, roiAutoDetect, roiAutoScore } from './services/roiAuto.js';
 
 /** 파괴적 메서드 공통 게이트 — `confirm:true` 없이는 위임하지 않는다(다이어그램 §8). */
 function requireConfirm(params: Record<string, unknown>, method: string, what: string): void {
@@ -278,6 +279,45 @@ export const METHODS: MethodDef[] = [
     mutating: false,
     stability: 'experimental',
     http: () => ({ method: 'GET', url: '/capture/ground-grid' }),
+  },
+
+  // ─────────────────────────────────────────── roi.auto.* (도색선 기반 자동 바닥 ROI)
+  // grid.* 웹 승인 흐름과 **병존**한다(코드 0줄 변경). 차이는 `requiresCamera:true` — 프레임이 반드시 필요하다.
+  {
+    name: 'roi.auto.detect',
+    title: '도색선 기반 바닥 ROI 검출(미리보기)',
+    mutating: false,
+    requiresCamera: true,
+    stability: 'experimental',
+    note: '파일·DB 를 쓰지 않는다. 수동 ROI 좌표를 검출 입력으로 쓰지 않는다(hold-out — 베이 개수만 사용).' +
+      ' 다시점 합의(consensus, 기본 true)로 고정 디더 **6시점**을 촬영한다 — 카메라 점유·소요시간이 6배(프리셋당 약 70초)다. 단일 시점이 필요하면 consensus:false.',
+    requires: ['camera', 'placeRoiFile'],
+    handler: roiAutoDetect,
+  },
+  {
+    name: 'roi.auto.score',
+    title: '자동 ROI 채점(수동 정본 대비)',
+    mutating: false,
+    requiresCamera: true,
+    stability: 'experimental',
+    note: '프레임 취득 전 roi.show2d{visible:false} 를 호출한다. 초록 합성 단서가 0.1% 를 넘으면 채점을 중단한다.' +
+      ' 다시점 합의(consensus, 기본 true)로 고정 디더 **6시점**을 촬영한다 — 카메라 점유·소요시간이 6배(프리셋당 약 70초)다. 단일 시점이 필요하면 consensus:false.',
+    requires: ['camera', 'placeRoiFile'],
+    handler: roiAutoScore,
+  },
+  {
+    name: 'roi.auto.apply',
+    title: '자동 ROI 정본 적용',
+    mutating: true,
+    destructive: true,
+    requiresCamera: true,
+    stability: 'experimental',
+    note: '정본(PtzCamRoi.json) 갱신. DB(slot_setup)는 건드리지 않는다 — 반영은 slot.roi.sync 를 별도 호출.',
+    requires: ['camera', 'placeRoiFile'],
+    handler: async (p, ctx) => {
+      requireConfirm(p, 'roi.auto.apply', '정본(PtzCamRoi.json)을 갱신한다');
+      return roiAutoApply(p, ctx);
+    },
   },
 
   // ────────────────────────────────────────────────────────── slot.* (DB 컨트롤)
