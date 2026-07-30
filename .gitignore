@@ -74,3 +74,6 @@ SettingAgent-13021/
 # DB 수동 백업본(예: setting.sqlite.bak-presetinfo-20260724_145745[-wal|-shm]).
 # 위의 *.sqlite* 패턴은 확장자로 끝나는 이름만 잡아 .bak-<태그> 형태를 놓친다(WAL 이 3MB 급이라 반드시 제외).
 *.sqlite.bak-*
+
+# 정본 ROI 자동 백업(승인 적용 시 런타임 생성 — 커밋 대상 아님)
+SettingAgent/data/Place01/PtzCamRoi.*.bak.json
