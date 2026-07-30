@@ -1,0 +1,67 @@
+[
+  {
+    "idx": 1,
+    "faceCount": 7,
+    "offsetPos": [
+      -7.367,
+      0,
+      19.176
+    ],
+    "xSize": 2.5,
+    "zSize": 5,
+    "faceRot": 0,
+    "groupRot": 0
+  },
+  {
+    "idx": 2,
+    "faceCount": 6,
+    "offsetPos": [
+      13.761,
+      0,
+      3.332
+    ],
+    "xSize": 5,
+    "zSize": 2.5,
+    "faceRot": 0,
+    "groupRot": 0
+  },
+  {
+    "idx": 3,
+    "faceCount": 4,
+    "offsetPos": [
+      -3.549,
+      0,
+      3.586
+    ],
+    "xSize": 2.5,
+    "zSize": 5,
+    "faceRot": 0,
+    "groupRot": 0
+  },
+  {
+    "idx": 4,
+    "faceCount": 4,
+    "offsetPos": [
+      -3.549,
+      0,
+      8.58
+    ],
+    "xSize": 2.5,
+    "zSize": 5,
+    "faceRot": 0,
+    "groupRot": 0
+  },
+  {
+    "idx": 5,
+    "faceCount": 2,
+    "offsetPos": [
+      -3.625,
+      0,
+      -7.114
+    ],
+    "xSize": 5,
+    "zSize": 2.5,
+    "faceRot": 0,
+    "groupRot": 0
+  }
+]

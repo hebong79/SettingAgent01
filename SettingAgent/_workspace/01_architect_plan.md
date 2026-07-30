@@ -1,581 +1,528 @@
-# 01 설계 계획 — 서버 정본화 4건(인증토큰 / 투어링 / 점유판정 / 슬롯편집)
+# 01 설계 — MCP 자동 바닥 ROI 생성 (이미지 코너 검출 경로)
 
-작성: 2026-07-28 · 워크트리 `.claude/worktrees/feat-server-promote-4/SettingAgent`
-입력: `메모/memo.md` 2026-07-28 「서버 RPC화」 재개 지점 표(우선 1~4) · `docs/20260728_183010_..._RPC화_설계서.md` · `docs/20260728_191516_RPC제어평면_구현_영향도분석.md`
-근거: 아래 모든 사실은 **워크트리 실코드를 직접 읽어** 확인했다. 추측 없음. 파일:라인 명시.
-(이전 라운드 산출물은 `_workspace_prev_20260728_placedrawfix/` 로 보존했다.)
+- 작성: 2026-07-29 / 설계자(architect)
+- 입력: `_workspace/00_leader_context.md`(리더 실측) · `docs/20260729_010651_*.md` · `docs/20260727_202948_*.md` · `docs/20260728_021006_*.md`
+- 실행 모드: **B (goal/loop)**
+- 이 문서의 수치는 **설계자가 이번 세션에서 직접 측정**한 것이다. 추측한 값에는 "미검증"이라고 적었다.
 
 ---
 
-## ★ 먼저 보고 — 과제 설명과 다른 사실 3건
+## 0. 요약 — 무엇이 결정됐고 무엇이 새로 밝혀졌나
 
-리더 지시문에 사실과 다른 전제가 3개 있다. 설계가 여기서 갈리므로 착수 전에 확정한다.
+리더가 "노면 도색선이 실재한다"까지 확인했다. 설계자는 그 위에서 **실제로 코너를 산출해 채점**해 보았고, 결과는 다음과 같다.
 
-| # | 지시문 전제 | 실제 | 영향 |
-|---|---|---|---|
-| A | "서버에 이미 `buildTouringPlan`(+`test/buildTouringPlan.test.ts`)이 있다" | **서버에 없다.** `buildTouringPlan` 은 `web/core.js:1689` 에만 있고, `test/buildTouringPlan.test.ts:3` 이 `../web/core.js` 를 직접 import 한다. `grep -rn buildTouringPlan src` → **0건** | 투어링은 "잡만 신설"이 아니라 **순회계획 순수함수 포팅 + 파리티**까지 포함한다 |
-| B | 슬롯편집이 "`save/Setup_*.json` 과 DB(slot_setup) 양쪽을 건드린다" | **둘 다 안 건드린다.** `addSlot`(app.js:1455)/`deleteSelectedSlot`(app.js:1477)은 `state.mapping`(메모리 SetupArtifact)만 고치고, 영속화는 `saveMapping`(app.js:1526)의 `PUT /mapping` → `saveMappingHandler`(server.ts:81) → `repo.saveArtifact` → **`data/setup_artifact.json` 단 하나**다 | 파일↔DB 문제는 "쓰기 충돌"이 아니라 **"쓴 것이 다음 renumber 에 덮여 사라지는 순서 문제"**로 성격이 다르다(§4.1 Q2) |
-| C | 사전 존재 실패 2건 | 워크트리에서는 **3건**이다. `roiDbLoad`·`placeRoiRuntimeInvariants`(지시대로 무접촉) + **`test/buildTouringPlan.test.ts` 가 collect 단계에서 ENOENT 로 죽는다** — `:7` 이 `save/setup_result.json` 을 읽는데 `save/` 는 `.gitignore:21` 로 무시돼 워크트리에 없다 | 투어링의 **첫 단계가 이 테스트를 살리는 것**이다(§5 단계 1). "건드리지 마라" 대상이 아니라 이번 범위 안의 문제 |
+| # | 발견 | 근거(직접 측정) |
+|---|---|---|
+| **F1** | **전방 도색선은 서브픽셀로 검출된다.** 1:1 전 7면에서 9/9 샘플 검출, 수동 근변과의 오프셋 −0.75~+0.25px, **MAD ≤ 0.49px**, 대비 162~176, 선폭 8~12px | `probe_paint.mjs` |
+| **F2** | **원변(후방)에는 도색 증거가 없다.** 검출 2~6/9, 대비 80~141(전방의 절반), MAD 최대 7.28px — 차량 하이라이트를 오검출한 것 | 같은 측정 |
+| **F3** | ★ **원변은 도색 없이도 정확히 복원된다.** 근변코너 + 측면소실점 + f + 실치수비(5.0/2.5) 만으로 재구성한 결과 **1:1 = 6/7면 IoU 1.0000, 2:1 = 6/6면 1.0000, 2:2 = 4/4면 1.0000** | `probe_far2.mjs` |
+| **F4** | **f 는 이미지 증거만으로 정확히 복원된다.** VP 직교 구속으로 얻은 f 가 정본 fov 대비 **오차 0.00%**(1:1 / 2:1 / 2:2), 1:2 만 −1.90% | 같은 측정 |
+| **F5** | **정점 배정은 정답지 없이 판별된다.** 선택 기준을 IoU 가 아니라 "근변코너 등간격 잔차 + 측면 VP 잔차"로 두자 2:1 → rot=1 dir=−, 2:2 → rot=2 dir=− 로 자동 교정(IoU 0.0000 → 1.0000) | 같은 측정 |
+| **F6** | ★ **미달 슬롯의 원인은 자동화가 아니라 수동 앵커의 오작화다.** `idx1` 의 우측 분리선은 실제 도색선에서 **9.03px** 떨어져 있다(MAD 0.46, 대비 185 — 확신 있는 검출). 그래서 idx1 은 어떤 방법으로도 수동 대비 0.95 이상이 안 된다 | `probe_paint.mjs`, 파일 실측 `idx1.p3=(373.02,701.19) ≠ idx2.p0=(364.65,703.29)` |
+| **F7** | **"개별 IoU ≥ 0.98" 은 서브픽셀 요구다.** 가장 빡빡한 슬롯(1:1 idx7)의 허용 오차는 **전체 평행이동 0.40px / 단일 변 0.81px / 단일 정점 1.60px**, 깊이 스케일 상대오차 **0.31%** | `budget.mjs` |
+| **F8** | 파이프라인은 **절대 스케일에 무관**하다. 깊이를 "측정된 폭 × 2"로 잡기 때문에 슬롯 실폭이 2.5m 이든 2.525m 이든 quad 는 동일하다. 이미지만으로 추정한 카메라 지상고는 4.950m(config 5.000m, −1.00%)로 3개 프리셋에서 동일 — 계통오차이며 quad 에는 영향 없음 | `probe_far3.mjs` |
+| **F9** | `src/ground/contact.ts` 는 **코너 증거로 쓸 수 없다.** `slotAxes` 가 슬롯 폴리곤을 입력으로 받으므로 순환이고, 파일 자체가 "L은 항상 prior · 뒤 접지선은 원리적으로 안 보인다"고 못 박고 있다 | 소스 조사 |
 
-실행 결과(실측):
+**결론: 마스터 요구 "이미지에서 사각형 4점을 찾는다"는 성립한다.** 다만 4점 중 **2점(근변)만 도색에서 직접 나오고, 나머지 2점(원변)은 소실점 기하로 복원**된다. 이것은 우회가 아니라 이 장면의 물리적 사실이다 — 원변은 차량에 완전히 가려져 있고 어떤 검출기로도 볼 수 없다.
+
+---
+
+## 1. 증거원 우선순위 판정 (과제 1)
+
+| 순위 | 증거원 | 강도 | 실패 조건 | 실카 전이 | 판정 |
+|---|---|---|---|---|---|
+| **1** | **노면 도색선 (전방 실선 + 분리선)** | ★★★ 대비 162~198, MAD ≤0.49px | 도색 마모·물기·강한 그림자·저대비 | **가능**(도색은 실제 주차장의 표준) | **채택 — 1순위** |
+| **2** | **소실점 기하**(1순위 산출물의 파생) | ★★★ f 오차 0.00%, IoU 1.0000 | 슬롯 3면 미만, 분리선 2개 미만, 심한 렌즈왜곡 | 왜곡보정 필요(`packages/lens-calib`) | **채택 — 원변 전용** |
+| 3 | LPD/VPD 검출 | ★ | 미검출 슬롯(메모 `slot10류`), 판은 지면이 아닌 지상 0.4~0.6m 수직면 | 가능 | **보류** — 교차검증용, 이번 범위 밖 |
+| 4 | 차량 접지선 `contact.ts` | ✗ | **순환**(슬롯 폴리곤이 입력) + 뒤 접지선 관측 불가 | — | **기각** (F9) |
+
+> 도색선 검출을 1순위로 확정한다. 접지선은 기각한다.
+
+---
+
+## 2. 알고리즘 — 3단계
+
+### Stage A. 프레임 → 서브픽셀 도색 직선
+
+저장소 관례를 따른다: **sharp 는 라우트/포트 계층에서 그레이 배열만 뽑고, 알고리즘은 순수 함수**(`src/capture/frameAlign.ts:1` 이 명시한 규약, `src/api/captureRoutes.ts:220` 이 실제 사례).
+
 ```
-npx vitest run test/rpcParity.test.ts test/buildTouringPlan.test.ts
-  ✓ test/rpcParity.test.ts (13 tests)
-  ❯ test/buildTouringPlan.test.ts (0 test)  ← ENOENT: save/setup_result.json
+A1. (라우트) sharp(jpg).greyscale().raw().toBuffer()  → Uint8Array(1920*1080)
+A2. 도색 마스크
+      배경 추정: 이미지를 16x16 블록으로 다운샘플 → 블록 median = bg(x,y) (쌍선형 보간)
+      mask(x,y) = gray - bg > T          # T 는 프레임 전역 백분위로 결정(고정 규칙, 난수 없음)
+      ※ 실측 대비 162~198 → 시뮬에서는 여유. 실카는 미검증(R10)
+A3. 거친 직선 검출: Hough (rho, theta) 누적
+      theta 해상도 0.2°, rho 해상도 1px  (고정)
+      피크 선택: 누적값 내림차순 → 동점 시 (theta asc, rho asc) 낮은 인덱스 우선 (R2)
+      비최대억제 창 고정
+A4. ★ 서브픽셀 정련 — 여기가 정밀도의 원천 (실측 MAD ≤0.49px)
+      for 각 Hough 직선:
+        직선을 따라 NS(=9~25) 지점에서 법선 방향 ±14px 밝기 프로파일 채취(0.5px 간격, 최근접)
+        각 프로파일에서 스트라이프 무게중심:
+            bg  = 35 백분위,  peak = 최댓값
+            if peak - bg < 45: 이 지점은 버림              # 스트라이프 없음
+            thr = bg + (peak-bg)*0.5
+            t*  = Σ(v-bg)*t / Σ(v-bg)   over  v >= thr
+        중심점 ≥ 3개 → 총최소제곱(TLS)으로 직선 재적합
+        산출: { line(a,b,c 정규화), residPx, hitRatio, meanWidthPx, meanContrast }
+      정련 실패(hit < 3) → 그 직선 폐기
+```
+
+**A4 는 추측이 아니라 이번 세션에서 실제로 돌려 MAD 0.03~0.49px 를 측정한 코드다**(`probe_paint.mjs`). 상수(±14px, 0.5px, 35백분위, 대비 45, thr 0.5)는 그 실측에서 나온 값이고, 실카에서는 재조정 대상이다(R10).
+
+### Stage B. 직선 → 베이 코너 4점
+
+```
+B1. 직선 분류
+      전방선 L_f  = mask 지지 화소가 가장 많고 길이가 최대인 직선
+      분리선 S_*  = L_f 와의 교각이 20°~160° 이고, 서로 공통 교점(VP)에 대한
+                    잔차가 임계 이하인 최대 클러스터
+      ※ 분류 기준은 "공통 소실점 일관성"이다. 방향각 상수 하드코딩 금지(R3 정신)
+
+B2. VP_d = meetLS(S_*)            # 정규화 직선거리 최소화, 2x2 정규방정식 (닫힌 해, 난수 0)
+      실측 잔차: 1:1 median 1.77px / 2:1 0.00px
+
+B3. C_k = L_f ∩ S_k → L_f 를 따른 파라미터 s 로 정렬
+
+B4. 정수 격자 위상 맞춤 (분리선 누락 허용)
+      C_k 에 정수 인덱스 t_k 를 배정한다. 연속(0,1,2,..)을 가정하지 않는다 —
+      분리선 1개가 미검출이면 실제 인덱스는 0,1,2,4,5 이다.
+      탐색: 최대 누락 2개까지의 단조증가 정수열 후보를 **고정 순서로 전수 순회**,
+            각 후보에 대해 B5 의 사영 1D 적합 잔차를 계산, 최소 잔차 채택.
+            동점 → 낮은 인덱스 우선 (R2)
+
+B5. VP_r  — 등간격 공선점의 사영 1D 적합
+      s(t) = (a t + b)/(c t + 1) 를 선형 최소제곱으로 적합(미지수 a,b,c)
+      VP_r = s(∞) = a/c 에 해당하는 이미지 점
+      resid = max_k | s_hat(t_k) - s_k |      # 실측: 1:1 0.00px / 1:2 0.22px
+      ※ 최소 4점(= 슬롯 3면) 필요. 미달 시 이 프리셋은 강등(§7)
+
+B6. f = focalFromVPs(VP_d, VP_r, cx, cy)      ★ groundModel.ts:256 재사용 (R4)
+      실측: 1:1 / 2:1 / 2:2 에서 정본 fov 대비 오차 0.00%
+      부호 판정 실패(dot ≥ 0) → 강등. **PTZ zoom 기반 focalFromZoom 으로 폴백하지 않는다**
+      (폴백하면 이미지 증거 경로가 조용히 텔레메트리 경로로 바뀐다 — 강등해서 드러내는 편이 정직하다)
+
+B7. 지면 법선
+      h = VP_d × VP_r                      # 지평선(동차)
+      n ∝ [h0*f, h1*f, h0*cx + h1*cy + h2] ; 정규화, n_z > 0 이 되도록 부호 고정
+
+B8. 지상고 d (metric 스케일)
+      d=1 로 C_k 를 backprojectToGround → 인접 간 거리 median = wMed
+      d = slotWidthM / wMed
+      ★ 자기검증 게이트: | d - cameraHeightConfig | / cameraHeightConfig > 0.05 → issues 경고
+        (실측 4.950m vs 5.000m = −1.00%. 3개 프리셋 동일 계통오차 = 슬롯 실폭이 2.525m 라는 뜻이며
+         quad 자체에는 영향 없음 — F8)
+
+B9. GroundModel 조립 → 격자 → quad
+      GroundModel { camIdx, presetIdx, imgW, imgH, zoom, f, n, d, tiltDeg=asin(n[2]), source:'auto', ... }
+      GroundGrid  { originM, thetaDeg, colPitchM=slotWidthM, rowPitchM=slotDepthM, cols=N, rows=1, slotIdByCell }
+      quads = gridToPixelQuads(grid, model, panDeg)      ★ groundGrid.ts:170 재사용 (R4)
+```
+
+**깊이가 폭의 2배라는 것만 쓰고 절대치는 안 쓴다** — B8 의 `d` 는 `GroundModel` 필드를 채우기 위한 것이고, quad 형상은 `rowPitchM/colPitchM = 2.0` 이라는 **비율**에만 의존한다(F8).
+
+### Stage C. 채점 (별도 모듈 — 여기서만 수동 ROI 를 읽는다)
+
+```
+C1. 수동 정본 로드 → 정점 배정 해소
+      이면군 4회전 × 방향 2 = 8 후보(+ 필요 시 반사 포함 16)를 고정 순서로 전수 순회
+      ★ 선택 기준 = 이미지측 일관성만: (등간격 사영 잔차) + 0.05 × (측면 VP 잔차)
+        IoU 를 선택 기준으로 쓰지 않는다 — 그러면 정답지가 입력이 된다 (R1)
+      실측으로 2:1 → rot=1 dir=−, 2:2 → rot=2 dir=− 를 정답지 없이 회수함 (F5)
+C2. 자동 quad ↔ 슬롯 매칭: 기존 MATCH_MIN_IOU(=0.5) 규약 재사용
+C3. IoU = quadIoU(auto, manual)          ★ autoRoiPlan.ts:38 재사용, 신규 구현 금지 (R4)
+C4. 산출: 슬롯별 IoU · 프리셋 평균/최소 · ≥0.98 통과수 · 강등 사유 · 진단수치
 ```
 
 ---
 
-## 0. 공통 규약(4건 전부에 적용 — 구현자 필독)
+## 3. Hold-out 강제 구조 (과제 3, R1) — 약속이 아니라 구조로
 
-1. **RPC 는 로직 0줄.** 신규 메서드는 전부 `MethodDef.http`(브리지 위임)로 만든다. `handler` 는 이번 4건에서 **하나도 쓰지 않는다**(승격 서비스가 필요 없도록 설계했다).
-2. **`test/rpcParity.test.ts:192-207` 의 `known` 경로집합을 최소로 건드린다.** 판정식은 `url === k || url.startsWith(k + '/')`(216행)이므로:
-   - `/capture/slots/*` → `'/capture/slots'` 가 이미 있어 **무편집 통과** → 점유판정 라우트를 여기에 둔다.
-   - `/mapping/*` → `'/mapping'` 이 이미 있어 **무편집 통과** → 슬롯편집 라우트를 여기에 둔다.
-   - `/capture/tour/*` → 미커버. **투어링만 `known` 에 3줄 추가**한다(이 테스트가 막으려는 건 "오타·발명된 경로"이지 "의도적 신규 라우트"가 아니다). 추가와 동시에 §5-T4 의 동적 교차검사를 붙여 정적 목록보다 강한 보증으로 바꾼다.
-3. **오류코드**: 라우트가 내는 HTTP 를 `mapHttpStatus`(errors.ts:94)가 자동 변환한다. 신규 라우트는 상태코드만 정확히 내면 된다.
+세 겹으로 막는다.
 
-   | 상황 | HTTP | 라우트 응답 | RPC 코드 |
-   |---|---|---|---|
-   | 잡 중복 시작·카메라 점유 | 409 | `already running` / `busy` 문자열 **포함** | `-32001 BUSY`(classify409, errors.ts:86) |
-   | 가드 거부(파일·DB **무변경**) | 409 | 위 단어 **미포함** | `-32005 CONFLICT` |
-   | 값 없음(결과 파일·슬롯 부재) | 404 | `{ error: '...' }` | `-32002 NOT_FOUND` |
-   | 기능 off(라우트 미등록) | — | Fastify 기본 404 | `-32004 UNAVAILABLE`(자동) |
-   | zod 실패 | 400 | `{ error:'invalid body', detail }` | `-32602 INVALID_PARAMS` |
-   | 토큰 불일치 | 403 | `{ error: 'invalid token' }` | `-32006 FORBIDDEN` |
+**① 타입으로 막는다.** 검출·기하 모듈의 입력 타입에 수동 ROI 를 **표현할 수단이 없다**.
 
-   판정 불가 시 **CONFLICT**(안전측). 새 문자열 규약을 만들지 말 것.
-4. **`src` → `web` import 금지.** 반대 방향만. 웹 순수모듈이 서버에 필요하면 **포팅 + 파리티 테스트**가 유일한 수단이다(선례: `occupancyRegionParity`·`quadCentroidParity`·`occupancyGeometryParity`).
-5. **수치 영속화는 `stringify5`/`round5`.** TEXT writer 는 `stringify5` 필수. 이번 4건 중 DB TEXT 를 쓰는 것은 **없다**(설계상 회피 — §4.1 Q3).
-6. **1-based**: cam/preset/presetSlotIdx/globalIdx 전부 1-based. `slotId` 는 artifact 에선 **문자열**(`c1p1s1`), DB 에선 **정수** — 혼동 금지(§4.1 Q2).
-7. **비파괴 저장**: `replaceSlotSetup`(DELETE+INSERT) 계열을 **호출하지 않는다**. 07-28 `roiSlotSync.ts:109` 의 차등 UPDATE 가 정본 패턴. 이번 4건은 아예 DB 쓰기를 하지 않도록 설계했다.
-8. **결정형 도구 vs LLM 두뇌 경계**: 4건 **전부 결정형 도구**다. 순회 PTZ 이동·점유 기하판정·인덱스 재부여·토큰 비교는 수치반복/규칙연산이라 LLM 관여 지점이 0이다. `AgentRuntime.judgeOccupancy`(brain/AgentRuntime.ts:292)는 **점유"율" 요약 자문**이지 슬롯 점유 판정이 아니다 — 이번 `slot.occupancy.evaluate` 와 혼동해 배선하지 말 것.
-9. **★ 기능을 서버로 옮기면 "PTZ 동기화 책임"도 함께 옮긴다** (W2 구현에서 발견 — 초판 설계 누락). 기존 웹 기능이 `move()` 로 카메라를 움직이면 `state.ptz` 가 함께 갱신됐다. 같은 일을 서버 잡이 하면 **카메라만 움직이고 브라우저 기준 PTZ 는 옛 값에 남아**, 직후 방향/절대 이동이 "이전 위치로 되돌아갔다가 한 스텝" 움직인다(`test/viewerPtzSyncCoverage.test.ts` 머리말의 마스터 실측 증상). → 서버 승격 기능은 **완료 감지 지점에서 `await syncPtzAfterJob(null)`** 을 부르고, 그 라우트를 `viewerPtzSyncCoverage.test.ts` 의 `MOVES_CAMERA`+`SYNC_OWNER` 또는 `NO_MOVE` 표에 **반드시 등록**한다. 등록은 선택이 아니다 — 표에 없으면 첫 번째 it 이 실패하도록 설계된 봉인이다.
-   - W2 `/capture/tour/start` → `MOVES_CAMERA` + `SYNC_OWNER['/capture/tour/start']='runTouringTest'` (완료).
-   - **W3 `/capture/slots/judge-occupancy` → `NO_MOVE`**(stateless 판정·카메라 무접촉 — §3.2 설계가 그렇게 잡은 이유가 여기서도 값을 한다).
-   - **W4 `/mapping/slot`·`/mapping/slot/delete` → `NO_MOVE`**(파일 IO만).
-
----
-
-# 1. 인증 토큰
-
-## 1.1 현황 정밀 조사
-
-| 항목 | 서버에 있는 것 | 웹에만 있는 것 | 비고 |
-|---|---|---|---|
-| 토큰 값 | `config/tools.config.json` `viewer.controlToken = ""`(실측) / 스키마 `toolsConfig.ts:230` | — | 빈 문자열 = 게이트 전면 무효 |
-| 게이트 코드 | **4곳뿐**: `viewer/routes.ts:321`(POST /viewer/api/move) · `:368`(POST /viewer/api/rpc) · `:402`(POST /viewer/api/llm/select) · `:431`(PUT /viewer/api/camerapos) | — | 전부 동일 식 → 403 `{error:'invalid token'}` |
-| RPC 게이트 | `dispatch.ts:117-120` + `tokenGate`(:143) — `MethodDef.mutating` 기준. 브리지가 하류로 토큰 전달(`bridge.ts:43`) | — | **여기만 제대로 돼 있다**(카탈로그가 단일 출처) |
-| 무인증 노출 | `/capture/*`(captureRoutes 전부) · `/calibrate/*` · `/discover/*` · `/mapping*` · `PUT /settings` · `/setup/*` — 게이트 **0** | — | 토큰을 켜도 그대로 뚫려 있다 |
-| 웹 토큰 전송 | — | `tokenHeaders()` app.js:4464. 사용처 **4곳뿐**: `:1808` `:1968` `:4475` `:4555` | 웹 변이 fetch 는 **총 35곳**(app.js 32 + roimaker.js 3) → **31곳이 토큰 미전송** |
-| 토큰 영속화 | — | `#viewer-token` 입력칸(index.html:608). `localStorage` 사용처는 패널폭(app.js:4682)·육면체높이(:5047)뿐 — **토큰은 없다** | 새로고침 시 소실 |
-| MCP | `src/mcp/server.ts:34` 가 `cfg.viewer.controlToken` 을 `x-viewer-token` 으로 자동 주입 | — | **MCP 는 이미 안전** |
-
-### ★ 결정적 사실
-토큰을 켜는 순간 **웹 UI 버튼 31개가 403 으로 죽는다**(저장·수집시작·센터라이징·탐색·ROI저장·재번호 전부). "게이트를 넓히는 일"과 "웹이 전 경로에 토큰을 붙이는 일"은 **같은 커밋 묶음**이어야 한다. 하나만 하면 회귀다.
-
-## 1.2 설계
-
-### 신규 `src/api/controlGate.ts`
 ```ts
-/** 변이 게이트에서 **면제**되는 비-GET 경로(읽기 전용 POST). methods.ts 의 mutating:false 와 1:1. */
-export const READONLY_POST_PATHS: ReadonlySet<string>;
-// = { '/capture/detect', '/capture/place-roi/validate', '/capture/ground-grid/bootstrap', '/capture/autocorrect' }
-
-/** RPC 평면 — 메서드별로 dispatch 가 자체 게이트한다(통째로 막으면 읽기 메서드가 죽는다). */
-export const SELF_GATED_PATHS: ReadonlySet<string>;   // = { '/rpc' }
-
-/** 이 요청이 토큰 게이트 대상인가(순수 판정 — 단위 테스트 대상). */
-export function needsControlToken(method: string, url: string): boolean;
-
-/** 전역 훅 등록. controlToken 이 빈 값이면 훅 자체를 달지 않는다(현행 동작 완전 보존). */
-export function registerControlTokenGate(app: FastifyInstance, viewer?: ToolsConfig['viewer']): void;
+// floorPaint.ts / bayGeometry.ts 의 입력은 오직 이것뿐이다
+interface FrameGray { data: Uint8Array; width: number; height: number; }
+interface BayDetectOpts { slotWidthM: number; slotDepthM: number; expectedBays: number; /* 개수만 */ }
 ```
-- 판정: `GET`/`HEAD`/`OPTIONS` 면제 → `SELF_GATED_PATHS` 면제 → `READONLY_POST_PATHS` 면제 → **그 외 전부 게이트**(deny-by-default). URL 은 `url.split('?')[0]` 로 비교.
-- 실패 응답은 기존과 **바이트 동일**: `reply.code(403).send({ error: 'invalid token' })` → `mapHttpStatus`(errors.ts:96)가 FORBIDDEN 으로 접는다.
-- 훅: `app.addHook('onRequest', ...)` — body 파싱 전에 끊는다.
+`PlaceRoiSpace` · `NormalizedPlaceRoi` · `PixelQuad`(수동 유래) 를 **인자로 받지 않는다**.
 
-### 수정
-- `src/api/server.ts` — `buildServer` 최상단(`/health` 등록 **직전**)에 `registerControlTokenGate(app, deps.viewer)` **1줄**. 훅은 인스턴스 전역이라 이후 등록되는 capture/calibrate/discover/rpc/뷰어 캡슐(`app.register`)에 전부 적용된다.
-- `src/viewer/routes.ts` — **인라인 게이트 4곳은 존치**(제거하지 않는다). 이유 ①동일 판정·동일 응답이라 이중 검사해도 결과 불변 ②`/move` 는 `allowMove === false` 검사(routes.ts:317)가 토큰 검사보다 먼저여야 `{error:'move disabled'}` 가 유지된다. 전역 훅이 통과시킨 뒤 인라인이 `allowMove` 를 보므로 **토큰이 맞는 요청에서는 기존 메시지가 그대로** 나온다 → `test/viewerRoutes.test.ts:222` 무회귀.
+**② 모듈 경계로 막는다.** 수동 ROI 를 읽는 코드는 `roiAutoScore.ts` 한 파일에만 존재한다. 검출·기하 모듈은 `placeRoi.ts` 를 import 하지 않는다.
 
-### 웹 껍데기화(토큰 배선)
-- 신규 `web/token.js`:
-  ```js
-  export const TOKEN_KEY = 'pa.viewerToken';
-  export function getControlToken();          // localStorage → string
-  export function setControlToken(v);         // '' 이면 removeItem
-  export function authHeaders(base = {});     // 토큰 있으면 x-viewer-token 부착
-  ```
-- `web/app.js`
-  - `tokenHeaders`(:4464)를 `authHeaders` 위임으로 교체(입력칸 값 → 저장소로 일원화).
-  - 초기화 시 `#viewer-token.value = getControlToken()`, `input` 이벤트에서 `setControlToken(...)` (2줄).
-  - **변이 fetch 31곳** → 지역 헬퍼 `mutFetch` 경유:
-    ```js
-    function mutFetch(url, init = {}) {
-      return fetch(url, { ...init, method: init.method ?? 'POST',
-        headers: authHeaders(init.headers ?? {}) });
+**③ 정적 봉인 테스트로 막는다.** 저장소에 이미 같은 패턴이 있다(`test/groundGrid.test.ts:183-198` 의 픽스처 봉인 메타 테스트). 그대로 흉내낸다.
+
+```ts
+// test/roiAutoHoldout.test.ts
+it('검출·기하 모듈은 수동 ROI 를 어떤 경로로도 읽지 않는다', () => {
+  for (const f of ['src/ground/floorPaint.ts', 'src/ground/bayGeometry.ts']) {
+    const src = readFileSync(f, 'utf8');
+    for (const banned of ['placeRoi', 'PlaceRoiSpace', 'normalizePtzCamRoi',
+                          'placeRoiFile', 'PtzCamRoi', 'spaces']) {
+      expect(src, `${f} 가 ${banned} 를 참조한다 — hold-out 오염`).not.toContain(banned);
     }
-    ```
-    치환 대상 라인(실측 32곳): 1234·1531·1807·1967·2133·2202·2536·2589·2607·2724·2746·2792·3180·3262·3275·3346·3367·3395·3429·3447·3509·3543·3683·3808·3822·3907·4273·4285·4438·4474·4554·5181
-- `web/roimaker.js` — 202·566·595 3곳 동일 치환(`web/token.js` import).
-- **UX 불변**: 버튼·문구·흐름 동일. 헤더 1개가 더 붙을 뿐.
+  }
+});
+```
 
-### RPC 노출
-신규 메서드 **없음**. 토큰은 전송 계층 관심사다. 설정 쓰기(`PUT /settings`)를 RPC 에 노출하지 않는 기존 결정(methods.ts:594)을 유지한다.
+**선언하는 누출 2건 (숨기지 않는다):**
+1. **베이 개수 N** — 프리셋에 몇 면이 있는지는 DB/정본의 *메타데이터*(개수·순번)에서 온다. 기하가 아니다.
+2. **슬롯 인덱스 진행 방향 1비트** — "왼쪽 끝이 slot 1 인가 오른쪽 끝인가". 이건 이미지에서 원리적으로 안 나온다. 기본은 `preset_slotidx` 순서 + 고정 규약으로 정하고, **두 방향의 점수를 모두 리포트**한다. 방향을 IoU 로 고르면 그 1비트만큼 정답지를 쓴 것이므로 응답에 `directionResolvedBy: 'convention' | 'score(1bit-leak)'` 로 명시한다.
 
-## 1.3 검증
-- `test/controlGate.test.ts`(신규)
-  1. `needsControlToken` 판정표: GET 면제 / `/rpc` 면제 / `/capture/detect` 면제 / `/capture/start` 게이트 / `PUT /mapping` 게이트 / 쿼리스트링 무시.
-  2. `controlToken:''` → 훅 미등록 → 기존 라우트 전부 200(회귀 0).
-  3. `controlToken:'SECRET'` → `POST /capture/slots/reset` 토큰 없이 403 `{error:'invalid token'}`, 토큰 동봉 200.
-  4. `controlToken:'SECRET'` + RPC: `slot.list`(GET 위임) 무토큰 통과 / `slot.reset` 무토큰 FORBIDDEN / 토큰 동봉 통과 → `test/rpcDispatch.test.ts:193-208` 의 결론이 훅 도입 후에도 유지됨을 재확인.
-  5. **드리프트 방지(핵심)**: `METHODS` 중 `http` 보유 항목을 순회해 `mapping.method !== 'GET'` 이면 `m.mutating === !READONLY_POST_PATHS.has(url)` 단정 → 게이트 목록과 카탈로그 `mutating` 이 갈리면 즉시 실패.
-- `test/webTokenWiring.test.ts`(신규·정적): `web/app.js` 문자열에서 생 `method: 'POST'|'PUT'|'DELETE'` 가 **0건**(전부 `mutFetch` 경유)임을 단정 + `TOKEN_KEY`/`localStorage` 존재 단정. (선례: `test/buildTouringPlan.test.ts:313` 의 index.html 문자열 검사)
-- 회귀: `viewerRoutes` · `viewerCameraposRoutes` · `viewerLlmRoutes` · `rpcDispatch` · `rpcParity` green.
+C2 의 자동↔슬롯 **매칭**에 IoU 를 쓰는 것도 기존 규약 재사용이지만 정답지 사용이다. 기하는 오염되지 않고 *귀속*만 정하므로 허용하되 리포트에 명시한다.
 
 ---
 
-# 2. 투어링 — `capture.tour.*`
+## 4. 파일 구성 (과제 4) — 신규 4 · 수정 2 · 무변경(재사용) 6
 
-## 2.1 현황 정밀 조사
+### 4-1. 신규
 
-| 요소 | 서버 | 웹 | 판정 |
-|---|---|---|---|
-| 순회계획 산출 | **없음** | `web/core.js:1689 buildTouringPlan(setupResult) → {steps,skipped}` | **웹 전용** — 포팅 필요 |
-| setup_result 로딩 | `GET /capture/saves/:name`(captureRoutes.ts:699) + `SaveStore.load` + `SETUP_RESULT_NAME='setup_result'`(setupResult.ts:10) | `fetch('/capture/saves/setup_result')` app.js:1884 | **양쪽**(웹은 서버 라우트를 부를 뿐) |
-| 프리셋 PTZ 해석 | `resolvePresetPtz` detectPipeline.ts:214 | `findPresetPtz` core.js:322 | **양쪽·동일 알고리즘**(둘 다 pan/tilt/zoom 셋 다 있을 때만 반환) → 서버 것 그대로 쓴다 |
-| PTZ 이동 | `ICameraClient.move(camIdx,pan,tilt,zoom)` CameraClient.ts:47 | `move(ptz)` → `POST /viewer/api/move` app.js:1799 | **양쪽** |
-| 프리셋 폴백 이동 | `camera.requestImage(cam,preset)`(preset 모드 = 물리 이동) | `gotoPreset()` snapshot preset 모드 app.js:1850 | **양쪽·동형** |
-| 순회 루프·1초 대기·재진입 방지·진행표시·완료모달 | **없음** | app.js:1876-1932(`state.touringActive`:147, 버튼 라벨, `#touring-done-modal`) | **웹 전용** — 잡으로 승격 |
-| 잡 패턴 | `PlateDiscoveryJob`(PlateDiscoveryJob.ts:58) · `LensCalibrationJob` · `PtzCalibrator` · `CaptureJob` | — | 미러 대상 |
-| 점유 판정처 | `jobBusy`(index.ts:116-123, 3잡) → `rpcBusy`(:134, +렌즈) | — | TourJob 을 여기에 추가해야 한다 |
-| 테스트 | `test/buildTouringPlan.test.ts` — `web/core.js` import, **gitignore 파일 의존으로 collect 실패** | | §5 단계 1 에서 먼저 고친다 |
+| 파일 | 성격 | 내용 |
+|---|---|---|
+| `src/ground/floorPaint.ts` | **순수** (IO 0, sharp 미참조) | Stage A2~A4 |
+| `src/ground/bayGeometry.ts` | **순수** | Stage B1~B9 |
+| `src/ground/roiAutoScore.ts` | 순수 (수동 ROI 읽는 **유일** 모듈) | Stage C |
+| `src/rpc/services/roiAuto.ts` | 핸들러 (IO·프레임 취득) | RPC 3종 |
 
-## 2.2 설계 — 신규/수정 파일
-
-**신규 `src/setup/touringPlan.ts`**(순수·I/O 0)
 ```ts
-export interface TourStep {
-  kind: 'preset' | 'slot';
-  camId: number; presetId: number;
-  presetSlotIdx?: number | null; slotId?: number;
-  ptz?: { pan: number; tilt: number; zoom: number };
+// ── src/ground/floorPaint.ts ───────────────────────────────────────────
+export interface FrameGray { data: Uint8Array; width: number; height: number }
+export interface PaintOptions {
+  bgBlockPx: number;        // 16
+  minContrast: number;      // 45
+  thetaStepDeg: number;     // 0.2
+  rhoStepPx: number;        // 1
+  profileHalfPx: number;    // 14
+  profileStepPx: number;    // 0.5
+  samplesPerLine: number;   // 9
+  maxLines: number;         // 40
 }
-export interface TourPlan { steps: TourStep[]; skipped: number }
-export function buildTouringPlan(setupResult: unknown): TourPlan;
-```
-`web/core.js:1689-1722` 를 **자구 그대로** TS 로 옮긴다: 정렬키 `camId → presetId → (presetSlotIdx ?? 0) → slotId`, 그룹 최초 진입 시 preset 스텝 1개, `centering` 3값 전부 non-null 일 때만 slot 스텝(아니면 `skipped++`), graceful(`null`/`undefined`/`{}` → `{steps:[],skipped:0}`). **새 알고리즘 발명 금지.**
+export const DEFAULT_PAINT_OPTIONS: PaintOptions;
 
-**신규 `src/capture/TourJob.ts`** — `PlateDiscoveryJob` 상태머신 미러
-```ts
-export type TourState = 'idle' | 'running' | 'stopping' | 'done' | 'aborted' | 'error';
-export interface TourStatus {
-  state: TourState; done: number; total: number;
-  presets: number; slots: number; skipped: number;
-  current?: { kind: 'preset'|'slot'; camId: number; presetId: number; slotId?: number };
-  startedAt?: string; endedAt?: string; error?: string;
-}
-export interface TourJobDeps {
-  camera: ICameraClient;
-  /** setup_result 정본 로더. 기본 = () => saveStore.load(SETUP_RESULT_NAME) */
-  loadSetupResult: () => unknown | null;
-  dwellMs?: number;                    // 기본 1000(웹과 동일)
-  sleep?: (ms: number) => Promise<void>;
-  now?: () => string;
-  onFinished?: (state: 'done'|'aborted'|'error') => void;   // 미주입 시 no-op
-}
-export class TourJob {
-  getStatus(): TourStatus;
-  /** 중복 시작 시 throw new Error('tour already running') → 라우트 409 → BUSY */
-  start(opts?: { dwellMs?: number; camera?: ICameraClient }):
-    { total: number; presets: number; slots: number; skipped: number };
-  stop(): void;    // stopRequested = true → state = 'stopping'
-}
-```
-실행 규칙(app.js:1909-1921 과 1:1):
-- **preset 스텝**: `resolvePresetPtz(camera, camId, presetId)` → 있으면 `camera.move(...)`, `null` 이면 `camera.requestImage(camId, presetId)` 폴백(**스킵하지 않는다** — app.js:1916 과 동일).
-- **slot 스텝**: `camera.move(camId, ptz.pan, ptz.tilt, ptz.zoom)`.
-- 각 스텝 후 `sleep(dwellMs)`.
-- 개별 스텝 실패는 **흡수**(`logger.warn` + 계속) — PlateDiscoveryJob:177-192 와 동일 철학.
-- 스텝 사이마다 `stopRequested` 확인 → `state='aborted'` + `endedAt` 기록 후 종료.
-- **DB·파일에 아무것도 쓰지 않는다**(app.js:1875 주석 계승) → `destructive:false`.
+/** 밝기-배경 차 마스크. 반환은 0/1 바이트 배열(같은 크기). 난수 0. */
+export function paintMask(frame: FrameGray, opts: PaintOptions): Uint8Array;
 
-**신규 `src/api/tourRoutes.ts`**(discoverRoutes.ts 패턴, 얇은 진입점)
+/** Hough 거친 직선. 반환 순서 고정(누적 desc → theta asc → rho asc). */
+export function coarseLines(mask: Uint8Array, w: number, h: number, opts: PaintOptions):
+  Array<{ line: [number, number, number]; votes: number }>;
 
-| 메서드 | 경로 | 요청 | 응답(200) | 실패 |
-|---|---|---|---|---|
-| POST | `/capture/tour/start` | `{ dwellMs?: 0..10000, source?: string }` | `{ ok:true, started:true, total, presets, slots, skipped }` | zod 400 `invalid body` / 중복 409 `tour already running` / setup_result 없음 **404** `{error:'no setup_result'}` / 스텝 0 **409** `{error:'순회할 슬롯/프리셋이 없습니다'}` |
-| POST | `/capture/tour/stop` | 없음 | `{ ok:true, state }` | — (idle 이어도 200·멱등) |
-| GET | `/capture/tour/status` | — | `TourStatus` | — |
+/** ★ 서브픽셀 정련(실측 MAD ≤0.49px). hit<3 이면 null. */
+export function refineLine(
+  frame: FrameGray, line: readonly [number, number, number], opts: PaintOptions,
+): { line: [number, number, number]; residPx: number; hit: number;
+     widthPx: number; contrast: number } | null;
 
-- `source` 는 `resolveSourceCamera(deps, source, reply)`(routeHelpers.ts:138) — `/calibrate/point`(calibrateRoutes.ts:65)와 **동일 관용구**. 미지정이면 파이프라인 카메라.
-- **★ 라우트 자체에서도 `deps.isBusy?.()` 를 확인해 409 를 낸다.** RPC 는 `requiresCamera` 게이트로 막히지만 **REST 직접 호출은 dispatch 를 안 탄다** — 최종 방어선이 라우트에 있어야 한다(R5).
-
-**수정 `src/api/server.ts`**
-- `ApiDeps` 에 `tourJob?: TourJob` 추가.
-- `if (deps.tourJob) registerTourRoutes(app, { job: deps.tourJob, sources: deps.sources, cameraCfg: deps.cameraCfg, isBusy: deps.isBusy });` (가산·graceful — 미주입이면 미등록 → RPC 는 `-32004 UNAVAILABLE`).
-
-**수정 `src/index.ts`**
-- `const tourJob = new TourJob({ camera, loadSetupResult: () => saveStore.load(SETUP_RESULT_NAME) });` — finalizer 조립 이후, `jobBusy` **이전**.
-- `jobBusy`(:116-123) 배열에 `['투어링', tourJob.getStatus().state]` 한 줄 추가 → 렌즈 캘리브레이션 시작 거부와 RPC `requiresCamera` 게이트가 **동시에** 투어링을 인지한다(판정처 단일 유지).
-- `buildServer({ ..., tourJob })`.
-
-**수정 `src/rpc/methods.ts`** — `capture.*` 섹션에 3개(전부 `http` 위임)
-```ts
-{ name:'capture.tour.start', title:'셋업 결과 순회 이동 시작', mutating:true, requiresCamera:true,
-  preconditions:['setup_result 존재(setup.result.write 또는 정밀수집 완료)'],
-  note:'DB·파일을 쓰지 않는다(읽기 순회). 각 위치 dwellMs(기본 1000ms) 정지.',
-  http:(p)=>({ method:'POST', url:'/capture/tour/start', payload:p }) },
-{ name:'capture.tour.stop', title:'순회 중단', mutating:true,
-  http:()=>({ method:'POST', url:'/capture/tour/stop' }) },   // 본문 없음 → bridge.ts:37-44 가 content-type 미부착(기존 결함 재발 금지)
-{ name:'capture.tour.status', title:'순회 진행 상태', mutating:false,
-  http:()=>({ method:'GET', url:'/capture/tour/status' }) },
+/** A2~A4 일괄. 정련 성공 직선만, 지지도 내림차순 고정 정렬. */
+export function detectPaintLines(frame: FrameGray, opts: PaintOptions): RefinedLine[];
 ```
 
-## 2.3 웹 껍데기화 diff 계획
+```ts
+// ── src/ground/bayGeometry.ts ──────────────────────────────────────────
+export interface RefinedLine { line: [number, number, number]; residPx: number; hit: number;
+                               widthPx: number; contrast: number }
+export interface BayDetectOpts { slotWidthM: number; slotDepthM: number;
+                                 expectedBays: number; cameraHeightM: number | null;
+                                 maxMissingSeparators: number /* 2 */ }
+export interface BayDetection {
+  frontLine: [number, number, number];
+  separators: [number, number, number][];
+  cornersPx: Array<{ x: number; y: number }>;   // 근변 코너 C_k (N+1 개)
+  latticeIndex: number[];                        // C_k 의 정수 격자 인덱스(누락 허용)
+  vpDepth: [number, number] | null;
+  vpRow: [number, number] | null;
+  focalPx: number | null;
+  normal: [number, number, number] | null;
+  cameraHeightM: number | null;                  // 이미지증거 추정 d
+  diag: { rowResidPx: number; sideResidPx: number; widthSpreadPct: number;
+          heightDevPct: number | null };
+  issues: string[];
+}
 
-| 대상 | 조치 |
+/** 정규화 직선거리 최소화 교점. 2x2 정규방정식 — 난수·RANSAC 0. */
+export function meetLines(lines: readonly [number, number, number][]): [number, number] | null;
+
+/** 등간격 공선점 → 사영 1D 적합 → 행방향 소실점. 4점 미만이면 null. */
+export function rowVanishingPoint(
+  corners: ReadonlyArray<{ x: number; y: number }>, index: readonly number[],
+): { vp: [number, number]; residPx: number } | null;
+
+/** B1~B3. 전방선/분리선 분류 + 코너 산출. */
+export function classifyAndIntersect(
+  lines: readonly RefinedLine[], opts: BayDetectOpts,
+): Pick<BayDetection, 'frontLine' | 'separators' | 'cornersPx' | 'latticeIndex' | 'issues'> | null;
+
+/** Stage B 전체. 수동 ROI 를 **인자로 받지 않는다**(R1). */
+export function detectBays(lines: readonly RefinedLine[], imgW: number, imgH: number,
+                           opts: BayDetectOpts): BayDetection;
+
+/** B9. 검출 결과 → 기존 자료구조. 이후 quad 생성은 gridToPixelQuads 에 위임(R4). */
+export function toGroundModelAndGrid(
+  det: BayDetection, camIdx: number, presetIdx: number, zoom: number,
+  imgW: number, imgH: number, opts: BayDetectOpts,
+): { model: GroundModel; grid: GroundGrid; issues: string[] } | null;
+```
+
+```ts
+// ── src/ground/roiAutoScore.ts ─────────────────────────────────────────
+export interface SlotScore { slotIdx: number; iou: number; matched: boolean }
+export interface PresetScore {
+  key: string; camId: number; presetIdx: number;
+  bays: number; manualSlots: number;
+  slots: SlotScore[];
+  meanIoU: number | null; minIoU: number | null; pass98: number;
+  assignment: { rot: number; dir: 1 | -1; rowResidPx: number; sideResidPx: number };
+  directionResolvedBy: 'convention' | 'score(1bit-leak)';
+  gradeReason: string | null;            // 강등 사유 — null 이면 유효 채점 대상
+  issues: string[];
+}
+/** ★ 이 파일이 수동 ROI 를 읽는 유일한 곳이다. 배정 선택 기준은 IoU 가 아니다(R1). */
+export function resolveManualAssignment(
+  manual: readonly PlaceRoiSpace[], imgW: number, imgH: number,
+): { rot: number; dir: 1 | -1; rowResidPx: number; sideResidPx: number } | null;
+
+export function scorePreset(
+  autoQuads: readonly GridQuad[], manual: readonly PlaceRoiSpace[],
+  imgW: number, imgH: number, key: string, camId: number, presetIdx: number,
+): PresetScore;                          // 내부에서 quadIoU 재사용 (R4)
+```
+
+### 4-2. 수정
+
+| 파일 | 변경 | 규모 |
+|---|---|---|
+| `src/rpc/methods.ts` | `roi.auto.*` 3행 가산. **기존 76 메서드 무변경** | +3 항목, import 3줄 |
+| `src/rpc/index.ts`(또는 deps 배선 지점) | 프레임 취득 시임 주입이 필요하면 1줄 | ≤1줄 |
+
+### 4-3. 재사용(무변경) — R4 대응
+
+| 자산 | 용도 |
 |---|---|
-| `web/app.js:1876-1932 runTouringTest` | **본문 교체**. **유지**: 버튼 disable/라벨(1878-1879,1906,1911,1924), `#cap-msg` 문구, `#touring-done-modal`(1928-1931). **제거**: `fetch('/capture/saves/setup_result')`(1884), `buildTouringPlan` 호출(1896), for 루프 전체(1909-1921), `move`/`gotoPreset` 호출(1915-1918), `setTimeout` 1초 대기(1920) |
-| 새 흐름 | `mutFetch('/capture/tour/start', {body})` → `{total,presets,slots,skipped}` → **1초 폴링** `GET /capture/tour/status` → `done/total` 로 버튼 라벨 갱신 → `state ∈ {done,aborted,error}` 면 폴링 종료 + 완료 모달(문구 동일) |
-| `web/app.js:1935 syncTouringPreset` | **유지**. 폴링에서 `status.current.camId/presetId` 변경 시 호출해 화면이 순회를 따라가게 한다(기존 UX 보존 — 원래 동작이 그랬다) |
-| `web/app.js:147 state.touringActive` | 유지(폴링 재진입 방지) |
-| `web/core.js:1689 buildTouringPlan` | **삭제하지 않는다** — `test/buildTouringPlan.test.ts` 기준변 + 파리티 기준변. `web/app.js:72` 의 import 만 제거(고아 방지) |
-| `web/app.js:5074` 결선 | 유지(`test/buildTouringPlan.test.ts:322` 가 이 문자열을 단정한다) |
-
-## 2.4 오류코드 매핑
-| 상황 | HTTP | RPC |
-|---|---|---|
-| 이미 순회 중 | 409 `tour already running` | BUSY(-32001) — 백오프 재시도 |
-| 다른 잡이 카메라 점유 | 409(라우트) / dispatch 선차단 | BUSY(-32001) + `who` |
-| setup_result 없음 | 404 | NOT_FOUND(-32002) — 정밀수집 먼저 |
-| 순회 대상 0(centering 전무) | 409(BUSY 단어 없음) | CONFLICT(-32005) — 사람 개입 |
-| `tourJob` 미주입 | Fastify 404 | UNAVAILABLE(-32004) |
+| `quadIoU` (`autoRoiPlan.ts:38`) | 채점. **신규 IoU 구현 금지** |
+| `assertAutoPromoteSafe` G1~G5 (`autoRoiPlan.ts:557`) | apply 게이트 |
+| `buildApplySpaces` (`autoRoiPlan.ts:470`) | 정본 spaces 조립 |
+| `gridToPixelQuads` / `fitGridFromQuads` / `canonicalizeQuad` (`groundGrid.ts:170/265/127`) | 격자↔quad |
+| `projectToPixel` / `backprojectToGround` (`project.ts:61/49`) | 투영 — **직접 수식 재구현 금지** |
+| `focalFromVPs` (`groundModel.ts:256`) | B6 |
+| `round5` / `stringify5` (`util/round.ts`) | 영속화 (R7) |
+| `writePlace` 경로 (`services/placeSpaces.ts:114`) | 정본 쓰기 + `.bak` |
 
 ---
 
-# 3. 점유판정 — `slot.occupancy.evaluate`
+## 5. MCP RPC 인터페이스 (과제 5, R6)
 
-## 3.1 현황 정밀 조사
+기존 `grid.*` 3종(웹 승인 흐름)은 **1줄도 건드리지 않는다.** 별도 네임스페이스로 병존한다.
 
-| 요소 | 서버 | 웹 | 판정 |
-|---|---|---|---|
-| 점유 **판정** 1단계(차량 접지밴드 argmax) | **없음** | `web/occupancy.js:152 OccupancyJudge.judge`(:158-203) | **웹 전용** — 포팅 대상 |
-| 점유 **판정** 2단계(번호판 중심 폴백) | **없음** | `web/core.js:577 computeOccupancy` | **웹 전용** — 포팅 대상 |
-| 점유 **영역** 생성(사다리꼴) | `src/domain/occupancyRegion.ts:166` / `:238 buildOccupyRegionsBySlot` | `web/occupancyRegion.js:138` | **양쪽·파리티 봉인됨**(`test/occupancyRegionParity.test.ts`) — **재작업 불필요** |
-| 기하 프리미티브 | `geometry.ts:9 area` `:120 quadCentroid` / `polygon.ts:95 pointInPolygon` `:108 rectCorners` `:137 convexIntersectionArea` / `onPlaceFilter.ts groundBand·GROUND_BAND_RATIO·ON_PLACE_MIN_OVERLAP` | `web/occupancy.js:31-123`(src 자구 포팅) | **양쪽·파리티 봉인됨**(`occupancyGeometryParity`·`quadCentroidParity`) — **재작업 불필요** |
-| 기존 테스트 | `computeOccupancy.test.ts`(→web/core.js) · `occupancyJudge.test.ts`(→web/occupancy.js) · `occupancyRegionParity`(web↔src) · `occupancyGeometryParity`(web↔src) | | **웹 구현이 이미 봉인돼 있다** → 포팅본은 파리티만 추가 |
-| LLM 점유 | `AgentRuntime.judgeOccupancy`(:292) = 점유"율" 요약 자문 | — | **무관** — 배선 금지 |
-| 웹 소비처 | — | `updateLogicOccupancy()`(app.js:518) ← `drawRoiOverlay()`(**:445 — 매 리드로**) + `renderSlotList()`(**:1306**). 결과 `state.occComputeByKey`(:113) → `drawOccupancyOverlay`(:557) / `buildFlatSlotRows({judge})`(core.js:701,:709-714) | 호출 빈도가 설계의 핵심 제약 |
+| method | mutating | destructive | requiresCamera | stability | 역할 |
+|---|---|---|---|---|---|
+| `roi.auto.detect` | ✗ | ✗ | **✓** | experimental | 프레임 1장 → 도색선·소실점·f·코너·quad 미리보기. **수동 ROI 를 읽지 않는다** |
+| `roi.auto.score` | ✗ | ✗ | **✓** | experimental | detect 결과를 수동 정본과 대조 채점(hold-out). 파일·DB 무접촉 |
+| `roi.auto.apply` | ✓ | ✓ | ✓ | experimental | 정본 `PtzCamRoi.json` 갱신. `confirm:true` 필수 |
 
-### ★ 결정적 사실
-`updateLogicOccupancy` 는 **`drawRoiOverlay()` 안에서 매 리드로 호출된다**(app.js:445). 이걸 그대로 서버 왕복으로 바꾸면 캔버스 리사이즈·선택 변경·마우스 조작마다 HTTP 가 나간다 — **불가**. 껍데기화의 본체는 "함수 안을 fetch 로 바꾸기"가 아니라 **호출 시점을 데이터 변경점으로 옮기는 것**이다(§3.3).
+`requiresCamera: true` 가 **기존 `place.*` 쓰기 경로와의 결정적 차이**다. 기존 자동 ROI 경로는 카메라 무관여였지만 이번 경로는 프레임이 반드시 필요하다 → 호출 전 `system.busy` 확인 대상이며 카탈로그에 그대로 드러내야 한다.
 
-## 3.2 설계 — 신규/수정 파일
-
-**신규 `src/domain/occupancyJudge.ts`**(순수·결정형·I/O 0)
 ```ts
-export interface FloorPolygon { idx: number; quad: readonly NormalizedPoint[] }
-export interface PlateDet   { quad: NormalizedQuad }
-export interface VehicleDet { rect: NormalizedRect; plate?: PlateDet | null }
-export interface DetectInput { plates?: PlateDet[] | null; vehicles?: VehicleDet[] | null }
-export interface OccupancyRow {
-  idx: number; occupied: boolean; source: 'plate' | 'bbox' | null;
-  center?: NormalizedPoint; plateQuad?: NormalizedQuad; vehicleRect?: NormalizedRect;
-}
-export interface JudgeConfig { groundBandRatio: number; minBandOverlap: number }
+// src/rpc/services/roiAuto.ts — 저장소 관례 그대로
+export const RoiAutoDetectSchema = z.object({
+  camId: z.number().int().positive(),
+  presetIdx: z.number().int().positive(),
+  expectedBays: z.number().int().min(1).max(200).optional(),
+  slotWidthM: z.number().positive().default(2.5),
+  slotDepthM: z.number().positive().default(5.0),
+});
+export const RoiAutoScoreSchema = RoiAutoDetectSchema.extend({
+  camId: z.number().int().positive().optional(),   // 미지정 = 전 카메라·전 프리셋 순회
+  presetIdx: z.number().int().positive().optional(),
+});
+export const RoiAutoApplySchema = RoiAutoDetectSchema.extend({
+  confirm: z.literal(true),
+  presets: z.array(z.number().int().positive()).min(1),
+  minIoU: z.number().min(0).max(1).default(0.98),  // 이 값 미만인 면이 있으면 거부
+  expectTotal: z.number().int().nonnegative().optional(),
+});
 
-/** = web/core.js:577 computeOccupancy 자구 포팅. 번호판 중심 ∈ 폴리곤. */
-export function computeOccupancy(floorPolygons: unknown, plates: unknown): OccupancyRow[];
-
-/** = web/occupancy.js:152 judge 자구 포팅. 1단계 접지밴드 argmax → 2단계 번호판 폴백. */
-export function judgeOccupancy(floorPolygons: unknown, detect: unknown, cfg?: Partial<JudgeConfig>): OccupancyRow[];
-```
-포팅 규칙(**신규 알고리즘 발명 금지**):
-- `quadCentroid`: **웹 판은 4점·수치가 아니면 `null`**(core.js:558-565), 서버 `geometry.ts:120` 은 항상 값을 반환한다. → `occupancyRegion.ts:74 quadCentroid4` 와 **같은 가드**를 로컬로 두고 통과 시에만 `geometry.quadCentroid` 를 호출한다. 가드를 빼면 퇴화 입력에서 판정이 조용히 뒤집힌다.
-- `pointInQuad`(core.js:765) ↔ `pointInPolygon`(polygon.ts:95): 식이 동일함을 확인했다(ray casting·동일 tie-break). 단 웹 판은 `length < 3` 선행 가드가 있으므로 포팅본도 같은 가드를 둔다.
-- 상수·`groundBand` 는 `../capture/onPlaceFilter.js` 에서 **import**(값 복제 금지 — 복제하면 `occupancyGeometryParity` 가 못 잡는 3번째 정의가 생긴다). `domain → capture` import 가 새로 생기지만 순환은 없다(onPlaceFilter 는 domain 만 참조). → §7 Q2.
-- `quadKey`(occupancy.js:129)·`placedPlateKeys`/`placedVehicles` 중복차단·strict `>` tie-break(:173)·퇴화 rect 스킵(:166) 전부 그대로.
-
-**신규 라우트**(`src/api/captureRoutes.ts` 내 `/capture/slots/*` 가족 자리 — :451-490)
-
-| 메서드 | 경로 | 요청 | 응답 |
-|---|---|---|---|
-| POST | `/capture/slots/judge-occupancy` | `{ frames: [{ key: string, floorPolygons: [{idx, quad}], detect: {plates?, vehicles?} }], cfg?: {groundBandRatio?, minBandOverlap?}, regions?: boolean }` | `{ byKey: { [key]: { rows: OccupancyRow[], regions?: [{idx,scale,polygon}], overlapPairs?: [[n,n]] } } }` |
-
-- 경로 근거: `'/capture/slots'` 가 `rpcParity` `known` 에 이미 있어 **무편집 통과**. `occupy`(영역 생성, :485)와 헷갈리지 않게 `judge-occupancy` 로 명명(`load-roi`/`sync-roi` 와 같은 동사형 스타일).
-- **stateless**: cam/preset 을 받아 서버가 검출을 다시 돌리지 **않는다**. `POST /capture/detect` 는 카메라를 실제로 움직이므로(app.js:1238) 여기에 끌어들이면 읽기 메서드가 카메라를 점유하게 된다 → `mutating:false`, `requiresCamera:false`, **부작용 0**.
-- **배치(`frames[]`)인 이유**: `buildFlatSlotRows`(core.js:701)가 **전 프리셋**을 한 번에 판정한다. 프레임마다 왕복하면 프리셋 수만큼 요청이 난다.
-- `regions:true` 면 `buildOccupyRegionsBySlot`(occupancyRegion.ts:238)을 `source==='plate' && plateQuad` 행에만 적용 — app.js:529-531 과 **동일 모집단**.
-- zod 실패 → 400. `frames` 빈 배열 → 200 `{byKey:{}}`(graceful, throw 금지 철학).
-
-**수정 `src/rpc/methods.ts`** — `slot.*` 섹션
-```ts
-{ name:'slot.occupancy.evaluate', title:'슬롯 점유 판정(차량 접지 우선·번호판 폴백)', mutating:false,
-  note:'순수 판정 — 카메라·DB·파일 무접촉. 검출값은 호출자가 준다(plate.detect 로 얻어 넘겨라).',
-  http:(p)=>({ method:'POST', url:'/capture/slots/judge-occupancy', payload:p }) },
+export async function roiAutoDetect(raw: unknown, ctx: RpcContext): Promise<unknown>;
+export async function roiAutoScore(raw: unknown, ctx: RpcContext): Promise<unknown>;
+export async function roiAutoApply(raw: unknown, ctx: RpcContext): Promise<unknown>;
 ```
 
-## 3.3 웹 껍데기화 diff 계획
+`methods.ts` 등록 (기존 템플릿 그대로):
 
-| 위치 | 현재 | 변경 |
-|---|---|---|
-| `web/app.js:86` | `const occupancyJudge = new OccupancyJudge()` | **삭제** |
-| `web/app.js:518-547 updateLogicOccupancy()` | 동기 판정 + 영역 생성 | `async function refreshOccupancy()` 로 교체. 현재 프리셋 + `state.detectByKey` 의 **모든 키**로 `frames[]` 조립 → `POST /capture/slots/judge-occupancy {frames, regions:true}` → `state.occComputeByKey[key] = { spaces: rows.map(...) }` 로 적재. **적재 형식은 현행과 동일**(`{id,occupied,source,center,vehicleRect,region}`) |
-| `web/app.js:445`(`drawRoiOverlay` 안) | `updateLogicOccupancy()` | **삭제**(리드로가 네트워크를 타지 않게) |
-| `web/app.js:1306`(`renderSlotList` 안) | `updateLogicOccupancy()` | **삭제** |
-| 새 호출 지점 | — | ①`runLiveDetect`(app.js:1248 직후, `drawRoiOverlay()` 앞) ②placeRoi 로드/편집 커밋 직후 ③프리셋 전환 시 캐시 없으면 1회 — **데이터가 바뀌는 3곳뿐** |
-| `web/core.js:701 buildFlatSlotRows({placeRoi,detectByKey,parkingSlotsByKey,judge})` | `judge` 주입 → 내부 판정(:709-714) | 시그니처를 `{placeRoi, parkingSlotsByKey, occByKey}` 로 변경. `judge ? ... : computeOccupancy(...)` 분기를 **`occByKey[key]?.spaces` 조회**로 대체. `detectByKey`·`judge` 인자 제거 |
-| `web/occupancy.js` | `OccupancyJudge` + 기하 포팅 | **삭제하지 않는다** — `occupancyJudge.test.ts`·`occupancyGeometryParity.test.ts` 기준변 + 신규 서버 포팅본의 **파리티 기준변**. app.js 의 import 만 제거 |
-| `web/core.js:577 computeOccupancy` | 판정 | 동일 사유로 **유지**(`computeOccupancy.test.ts` 기준변). `occupancy.js:222` 의 내부 호출도 그대로 |
-| `drawOccupancyOverlay`(:557) / 슬롯목록 뱃지(:1318) | `state.occComputeByKey` 소비 | **무변경** — 소스 shape 을 그대로 맞췄기 때문 |
+```ts
+{ name: 'roi.auto.detect', title: '도색선 기반 바닥 ROI 검출(미리보기)',
+  mutating: false, requiresCamera: true, stability: 'experimental',
+  note: '파일·DB 를 쓰지 않는다. 수동 ROI 를 읽지 않는다(hold-out).',
+  requires: ['camera'], handler: roiAutoDetect },
+{ name: 'roi.auto.score', title: '자동 ROI 채점(수동 정본 대비)',
+  mutating: false, requiresCamera: true, stability: 'experimental',
+  requires: ['camera', 'placeRoiFile'], handler: roiAutoScore },
+{ name: 'roi.auto.apply', title: '자동 ROI 정본 적용',
+  mutating: true, destructive: true, requiresCamera: true, stability: 'experimental',
+  note: '정본(PtzCamRoi.json) 갱신. DB 반영은 별도로 slot.roi.sync 를 호출할 것.',
+  requires: ['camera', 'placeRoiFile'], handler: roiAutoApply },
+```
 
-**UX 불변 확인**: 오버레이 원·사다리꼴·`(점유)/(공차)` 뱃지·`#roi-db` 소스 전환(:563) 전부 동일. 바뀌는 건 "언제 계산되는가"뿐이며, 사용자 관점에선 검출 도착 시 갱신되는 현행 체감과 같다(현행도 검출 도착 → `drawRoiOverlay()`(:1262) → 계산 순서였다).
+에러는 `throw new RpcMethodError(...)`, 부분 강등은 `issues: string[]` — 저장소 규약 그대로.
 
-## 3.4 오류코드 매핑
-| 상황 | HTTP | RPC |
-|---|---|---|
-| body zod 실패(quad 3점 미만 등) | 400 | INVALID_PARAMS |
-| frames 빈 배열 | 200 `{byKey:{}}` | 정상(graceful) |
-| 폴리곤 전부 퇴화 → 판정 불가 | 200 + 해당 행 `occupied:false, source:null` | 정상. **CONFLICT 로 올리지 않는다** — 부작용이 없어 "사람 개입" 대상이 아니고, 위장 점유 생성 금지 원칙과도 일치 |
+**프레임 취득은 불확실 항목이다(§9-U1).** `ctx.deps.camera` 시임의 정확한 형태를 구현자가 먼저 확인해야 한다.
 
 ---
 
-# 4. 슬롯편집 — `setup.slot.add` / `setup.slot.delete`
+## 6. 파괴 방지 (과제 6, R5)
 
-## 4.1 현황 정밀 조사
+**R5 를 "직접 호출"이 아니라 "호출하지 않음"으로 만족시킨다 — 더 강하다.**
 
-| 요소 | 서버 | 웹 | 판정 |
-|---|---|---|---|
-| slotId 생성 | **없음** | `web/core.js:854 nextSlotId(artifact,cam,preset)` — `c{cam}p{preset}s{N}`, 결번 충돌회피 | 웹 전용 |
-| 중간삽입 | **없음** | `web/core.js:876 insertSlotAt(artifact,atGlobalIdx,newSlot)` — globalIndex **명시적 splice**(수동 위치 보존, rebuild 미사용:872 주석) | 웹 전용 |
-| 삭제 | **없음** | `web/core.js:839 removeSlot(artifact,slotId)` → `rebuildGlobalIndex`(:805) | 웹 전용 |
-| coverage 검증 | `src/setup/GlobalIndexer.ts:44 validateCoverage(global, slots)` — `slotId` 집합 **양방향 일치만** 본다(globalIdx 연속성·중복은 **안 본다**) | — | 서버 |
-| 본문 검증·영속화 | `src/api/artifactSchema.ts:66 validateArtifactBody`(zod → plateRoi rect→quad 승격 → validateCoverage) → `repo.saveArtifact`(server.ts:81-89, `PUT /mapping` :304) | `saveMapping()` app.js:1526(**토큰 미전송** :1532) | 서버가 검증·저장 소유 |
-| 저장 대상 | `Repository`(store/Repository.ts:13) → **`data/setup_artifact.json` 단 1개**, `stringify5` 경유(:20) | — | **`save/Setup_*.json` 도 DB slot_setup 도 아니다**(전제 B 정정) |
-| renumber | `POST /mapping/renumber`(server.ts:365) → DB slot_id(정수) 재번호 → slot_ptz → setup_result → **`repo.saveArtifact(buildArtifactFromSlotSetup(DB))`**(:356) | — | ★ **setup_artifact.json 을 DB 로부터 통째 재생성한다** |
-| placement | `POST /mapping/placement`(server.ts:429) | — | :420 에서 동일하게 artifact 재생성 |
-| 매핑 읽기 | `resolveMapping()`(server.ts:169) — **파일 우선**, 파일 비면 DB 조립 | — | 파일이 있으면 DB 와 갈릴 수 있다 |
-| 기존 테스트 | `test/slotInsertEdit.test.ts` — `web/core.js` 함수들 + `src/setup/GlobalIndexer.validateCoverage` 를 **함께** import 해 이미 교차검증 중 | | 파리티 기준변 확보됨 |
+조사 결과 `updateSlotRoiGeometry`(`SqliteStore.ts:526`)의 **유일한 호출자는 `src/capture/roiSlotSync.ts:150` (`syncRoiToDb`)** 이고, 이는 기존 RPC `slot.roi.sync` 로 노출돼 있다. 따라서:
 
-### ★ 선행 설계가 필요했던 3가지 질문의 답
-
-**Q1. coverage 검증과 충돌하는가?** → **안 한다.**
-`validateCoverage`(GlobalIndexer.ts:49-53)는 `globalIndex[].slotId` 집합 == `slots[].slotId` 집합만 본다. `insertSlotAt`(core.js:884,900)은 slots·globalIndex 에 **동시에** 넣고, `removeSlot`(core.js:840,845)은 양쪽에서 **동시에** 뺀다 → 구성상 항상 통과.
-단 `insertSlotAt` 은 `coveredSlotIds` 에도 append 하는데(:890) `validateCoverage` 는 이걸 **검사하지 않는다** → preset 부재 시 `label:"c:p"`·PTZ 없는 preset 을 조용히 push 한다(:894-896). → 라우트가 그 상황을 **`warnings[]` 로 보고**한다(숨기지 않는다).
-
-**Q2. `slot.renumber` 와의 관계는?** → **네임스페이스가 다르고, renumber 가 상위다.**
-- artifact `slotId` = 문자열 `c1p1s1`; DB `slot_id` = 정수. `renumberSlotIds` 는 DB 정수만 다룬다.
-- **위험**: artifact 에 슬롯을 넣은 뒤 `slot.renumber` 또는 `slot.placement.update` 를 부르면 server.ts:356/:420 이 `buildArtifactFromSlotSetup(DB)` 로 artifact 를 **통째 덮어써서 추가분이 사라진다**(DB 에는 그 슬롯이 없다).
-- **대응**: 응답에 `dbSlotCount`/`artifactSlotCount` + 경고를 싣고, 카탈로그 `note` 에 "renumber/placement 호출 시 이 편집은 DB 기준으로 되돌아간다"를 명시한다. **코드로 막지 않는다**(막으면 renumber 가 못 돈다).
-
-**Q3. 파일↔DB 정합은 어떻게 하나?** → **DB 를 아예 건드리지 않는다.**
-- DB `slot_setup` 의 정본 소스는 **ROI 파일(PtzCamRoi.json)** 이다(`roiSlotSync.ts:10` "정본은 파일 하나다"). artifact 는 그 파생물이다.
-- artifact 에 슬롯을 추가한다고 주차면이 생기지 않는다. **실제 주차면 추가 경로는 이미 승격돼 있다**: `place.space.add`(read-modify-write) → `slot.roi.sync`(차등 UPDATE·비파괴).
-- 따라서 `setup.slot.add/delete` 는 **artifact 편집 전용**이며 `replaceSlotSetup` 도 `writeSetupResultFiles` 도 **호출하지 않는다**. 이것이 07-28 wipe 교훈(검출·센터링 23→0)에 대한 이번 설계의 답이다 — **파괴 경로에 아예 진입하지 않는다.**
-
-## 4.2 설계 — 신규/수정 파일
-
-**신규 `src/setup/artifactSlotEdit.ts`**(순수·I/O 0) — `web/core.js` 4함수 자구 포팅
-```ts
-export function nextSlotId(artifact: SetupArtifact, camIdx: number, presetIdx: number): string;          // = core.js:854
-export function insertSlotAt(a: SetupArtifact, atGlobalIdx: number, newSlot: ParkingSlot): SetupArtifact; // = core.js:876
-export function removeSlot(a: SetupArtifact, slotId: string): SetupArtifact;                              // = core.js:839
-export function rebuildGlobalIndex(slots: ParkingSlot[], presets: Preset[]): GlobalSlotIndex[];           // = core.js:805
 ```
-불변 규칙 그대로: `insertSlotAt` 은 **명시적 splice**(rebuild 재사용 금지 — core.js:872 주석의 이유가 유효), `at` 은 `[1, N+1]` clamp(:899), 중복 slotId → no-op(:878), `removeSlot` 은 rebuild 사용, `coveredSlotIds` 에 없는 슬롯은 `camIdx/presetIdx = 0` 으로 뒤에 붙음(:820-825).
+roi.auto.apply
+  ├─ S1. 검출·채점 재실행 (미리보기와 동일 입력 → 동일 결과여야 함, R2)
+  ├─ S2. 합격선 게이트: 대상 프리셋 전 면 IoU ≥ minIoU 아니면 즉시 CONFLICT 거부
+  ├─ S3. assertAutoPromoteSafe(next, current) — G1~G5 재사용
+  ├─ S4. guardTotal(expectTotal) — 동시편집 가드 재사용
+  └─ S5. writePlace() 경로: .bak 원문 바이트 백업 → stringify5(json,2) 정본 갱신 → 실패 시 복원
 
-**수정 `src/api/server.ts`** — `/mapping/*` 가족에 2라우트(`renumberHandler`/`placementHandler` 와 같은 자리·같은 클로저 방식)
-
-| 메서드 | 경로 | 요청 | 응답(200) |
-|---|---|---|---|
-| POST | `/mapping/slot` | `{ camIdx:int≥1, presetIdx:int≥1, at?:int≥1, rect?:{x,y,w,h}, zone?:string }` | `{ ok:true, slotId, globalIdx, slots, globalCount, warnings:[], dbSlotCount }` |
-| POST | `/mapping/slot/delete` | `{ slotId:string, confirm:true }` | `{ ok:true, slotId, slots, globalCount, warnings:[], dbSlotCount }` |
-
-핸들러 흐름(공통):
-1. `deps.repo.loadArtifact()` → `null` 이면 **404** `{error:'no setup artifact'}`. *`resolveMapping()` 을 쓰지 않는다* — DB 폴백 결과를 파일로 쓰면 DB 를 파일로 승격시켜 버린다.
-2. 편집(`insertSlotAt` / `removeSlot`). **delete 대상 slotId 부재 → 409** `{error:'slotId 없음: X — 파일 무변경'}`(→CONFLICT). `removeSlot` 은 없는 id 에도 조용히 통과하므로 **사전 존재 확인이 필수**.
-3. `validateArtifactBody(edited)` 재사용(artifactSchema.ts:66). 실패 → 그 응답(400 `invalid artifact` / 400 `coverage mismatch`) 그대로 반환 — **파일 무변경**.
-4. `deps.repo.saveArtifact(v.artifact)`.
-5. `warnings[]`: ①신규 preset 생성 시 "`cam:preset` preset 을 새로 만들었다(PTZ 없음)" ②`deps.sqlite` 가 있고 `getSlotSetup().length !== artifact.slots.length` 면 "DB slot_setup 과 개수가 다르다 — slot.renumber/slot.placement.update 호출 시 이 편집은 DB 기준으로 되돌아간다".
-6. 기본값은 **웹과 같은 값을 서버가 소유**: `rect = {x:0.45,y:0.45,w:0.1,h:0.1}`(app.js:1463), `zone = 'cam'+camIdx`(app.js:1464).
-
-`deps.sqlite` 는 **읽기(`getSlotSetup`)만** 쓴다. 쓰기 API 호출 금지.
-
-**수정 `src/rpc/methods.ts`** — `setup.*` 섹션
-```ts
-{ name:'setup.slot.add', title:'셋업 산출물에 슬롯 1개 추가', mutating:true,
-  note:'setup_artifact.json 만 바꾼다. 실제 주차면 추가는 place.space.add + slot.roi.sync 다. ' +
-       'slot.renumber·slot.placement.update 를 부르면 이 편집은 DB 기준으로 되돌아간다.',
-  http:(p)=>{ requireFields(p,['camIdx','presetIdx'],'setup.slot.add');
-              return { method:'POST', url:'/mapping/slot', payload:p }; } },
-{ name:'setup.slot.delete', title:'셋업 산출물에서 슬롯 1개 삭제', mutating:true, destructive:true,
-  note:'위와 동일 — artifact 전용. DB·ROI 정본은 불변.',
-  http:(p)=>{ requireConfirm(p,'setup.slot.delete','setup_artifact.json 에서 슬롯을 제거한다');
-              requireFields(p,['slotId'],'setup.slot.delete');
-              return { method:'POST', url:'/mapping/slot/delete', payload:p }; } },
+  DB 는 건드리지 않는다. 반영이 필요하면 호출자가 기존 `slot.roi.sync` 를 별도 호출한다.
 ```
-경로 `/mapping/slot*` 은 `known` 의 `'/mapping'` 접두어에 걸려 **`rpcParity` 무편집 통과**.
 
-## 4.3 웹 껍데기화 diff 계획
+**정적 봉인 테스트 (필수):**
+```ts
+it('roiAuto 는 DB 쓰기 경로를 신설하지 않는다', () => {
+  const src = readFileSync('src/rpc/services/roiAuto.ts', 'utf8');
+  expect(src).not.toContain('replaceSlotSetup');
+  expect(src).not.toContain('SqliteStore');
+  expect(src).not.toContain('updateSlotRoiGeometry');
+});
+it('replaceSlotSetup 호출자는 여전히 3곳이다', () => { /* 전역 grep 카운트 = 3 */ });
+```
 
-| 위치 | 변경 |
+`replaceSlotSetup` 호출자 실측 3곳(`Finalizer.ts:300` · `roiDbLoad.ts:319` · `migrateToSettingDb.ts:96`)은 **개수 그대로 유지**한다.
+
+---
+
+## 7. 정직한 강등 경로 (과제 7) — 위장 금지
+
+검출·적합이 성립하지 않는 구간은 **자동 대상에서 빼고 사유를 숫자로 남긴다.** 억지로 채우지 않는다.
+
+| 강등 코드 | 조건(전부 수치 판정) | 조치 |
+|---|---|---|
+| `D1_TOO_FEW_BAYS` | 슬롯 < 3 (근변코너 < 4) → B5 사영 1D 적합 불가 | 자동 제외. **`1:3`(2면) 이 여기 해당** |
+| `D2_NO_FRONT_LINE` | 정련 통과 직선 0개 또는 최장 직선 지지도 < 임계 | 자동 제외 |
+| `D3_FEW_SEPARATORS` | 분리선 < 2 → VP_d 불가 | 자동 제외 |
+| `D4_ROW_RESID` | B5 등간격 잔차 > 2.0px → 격자 불규칙(사선주차·간격불균등) | 자동 제외 |
+| `D5_VP_DEGENERATE` | `focalFromVPs` 부호 실패 또는 f 가 [0.3, 5.0]×imgH 밖 | 자동 제외. **PTZ zoom 폴백 금지** |
+| `D6_HEIGHT_DEV` | 이미지추정 d 가 config 지상고 대비 >5% 이탈 | 경고(issues)만, 제외는 아님 |
+| `D7_WIDTH_SPREAD` | 근변코너 간격 편차 > 5% | 경고. **>15% 는 배정 오판 신호**(실측 2:1 오배정 시 77.7%) |
+| `D8_NON_QUAD` | 수동 슬롯이 4점이 아님 | 채점 대상에서 제외 |
+| `D9_SLOT24` | 슬롯 24 (파일↔DB 배치 불일치, R8) | 채점·적용 전 범위 제외 |
+| `D10_ANCHOR_DEFECT` | 자동 코너가 도색선 위에 있는데(정련 resid < 1px) 수동 변이 도색선에서 > 3px 이탈 | **수동 쪽 오작화로 분류.** 자동을 수동에 맞추지 않는다 |
+
+**D10 이 이번 설계에서 새로 필요해진 항목이다.** `idx1` 의 우측 분리선은 실제 도색선에서 9.03px 떨어져 있다(F6). 이 상태에서 "IoU ≥ 0.98" 을 만족시키려면 **자동 산출을 일부러 도색선에서 벗어나게 만들어야 하는데, 그것이 곧 위장이다.** 따라서 D10 구간은 "수동 정본에 결함 있음"으로 보고하고 마스터 판단을 받는다(§9-Q1).
+
+응답 예:
+```json
+{ "key": "1:3", "graded": false, "gradeReason": "D1_TOO_FEW_BAYS",
+  "detail": { "bays": 2, "cornersNeeded": 4, "cornersFound": 3 } }
+```
+`graded:false` 인 프리셋은 **통과로 세지 않는다.** 평균에도 넣지 않는다.
+
+---
+
+## 8. 검증 계획 — 무엇을 어떤 수치로 확인하면 성공인가
+
+| 단계 | 내용 | 성공 기준(수치) |
+|---|---|---|
+| **V1** | `floorPaint` 유닛테스트 — 합성 이미지(기울어진 흰 스트라이프, 폭 9px, 대비 170)에 정련 적용 | 복원 직선의 법선 오프셋 오차 **< 0.2px**, 각도 오차 **< 0.05°** |
+| **V2** | 실프레임 회귀 — 동결 픽스처(cam1 preset1 JPEG)에 `detectPaintLines` | 전방선 1개 + 분리선 ≥6개 검출, 전방선 정련 resid **< 0.5px** (설계자 실측 MAD 0.03~0.49px) |
+| **V3** | `bayGeometry` 골든 해시 | `sha256(stringify5({det, model, grid, quads}))` 고정. 재실행 시 불변 (R2/R9) |
+| **V4** | ★ **f 회수 정확도** — 검출 코너로 `focalFromVPs` | 정본 `fov` 대비 상대오차 **< 1.0%** (설계자 실측 0.00%) |
+| **V5** | ★ **지상고 자기검증** | 이미지추정 d 가 config 5.0m 대비 **< 3%** (설계자 실측 −1.00%) |
+| **V6** | ★ **채점 (본 목표)** — 전 프리셋 hold-out | 유효 채점 대상(`graded:true`) 전 면 **IoU ≥ 0.98**. 미달 면은 D1~D10 중 하나로 **반드시 분류** |
+| **V7** | 배정 판별 — IoU 를 쓰지 않는 기준으로 | `2:1` → rot=1 dir=−, `2:2` → rot=2 dir=− 회수 (설계자 실측) |
+| **V8** | hold-out 봉인 | `test/roiAutoHoldout.test.ts` green (§3) |
+| **V9** | 파괴 방지 봉인 | `roiAuto.ts` 에 DB 심볼 0건, `replaceSlotSetup` 호출자 = 3곳 (§6) |
+| **V10** | apply 왕복 | 적용 후 `slot_setup` 의 `vpd_bbox/lpd_obb/occupy_range/pan/tilt/zoom/centered/img1/slot3d_front_center` **전 컬럼 불변** 실측 |
+| **V11** | 소수 5자리 | 정본 왕복 후 모든 좌표가 소수 ≤5자리 (R7) |
+| **V12** | 회귀 | `npx tsc --noEmit` exit 0, `npx vitest run` 전량 green (직전 기준 252파일/3005테스트) |
+| **V13** | 육안 | sharp 오버레이 — 초록=수동, 빨강=자동, **노랑=검출된 도색선**. 자동 근변이 도색선 위에 얹혔는지 확인 |
+
+**V13 에 "검출된 도색선"을 반드시 그린다.** 자동과 수동만 비교하면 F6 같은 "수동이 틀린 경우"를 영영 못 본다.
+
+---
+
+## 9. 불확실·미해결·질문
+
+### 미검증 (정직 표기)
+
+| # | 항목 | 상태 |
+|---|---|---|
+| **U1** | **프레임 취득 시임** — `ctx.deps.camera` 의 정확한 인터페이스를 확인하지 못했다. `src/api/captureRoutes.ts:220` 이 `sharp(jpg).greyscale().raw()` 를 쓰는 것은 확인했으나, 그 `jpg` 를 어디서 받는지는 미추적 | **구현 착수 전 1순위 확인** |
+| **U2** | **도색 검출은 `cam1 preset1` 프레임 1장에서만 검증됐다.** 다른 4개 프리셋은 PTZ 이동이 필요해 미측정(설계 단계는 무접촉 원칙). cam2 의 현재 화각 프레임에서 도색선이 **더 잘 보이는 것**(분리선이 전방선까지 가림 없이 이어짐)은 육안 확인함 | 첫 loop 에서 측정 |
+| **U3** | **실카(RTSP) 전면 미검증** (R10). 대비 162~198 은 시뮬 수치다. 실카는 마모·그림자·저대비·**렌즈왜곡**(직선이 휘면 VP 적합이 무너진다) 이 전부 미지수. A2/A4 상수는 실카 재조정 대상 | 이 환경에서 검증 불가 |
+| **U4** | **Hough 단계는 미구현·미측정이다.** 설계자가 실측한 것은 A4(정련)와 Stage B 이고, A3(거친 검출)은 수동 ROI 를 seed 로 대체해 측정했다. **"seed 없이 처음부터 찾는" 부분이 이 설계에서 가장 검증이 약한 지점**이다 | 첫 loop 의 최우선 과제 |
+| **U5** | `1:2` 는 측면 VP 잔차 9.97px · 폭편차 3.4% · f 오차 −1.90% 로 다른 프리셋과 성격이 다르다. 수동 드로잉 결함인지 실제 배치 불규칙인지 미확인 (자동 IoU 0.928~0.984) | loop 에서 분류 |
+| **U6** | 정련 상수(±14px, 35백분위, 대비 45)는 실측 1건에서 나온 값이다. 슬롯이 매우 멀어 선폭이 2~3px 인 구간에서의 거동 미검증 | |
+
+### 마스터 판단 요청
+
+**Q1 (결정적).** `idx1`·`idx8` 은 수동 앵커가 실제 도색선에서 **9.03px 벗어나 있다**(F6, 확신 있는 검출). 자동 산출은 도색선 위에 정확히 놓이므로, 이 두 면은 **자동이 더 정확한데 IoU 는 0.95 로 떨어진다.** 셋 중 하나를 골라 주십시오.
+  - **(a) 도색선을 정본으로 인정** — 자동 산출로 앵커를 교정하고, 교정 후 재채점한다. (설계자 권고)
+  - **(b) 두 면을 `D10_ANCHOR_DEFECT` 로 제외** 하고 나머지 21면에서 ≥0.98 을 판정한다.
+  - **(c) 수동을 정본으로 고수** — 이 경우 **목표는 원리적으로 달성 불가**이며, 달성했다고 보고하려면 자동을 일부러 틀리게 만들어야 한다(= 위장). 채택 시 불가 사유를 그대로 보고한다.
+
+**Q2.** `1:3`(2면)은 사영 1D 적합에 필요한 4점이 안 나온다(`D1`). "검증 불가"로 표기하고 통과 집계에서 빼는 것으로 확정해도 되겠습니까. (리더 컨텍스트 §6 판단과 일치)
+
+**Q3.** 슬롯 24 를 `cam1:preset1` 과 `cam2:preset1` 중 어디로 확정합니까 (R8). 확정 전까지는 범위에서 제외한 채 진행합니다.
+
+**Q4.** `roi.auto.apply` 는 정본 파일만 쓰고 DB 반영은 기존 `slot.roi.sync` 를 별도 호출하는 구조로 두었습니다(§6 — DB 쓰기 경로를 신설하지 않는 것이 R5 를 가장 강하게 만족). apply 가 sync 까지 자동 연쇄하기를 원하시면 알려 주십시오.
+
+---
+
+## 10. R1~R10 대조표
+
+| # | 제약 | 이 설계에서의 충족 방식 | 검증 |
+|---|---|---|---|
+| **R1** | 이미지에서 4점을 찾을 것. 수동 ROI 는 정답지로만 — hold-out | 근변 2점 = 도색선∩분리선 **직접 검출**(F1). 원변 2점 = 소실점 기하 복원(F3). 검출·기하 모듈은 타입·모듈경계·정적봉인 **3중**으로 수동 ROI 차단(§3). 누출 2건(베이 개수·방향 1비트)은 **선언**하고 응답에 표기 | V2·V6·**V8** |
+| **R2** | 선형 최소제곱. RANSAC·난수 금지. 순회 순서 고정, 동점 시 낮은 인덱스 | VP 교점 = 2×2 정규방정식(닫힌 해). 사영 1D 적합 = 3×3 정규방정식. Hough 피크 = 누적 desc → (theta asc, rho asc). 격자 위상 후보 = 고정 순서 전수 순회. **`Math.random` 0회** | **V3 골든해시** |
+| **R3** | 정점 순서 하드코딩 금지 — 데이터에서 판별 | 이면군×방향 전수 탐색 유지. ★ 선택 기준을 **IoU 가 아닌 이미지측 일관성**(등간격 잔차 + 측면 VP 잔차)으로 바꿔 R1 과 양립시킴. 실측으로 2:1/2:2 배정을 정답지 없이 회수(F5). 직선 분류도 각도 상수가 아니라 VP 일관성으로 | **V7** |
+| **R4** | 기존 자산 재사용. 신규 IoU 구현 금지 | `quadIoU` · `assertAutoPromoteSafe`(G1~G5) · `buildApplySpaces` · `gridToPixelQuads`/`fitGridFromQuads`/`canonicalizeQuad` · `project.ts` · **`focalFromVPs`(B6)** · `round5`/`stringify5` · `writePlace` 전부 재사용(§4-3). IoU·투영 수식 재구현 0 | import 검사 |
+| **R5** | DB 쓰기는 `updateSlotRoiGeometry` 만. `replaceSlotSetup` 금지, 호출자 3곳 유지 | **DB 를 아예 쓰지 않는다.** apply 는 정본 파일만 갱신하고 DB 반영은 기존 `slot.roi.sync`(유일한 `updateSlotRoiGeometry` 호출자 `roiSlotSync.ts:150`)에 위임. `roiAuto.ts` 에 `SqliteStore`/`replaceSlotSetup`/`updateSlotRoiGeometry` 문자열 0건을 정적 봉인 | **V9·V10** |
+| **R6** | MCP 채점·미리보기(무해) / 적용(destructive+confirm) 분리. `grid.*` 3종 무접촉 | `roi.auto.detect`·`roi.auto.score` = `mutating:false`. `roi.auto.apply` = `mutating:true, destructive:true` + `confirm: z.literal(true)`. 별도 네임스페이스, `grid.*` 코드 0줄 변경. `requiresCamera:true` 신규 명시(§5) | 카탈로그 확인 |
+| **R7** | 영속화 수치 소수점 최대 5자리 | 정본 쓰기는 `writePlace` 재사용 → `stringify5(json, 2)` 강제 경로. 응답(휘발성)에는 적용하지 않음(규약대로 영속화 경계 전용) | **V11** |
+| **R8** | 슬롯 24 범위 제외 + 보고서 명시 | 강등 코드 `D9_SLOT24` 로 채점·적용 양쪽에서 제외. §9-Q3 로 마스터 판단 요청. 미해소 상태를 응답 `issues` 와 문서에 명시 | 채점 응답 |
+| **R9** | 골든 해시 vitest 결정론 봉인 + 기존 회귀 유지 | V3 골든 해시(동결 JPEG 픽스처 사용 — 런타임 정본을 쓰면 apply 가 스스로 깨뜨린다, `groundGrid.test.ts:19-24` 의 self-invalidating seal 경고 준수). 신규 테스트 파일을 픽스처 봉인 메타 테스트 목록에도 추가 | **V3·V12** |
+| **R10** | 시뮬 수치로 실카 대변 금지. 미검증분은 미검증으로 표기 | 전 수치에 출처 표기. §9-U2/U3/U4 에 미검증 3건 명시(다른 프리셋·실카·Hough 단계). 실카 리스크로 **렌즈왜곡**을 추가 식별(직선이 휘면 VP 적합이 무너짐 — 시뮬에는 없는 실카 고유 위험). 보고서에 "실카 검증 0건"을 유지 | 문서 |
+
+---
+
+## 11. 구현 순서 (구현자에게)
+
+1. **U1 확인** — 프레임 취득 시임. 여기가 막히면 나머지가 전부 못 돈다. → 검증: cam1 프레임을 `Uint8Array` 그레이로 받는 최소 코드 1개 동작
+2. `bayGeometry.ts` 먼저 (Stage B) — **이미 실측으로 IoU 1.0000 이 확인된 부분**이라 위험이 가장 낮다. 입력은 코너 배열. → 검증: V3·V4·V5
+3. `roiAutoScore.ts` + `roi.auto.score` — 코너를 **수동 근변에서 뽑아** 넣은 상태로 먼저 배선하고 채점표를 낸다(중간 상태이며 hold-out 아님 — **반드시 그렇게 표기**). → 검증: V7
+4. `floorPaint.ts` (Stage A) — **U4 가 여기 있다. 가장 위험한 단계.** → 검증: V1·V2
+5. 3의 코너 입력을 4의 검출 결과로 **교체** → 이 시점에 비로소 R1 이 성립한다. → 검증: **V6·V8**
+6. `roi.auto.apply` + 봉인 → 검증: V9·V10·V11
+7. 회귀·문서 → V12·V13
+
+> **5번이 결정적이다.** 4번까지만 하고 멈추면 L0 자기재현과 다를 바 없다.
+
+---
+
+## 12. 영향도 (문서화 담당 전달용 초안)
+
+| 모듈 | 영향 |
 |---|---|
-| `web/app.js:1455-1474 addSlot()` | `async` 화. **유지**: `#map-msg` 가드(1456-1460), `#slot-insert-idx` 읽기(1466), 성공 후 `state.selectedSlotId = data.slotId` · `drawRoiOverlay()` · `renderSlotList()` · `renderSelectionInfo()`(1471-1473). **제거**: `presetKey`(1461)·`nextSlotId`(1462)·rect 리터럴(1463)·newSlot 조립(1464)·`N` 계산(1465)·clamp(1467)·`insertSlotAt`(1468)·`markDirty()`(1470). **추가**: `mutFetch('/mapping/slot', {body:{camIdx:state.cam, presetIdx:state.preset, at}})` → `await loadMapping()`(서버 정본 재동기화 — `saveMapping`:1539 와 동일 관용구), `warnings[]` 를 `#map-msg` 에 표시 |
-| `web/app.js:1477-1485 deleteSelectedSlot()` | `async` 화. **제거**: `removeSlot`(1479)·`markDirty()`(1481). **추가**: `mutFetch('/mapping/slot/delete', {body:{slotId:state.selectedSlotId, confirm:true}})` → `await loadMapping()` |
-| **★ 동작 변화(의도적)** | 기존 "메모리 편집 → 저장 버튼"(2단계) → **서버 즉시 반영**(1단계). `#map-msg` 를 "추가됨(서버 반영)"으로 바꾸고 `markDirty()` 를 부르지 않는다. 저장 버튼(`saveMapping`)은 ROI 드래그 편집용으로 **그대로 남는다**(그쪽은 여전히 메모리 편집이다). → §7 Q3 |
-| `web/app.js:36` import | `insertSlotAt` import 제거(고아 방지). `removeSlot` 은 타 사용처 grep 후 판단 |
-| `web/core.js` 4함수 | **유지**(`test/slotInsertEdit.test.ts` 기준변 + 파리티 기준변) |
+| `src/ground/floorPaint.ts` · `bayGeometry.ts` · `roiAutoScore.ts` | **신규**. 순수·IO 0 |
+| `src/rpc/services/roiAuto.ts` | **신규**. 핸들러 |
+| `src/rpc/methods.ts` | 가산 3항목 + import. 기존 76 메서드 무변경 |
+| `src/ground/groundModel.ts` · `project.ts` · `groundGrid.ts` · `autoRoiPlan.ts` | **변경 없음 — 재사용만** |
+| `src/capture/SqliteStore.ts` · `Finalizer.ts` · `roiDbLoad.ts` | **변경 없음.** `replaceSlotSetup` 호출자 3곳 유지 |
+| `src/capture/placeRoi.ts` · `placeRoiEdit.ts` | **변경 없음**(보호 파일) |
+| `src/api/groundGridRoutes.ts` · `web/*` | **변경 없음.** 웹 `grid.*` 흐름과 병존 |
+| `PtzCamRoi.json` | `roi.auto.apply` 의 쓰기 대상. 기존 `.bak` 체계 그대로 |
+| DB `slot_setup` | **이번 범위에서 무접촉** |
+| `package.json` | **의존성 추가 없음** — sharp 만으로 충분(OpenCV 불필요) |
 
-## 4.4 오류코드 매핑
-| 상황 | HTTP | RPC | 파일 |
-|---|---|---|---|
-| artifact 파일 없음 | 404 | NOT_FOUND | 무변경 |
-| 삭제 대상 slotId 부재 | 409 | CONFLICT | **무변경** |
-| coverage mismatch(방어) | 400 | INVALID_PARAMS | **무변경** |
-| zod 실패 | 400 | INVALID_PARAMS | 무변경 |
-| `confirm` 누락(delete) | RPC 단계 차단 | INVALID_PARAMS | 라우트 미도달 |
-
----
-
-# 5. 구현 순서와 각 단계의 검증
-
-각 단계는 **독립 커밋 가능**하며, 끝날 때마다 `npx tsc --noEmit` 0 + `npx vitest run`(사전 실패 제외) green 이어야 한다.
-
-| # | 단계 | 산출 | 검증(무엇을 고정하는가) |
-|---|---|---|---|
-| 1 | **fixture 이관(선행)** | `test/fixtures/setupResult.23slots.json` + `test/buildTouringPlan.test.ts` import 변경 | `npx vitest run test/buildTouringPlan` → **collect 실패 → 33 pass**. 사전 실패 3→2건. 원본은 `d:\Work\Parking3D\AgentVLA\ParkAgent\SettingAgent\save\setup_result.json`. 근거: `save/` 는 `.gitignore:21` 런타임 산출물이라 테스트 고정입력이 될 수 없다 |
-| 2 | **인증 토큰(서버)** | `src/api/controlGate.ts` + server.ts 1줄 | `test/controlGate.test.ts` 5블록 + `viewerRoutes`/`rpcDispatch`/`rpcParity` 무회귀. **드리프트 테스트가 게이트↔카탈로그 일치를 봉인** |
-| 3 | **인증 토큰(웹)** | `web/token.js` + app.js/roimaker.js 35곳 치환 + localStorage | `test/webTokenWiring.test.ts` 정적 단정(생 `method:'POST'` 0건). **라이브**: 13021 에 `controlToken:'T'` 설정 후 웹에서 저장·수집시작이 403 없이 동작 |
-| 4 | **투어링 순수함수** | `src/setup/touringPlan.ts` | `test/touringPlanParity.test.ts` — web↔src `toEqual` 완전 일치 |
-| 5 | **투어링 잡·라우트·RPC** | `TourJob.ts` · `tourRoutes.ts` · server.ts · index.ts(jobBusy) · methods.ts | `test/tourJob.test.ts`(스텝순서·PTZ null 폴백·중복시작·stop·실패흡수) + `test/tourRoutes.test.ts`(상태코드·isBusy 409·미주입 404) + `rpcParity` known 3줄 + **T4 동적 라우트 검사 신규** |
-| 6 | **투어링 웹 껍데기화** | app.js `runTouringTest` 폴링화 | `test/buildTouringPlan.test.ts:313-322`(버튼 위치·결선) **무수정 green** = UX 불변 증거. 라이브 순회 육안 확인 |
-| 7 | **점유판정 포팅** | `src/domain/occupancyJudge.ts` | `test/occupancyJudgeParity.test.ts` — T1~T9 + 퇴화 전 케이스 web↔src 일치. 기존 점유 테스트 4종 **무수정 green** |
-| 8 | **점유판정 라우트·RPC** | captureRoutes 1라우트 + methods.ts 1줄 | `test/occupancyRoutes.test.ts` + `regions:true` 결과가 `buildOccupyRegionsBySlot` 직접 호출과 동일 |
-| 9 | **점유판정 웹 껍데기화** | app.js 호출점 이동 + core.js `buildFlatSlotRows` 시그니처 | 소비 테스트 4개(`boundaryCrossCheck`·`finalizerParkingSlots`·`occupancyAnchor.regression`·`placeGlobalIdx`) **호출부만 수정·단정값 불변**. 라이브: 검출 실행 → 오버레이 원/사다리꼴/뱃지 동일 |
-| 10 | **슬롯편집 포팅** | `src/setup/artifactSlotEdit.ts` | `test/artifactSlotEditParity.test.ts` |
-| 11 | **슬롯편집 라우트·RPC** | server.ts 2라우트 + methods.ts 2줄 | `test/mappingSlotRoutes.test.ts`(특히 **409 시 파일 md5 불변**) + REST↔RPC 파일 md5 동일 |
-| 12 | **슬롯편집 웹 껍데기화** | app.js addSlot/deleteSelectedSlot | 라이브: 추가 → ROI 드래그 → 저장, 삭제 UX 확인 |
-| 13 | **마감** | 카탈로그 확인 | `GET /rpc/catalog` count 70 → **76**(tour 3 + occupancy 1 + slot 2). 전체 `vitest` green(사전 실패 2건 제외) |
-
-> **★ 단계 6 ↔ 7 사이 게이트 — ✅ 통과(W2 가 닫음, 2026-07-28)**: `test/viewerPtzSyncCoverage.test.ts` 수집 정규식 `fetch\(` → `[Ff]etch\(`(R15). **설계자 독립 검증 완료** — diff 9+/1−(정규식 1줄 + 사유 주석 4줄 + tour 분류 3줄), 미분류 0건, `viewerPtzSyncCoverage` 13 passed, 전체 `vitest` 2 failed(사전실패)/3349 passed.
->
-> **→ W3 는 이 게이트를 통과한 상태에서 착수한다.** §0-9 의 표 등록 강제(`judge-occupancy`·`mapping/slot*` → `NO_MOVE`)가 이제 **실제로 작동한다** — 등록을 빠뜨리면 첫 번째 it 이 실패한다.
-
-## 5.1 파리티 테스트 설계 원칙(3건 공통)
-1. **기준변은 항상 `web/*`** — 실운영에서 검증된 쪽이다. 서버 포팅본이 웹을 따라간다.
-2. 입력은 **기존 테스트 케이스를 재사용**한다. 새 케이스를 발명하면 두 구현이 아니라 새 기대값을 검증하게 된다.
-3. `toEqual` 깊은 비교 — `toBeCloseTo` 로 풀지 않는다. 자구 포팅이므로 부동소수까지 동일해야 하며, 차이가 나면 그건 포팅 오류다.
-4. 퇴화 입력(null·비배열·비4점·`w=0`·`plates:null`)을 반드시 포함 — 실제 사고는 항상 거기서 났다.
-
-## 5.2 상세 테스트 항목
-- **T1 `touringPlanParity`**: fixture 23슬롯 + 합성(빈/무효/centering=null/단일그룹/역순입력) → web↔src `toEqual`.
-- **T2 `tourJob`**: fake camera(`move` 호출 기록) + `sleep: async()=>{}`.
-  스텝 순서·횟수가 plan 과 일치(preset 스텝은 그룹 최초 1회) / `resolvePresetPtz` null → `requestImage` 폴백 1회(스킵 아님) / 중복 `start()` → `throw /already running/` / `stop()` → 다음 스텝 전 `aborted`, 이후 `move` 증가 없음 / 개별 `move` reject → 흡수 후 최종 `done` / setup_result null → 라우트에서 404.
-- **T3 `tourRoutes`**: start/stop/status shape·상태코드, `dwellMs:-1` → 400, `isBusy` true → 409(BUSY 문자열 포함), `tourJob` 미주입 앱 → 404.
-- **T4 `rpcParity` 강화(신규 it)**: 실제 `buildServer` 인스턴스에 대해 모든 `m.http` URL 을 `app.inject` 로 두드려 **Fastify 기본 404("Route ... not found")가 아님**을 단정(`isRouteNotRegistered` 재사용). 정적 목록보다 강하게 "목록에만 있고 등록은 안 된 경로"를 잡는다.
-- **O1 `occupancyJudgeParity`**: `test/occupancyJudge.test.ts` T1~T9 시나리오 재사용 + 퇴화 + 동률 tie-break + `cfg` 오버라이드 → web↔src `toEqual`.
-- **O2 `occupancyRoutes`**: 단일/다중 frames, `regions:true` 동등성, zod 400, 빈 frames 200.
-- **S1 `artifactSlotEditParity`**: `test/slotInsertEdit.test.ts:16 sampleArtifact()` 재사용 + 결번(s2 삭제 후 추가) + `at=1`/`at=N+1`/`at=999` clamp + 중복 slotId no-op + preset 부재 신규 생성.
-- **S2 `mappingSlotRoutes`**: add 200(파일 +1, `globalIdx` 가 요청 `at` 위치, coverage 통과) / add 2회 slotId 충돌 없음 / delete 200(−1) / **delete 부재 409 + 파일 md5 불변**(`rpcParity.test.ts:155` 방식) / artifact 없음 404 / `sqlite` 개수 불일치 시 warnings 포함.
-- **S4 REST↔RPC md5 동일**(`place.save` 선례 :140-156): 같은 add 를 REST 로 한 뒤 파일 원복, RPC 로 반복 → `setup_artifact.json` 바이트 동일.
-
----
-
-# 6. 위험·트레이드오프
-
-| # | 위험 | 심각도 | 완화 |
-|---|---|---|---|
-| R1 | **토큰 활성화 = 웹 버튼 31개 즉사** | ★최상 | 서버 게이트(단계 2)와 웹 배선(단계 3)을 **연속 착수**. 단계 3 완료 전에는 `controlToken` 을 프로덕션에 넣지 않는다. `webTokenWiring` 테스트가 누락 사이트를 정적으로 잡는다 |
-| R2 | 게이트 목록(`READONLY_POST_PATHS`)과 `methods.ts:mutating` 이 시간이 지나며 갈림 | 상 | §1.3-5 드리프트 테스트가 **양방향** 단정. 새 라우트 추가 시 반드시 실패한다 |
-| R3 | `/capture/detect` 는 카메라를 실제로 움직이는데(app.js:1238) `plate.detect` 는 `mutating:false` → 면제 목록에 들어가 무인증 카메라 조작 가능 | 중 | 현행 카탈로그 결정을 임의로 뒤집지 않는다. **§7 Q1 마스터 판단 요청**. 뒤집으면 `rpcDispatch.test.ts` 의 "읽기 메서드 무게이트" 의미가 바뀐다 |
-| R4 | MCP 호출자 회귀 | **없음** | `src/mcp/server.ts:34` 가 config 의 controlToken 을 이미 자동 주입. 단 **MCP 프로세스와 서버가 같은 config 를 읽어야** 한다(값이 다르면 전부 403) |
-| R5 | **투어링 잡의 카메라 점유 경합** | 상 | ①`jobBusy` 에 TourJob 추가 → 렌즈 캘리브레이션이 투어링 중 시작 거부 ②RPC `requiresCamera:true` 로 다른 잡 진행 중 BUSY ③**REST 직접 호출은 dispatch 를 안 타므로 라우트에서도 `isBusy` 확인 409**(필수). 웹 라이브 스트림(`/viewer/api/stream`)은 별개 경로라 순회 중에도 화면은 보인다 |
-| R6 | 순회 중 수동 PTZ 조작 충돌 | 중 | 순회 중 `#ptz-*` 컨트롤 disable(웹 `state.touringActive` 재사용). 서버는 막지 않는다(마지막 명령이 이긴다 — 기존 카메라 규약) |
-| R7 | **점유판정 서버화로 왕복 지연** | 상 | 호출점을 리드로(초당 수십)에서 데이터 변경점(검출당 1회)으로 줄인다(§3.3). 배치 `frames[]` 로 프리셋 수만큼의 요청을 1회로 접는다. 그래도 느리면 `regions` 만 클라 계산(`web/occupancyRegion.js` 잔존)으로 되돌릴 여지를 남긴다 |
-| R8 | 점유판정 shape 오차로 오버레이가 조용히 달라짐 | 상 | 서버 응답을 `state.occComputeByKey` 의 **현행 shape 그대로** 적재해 소비처를 무변경으로 둔다. 파리티 테스트가 값 동일을 봉인 |
-| R9 | `src/domain → src/capture` import 신설(상수 재사용) | 하 | 순환 없음 확인(onPlaceFilter 는 domain 만 참조). 값 복제보다 안전 — 복제하면 파리티가 못 잡는 3번째 정의가 생긴다 |
-| R10 | **슬롯편집이 renumber/placement 로 소실** | 상 | 코드로 막지 않고 **`warnings[]` + 카탈로그 `note`** 로 알린다(§4.1 Q2). 막으면 renumber 가 못 돈다 |
-| R11 | 슬롯편집 실패 시 파일 부분기록 | 중 | 검증(3) → 저장(4) 순서. 검증 실패 시 `saveArtifact` 미도달 = **파일 무변경**. S2 가 md5 로 증명 |
-| R12 | `DELETE+INSERT` wipe 재발 | **없음(구조적)** | 이번 4건은 DB 쓰기 API 를 **하나도** 호출하지 않는다. `sqlite` 는 `getSlotSetup()` 읽기만 |
-| R13 | `known` 목록에 tour 3줄 추가 = 파리티 테스트 편집 | 하 | 편집과 **동시에** T4 동적 등록검사를 추가해 정적 목록보다 강한 보증으로 교체 |
-| R14 | 사전 실패 2건(`roiDbLoad`·`placeRoiRuntimeInvariants`) | — | **손대지 않는다.** 런타임 `PtzCamRoi.json` 의 `points:[]` 주차면 vs "모든 주차면 4점" 단정 모순 — 마스터 판단 대기 항목(memo 기록). 이번 작업과 무관하며 상태 변화 없음 |
-| ~~R15~~ | ~~W1 의 `mutFetch` 전환이 PTZ 동기화 봉인을 무력화~~ **→ 해소(W2 가 닫음, 설계자 독립 검증 완료)** | ~~★최상~~ | 원인: `test/viewerPtzSyncCoverage.test.ts` 수집 정규식이 소문자 `fetch\(` 라 `mutFetch(` 를 **하나도 못 잡았다**(수집 **57 → 29**, 놓친 28개가 **카메라 이동 라우트 9개 중 8개** — GET 인 `/capture/pipeline` 만 생존). 첫 it 이 "수집된 것 중 미분류"를 보므로 덜 수집할수록 통과가 쉬워져 **green 인 채 봉인만 사라진** 상태였다. **조치 완료**: 정규식 `[Ff]etch\(` + 사유 주석 4줄 + tour 분류 3줄(diff 9+/1−). **검증(설계자 재현)**: 미분류 0건 · `viewerPtzSyncCoverage` 13 passed · 전체 `vitest` **2 failed(사전실패 그대로) / 3349 passed** = 회귀 0. 탐지력도 실증됨(§9.2) |
-| **R16** | 정적 `known` 목록만으로는 "가산 등록(deps 주입 시에만 등록)" 라우트의 미등록을 못 잡는다 | 중 | **R13 의 T4 동적 등록검사가 실증했다** — W2 구현 중 `capture.startPrecise`·`capture.pipeline` 두 메서드가 완전 배선 앱에서 Fastify 기본 404 로 드러났다(`deps.pipeline` 미주입 ctx). 테스트 ctx 에 `SetupPipeline` 주입으로 해소. T4 를 W3/W4 에서도 유지할 것 |
-
----
-
-# 7. 결정이 필요한 열린 질문 (리더 판단 요청)
-
-**Q1 — `plate.detect`(POST /capture/detect)를 토큰 게이트 면제로 둘 것인가?**
-카탈로그는 `mutating:false`(읽기)로 선언했지만 이 라우트는 **카메라를 실제로 움직인다**(detectPipeline 이 확대 PTZ 로 `requestImage` 하고 원위치 복귀 안 함 — app.js:1238 주석). 면제하면 무인증으로 카메라를 돌릴 수 있고, 게이트하면 `mutating` 을 `true` 로 바꿔야 해 `test/rpcDispatch.test.ts` 의 "읽기 메서드 무게이트" 의미와 기존 웹 흐름이 영향을 받는다.
-→ **(a) 현행 유지(면제)** / (b) `plate.detect`·`detect.vehicles` 를 `mutating:true` 로 승격 후 게이트. **추천 (a)** — 이번 범위를 넘는 계약 변경이므로 별건으로 다룬다.
-
-**Q2 — `GROUND_BAND_RATIO`/`ON_PLACE_MIN_OVERLAP`/`groundBand` 의 위치.**
-(a) `src/domain/occupancyJudge.ts` 가 `src/capture/onPlaceFilter.ts` 에서 import(레이어 역방향이지만 기존 파일 무변경) / (b) domain 으로 옮기고 `onPlaceFilter` 에서 재export(레이어 정합, 기존 파일 2개 수정).
-→ **추천 (a)** — 외과적 변경 원칙. 레이어 정합을 우선한다면 (b).
-
-**Q3 — 슬롯편집 UX: 즉시 반영 vs 저장 버튼 유지.**
-서버 정본화하면 "추가 즉시 파일 반영"이 자연스럽다. 그러나 현행은 "추가 → Ctrl+드래그 배치 → 저장"(app.js:1453 주석) 2단계이고, 추가 직후 rect 는 화면 중앙 임시값이다. 즉시 반영하면 **배치 전 상태가 파일에 남는다**.
-→ (a) 즉시 반영(설계안 — 서버가 정본 소유, `warnings` 안내) / (b) 라우트에 `dryRun` 을 두고 웹은 저장 버튼에서 최종 커밋. **추천 (a)** — (b)는 서버가 "계산만 하는" 반쪽 승격이라 껍데기화 취지에 어긋난다. 다만 **UX 변화**이므로 마스터 확인 필요.
-
-**Q4 — `setup.slot.add` 의 의미가 요구와 맞는가?**
-조사 결과 이 기능은 **artifact 편집**이지 "주차면 추가"가 아니다(§4.1 Q3). 실제 주차면 추가는 이미 `place.space.add` + `slot.roi.sync` 로 승격돼 있다.
-→ (a) 설계안대로 artifact 편집 승격 / (b) `setup.slot.add` 를 **복합 메서드**로 정의(place.space.add → slot.roi.sync → artifact 재빌드). **추천 (a)** — (b)는 RPC 가 오케스트레이션 로직을 갖게 되어 "RPC 는 로직을 갖지 않는다" 원칙과 충돌한다. 필요하면 오케스트레이션을 **REST 라우트**에 두고 RPC 는 그걸 위임해야 한다(범위 확대).
-
----
-
-# 8. 영향 받는 파일 요약 (구현자·문서화 인계)
-
-**신규(7 + 테스트 10 + fixture 1)**
-`src/api/controlGate.ts` · `src/setup/touringPlan.ts` · `src/capture/TourJob.ts` · `src/api/tourRoutes.ts` · `src/domain/occupancyJudge.ts` · `src/setup/artifactSlotEdit.ts` · `web/token.js`
-테스트: `controlGate` · `webTokenWiring` · `touringPlanParity` · `tourJob` · `tourRoutes` · `occupancyJudgeParity` · `occupancyRoutes` · `artifactSlotEditParity` · `mappingSlotRoutes` (+`rpcParity` 내 신규 it)
-fixture: `test/fixtures/setupResult.23slots.json`
-
-**수정(8)**
-`src/api/server.ts`(게이트 1줄 + tourRoutes 등록 + `/mapping/slot` 2라우트 + `ApiDeps.tourJob`) · `src/index.ts`(TourJob 조립 + jobBusy 1줄 + buildServer 1인자) · `src/api/captureRoutes.ts`(judge-occupancy 1라우트) · `src/rpc/methods.ts`(+6 메서드) · `web/app.js`(토큰 32곳·투어링·점유·슬롯편집) · `web/roimaker.js`(토큰 3곳) · `web/core.js`(`buildFlatSlotRows` 시그니처) · `test/rpcParity.test.ts`(known +3, it +1)
-+ 소비 테스트 4종 호출부(`boundaryCrossCheck`·`finalizerParkingSlots`·`occupancyAnchor.regression`·`placeGlobalIdx`) · `test/buildTouringPlan.test.ts`(import 경로)
-
-**의도적 무변경(중요)**
-`src/viewer/routes.ts`(인라인 게이트 4곳 존치) · `src/capture/roiSlotSync.ts` · `src/capture/roiDbLoad.ts` · `src/capture/SqliteStore.ts`(**DB 쓰기 0**) · `src/domain/occupancyRegion.ts` · `web/occupancy.js` · `web/core.js` 의 `computeOccupancy`/`buildTouringPlan`/`nextSlotId`/`insertSlotAt`/`removeSlot`/`rebuildGlobalIndex`(전부 파리티 기준변) · `test/roiDbLoad.test.ts` · `test/placeRoiRuntimeInvariants.test.ts`(사전 실패 2건 — 지시대로 무접촉) · `src/mcp/server.ts`(카탈로그 프록시라 수정 0)
-
----
-
-# 9. 구현 피드백 반영 이력
-
-## 9.1 W2(투어링) — `dev-w2-tour`, 2026-07-28
-
-| 보고 | 판정 | 반영 |
-|---|---|---|
-| 서버 승격 시 웹 `state.ptz` 부패 — `runTouringTest` finally 에서 `syncPtzAfterJob(null)` + `SYNC_OWNER` 등록 | **정당·설계 누락 인정.** app.js:1934 · 테스트 표 등록 확인함. 초판 §2.3 이 "제거할 로직"만 보고 "함께 옮겨야 할 책임"을 못 봤다 | **§0-9 공통 규약으로 승격** — W3/W4 의 표 등록 대상까지 미리 지정 |
-| T4 동적 등록검사가 `capture.startPrecise`·`capture.pipeline` 미등록 2건을 잡음 | **R13 판단 실증.** 가산 등록 라우트는 정적 목록이 원리적으로 못 잡는다 | **R16 신설** — T4 를 W3/W4 에서도 유지 |
-| `TourJobDeps.onFinished` 미구현(호출자 0 = 태생 데드코드) | **승인.** TourJob 은 `SetupPipeline` 자동연쇄에 참여하지 않으므로 `PlateDiscoveryJob:51` 의 콜백 패턴을 그대로 베낄 이유가 없다. CLAUDE.md 규칙 2(추측성 코드 금지)에 부합 | 설계에서 해당 필드 삭제 취급 |
-| `viewerPtzSyncCoverage.test.ts:102` 정규식이 `mutFetch(` 를 놓침 — "별건으로 남김" | **부분 동의 → 별건 반대.** 발견은 정확하나 심각도가 과소평가됐고, 우려는 실측으로 반증됐다(아래) | **R15 신설(★최상) + 단계 6↔7 게이트로 승격** |
-
-### W2 의 마지막 항목에 대한 재판정(실측 근거)
-- 놓치는 범위가 "일부"가 아니다: 수집 **57 → 29**, 누락 28개가 **카메라 이동 라우트 전부**(`/capture/start`·`/capture/detect`·`/calibrate/ptz`·`/calibrate/point`·`/discover/ptz`·`/calibrate/lens/start`·`/capture/tour/start`·`/move`). 즉 **봉인이 지키려던 대상이 100% 빠졌다.**
-- 테스트는 green 이다 — 첫 it 이 "수집된 것 중 미분류"를 보므로 **덜 수집할수록 통과가 쉬워진다**. 정확히 이 저장소가 반복해 겪은 "조용한 유실" 유형이며, W2 가 방금 고친 부패를 **다음 번에는 아무도 못 잡는 상태**다.
-- "다수 라우트가 한꺼번에 미분류로 뜰 수 있다"는 우려는 **재현 결과 사실이 아니다** — 표 키 61개가 수정 후 수집 57개를 전부 덮어 **미분류 0건**. 한 글자 수정에 부작용이 없다.
-- 원인 제공은 W2 가 아니라 **W1(토큰 배선)이며 설계상 내 책임**이다(§1.2 `mutFetch` 도입). W2 에 떠넘기지 않고 설계서에 게이트로 못 박았다.
-
-## 9.2 게이트 해소 — W2 가 자기 자리에서 닫음(설계자 독립 검증 완료)
-
-W2 가 재판정을 수용하고 리더 배정을 기다리지 않은 채 **단계 6 자리에서 게이트를 닫았다**. 판단이 옳다 — 게이트가 6↔7 이고 자기가 6 을 막 끝낸 자리였으므로, 대기는 순수 손실이었다.
-
-| 항목 | W2 보고 | **설계자 독립 재현** | 판정 |
-|---|---|---|---|
-| 수집 수 | 29 → 57 | `node -e` 재현 **일치** | ✅ |
-| 미분류 | 0건 | 표 키 61 vs 수집 57 → **0건** | ✅ |
-| diff 범위 | 정규식 1 + 주석 4 + tour 분류 3 | `git diff` **9 insertions / 1 deletion** — 정확히 그것뿐 | ✅ |
-| 봉인 테스트 | 13 passed | `npx vitest run test/viewerPtzSyncCoverage` → **13 passed** | ✅ |
-| 전체 회귀 | 2 failed / 3349 passed | `npx vitest run` → **2 failed(placeRoiRuntimeInvariants·roiDbLoad) / 268 파일 · 3349 passed** | ✅ 회귀 0 |
-
-**★ 탐지력 실증(W2 가 추가한 검증 — 설계서에 없던 좋은 절차)**: 수정 후 `mutFetch` 전용 경로인 `/capture/slots/reset` 분류를 일부러 1줄 지우자 `미분류 라우트 발견 — /capture/slots/reset` 으로 **실패**했다(수정 전이면 통과했을 케이스). "green 이 곧 봉인 작동"이 아님을 아는 방식으로, **음성 대조(negative control)** 를 세운 것이다. 앞으로 정적 커버리지 봉인을 만들 때는 이 절차를 기본으로 삼는다 — 봉인을 추가할 때 **"이 봉인이 실제로 실패하는 입력"을 한 번 보여주고 원복**한다.
-
-**사전 실패 건수 정정**: 3건 → **2건**(§ 먼저보고 C 의 `buildTouringPlan` ENOENT 는 단계 1 fixture 이관으로 해소). 남은 2건은 지시대로 무접촉.
-
----
-
-**타 에이전트 영향**
-`GET /rpc/catalog` 메서드 수 **70 → 76**. MCP `setting_rpc_catalog` 는 카탈로그를 그대로 노출하므로 **MCP 파일 수정 0**(설계 의도대로). ActionAgent/DMAgent 가 읽는 `data/setup_artifact.json`·`save/setup_result.json` 의 **스키마는 불변** — 다만 슬롯편집이 내용(슬롯 수)을 바꿀 수 있으므로 문서화 단계에서 명시할 것.
+**최대 리스크 3개:** ① U4(seed 없는 Hough 검출) ② U3(실카 렌즈왜곡 → VP 붕괴) ③ Q1(수동 앵커 결함이 목표 달성을 원리적으로 막는 문제). 셋 다 코드 품질이 아니라 **데이터·물리**의 문제라 유닛테스트로 자동 검출되지 않는다.
