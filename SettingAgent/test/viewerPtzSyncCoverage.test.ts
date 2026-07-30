@@ -34,6 +34,9 @@ const MOVES_CAMERA: Record<string, string> = {
   '/calibrate/lens/start': 'CalibrationRunner 스윕 — goPtz/setCenter 로 카메라를 수십 분 점유(종료·중지·실패 모두 원 PTZ 복귀)',
   '/capture/tour/start': 'TourJob 순회 — 프리셋홈 move/requestImage + 슬롯 centering move(서버가 카메라를 움직인다)',
   '/move': '수동 PTZ 이동',
+  // 장비 프리셋 이동. RealPtzSource.gotoDevicePreset → Hucoms `gopreset` 으로 **물리 이동**한다.
+  // 응답이 이동 후 실측 PTZ(뷰어 좌표 + 장비 원시)를 담고, 웹은 그 값으로 state.ptz 를 갱신한다.
+  '/preset/goto': '장비 프리셋 이동(gopreset) — 응답의 실측 PTZ 로 state.ptz 동기화',
 };
 
 /**
@@ -98,6 +101,7 @@ const NO_MOVE: Record<string, string> = {
   // 라우트 구현(server.ts:slotAddHandler/slotDeleteHandler)에 camera/ICameraClient 의존이 없다.
   '/mapping/slot/add': '산출물 슬롯 추가 계산(dryRun 이면 파일 IO 0; 카메라 미이동)',
   '/mapping/slot/delete': '산출물 슬롯 삭제 계산(dryRun 이면 파일 IO 0; 카메라 미이동)',
+  '/presets': '장비 저장 프리셋 **목록 조회**(ONVIF GetPresets 위임 — 읽기 전용·카메라 미이동)',
   '/ptz': '읽기 전용 PTZ 조회(동기화 자체가 쓰는 경로)',
   '/rpc': 'Unity RPC 패스스루',
   '/rpc/catalog': '카탈로그 조회',
@@ -178,6 +182,15 @@ describe('수정 14 — 뷰어 PTZ 동기화 커버리지', () => {
     expect(body).toContain('state.ptz = ptz');
     expect(body).toContain('updatePtzDisplay');
     expect(body).toContain('refreshCurrentPtz');
+  });
+
+  it('/preset/goto 는 응답의 **실측** PTZ 로 state.ptz 를 갱신한다(명령값·추정 금지)', () => {
+    // 장비는 프리셋의 PTZ 를 알려주지 않는다(ONVIF GetPresets 의 PTZPosition 이 전부 0) →
+    // 이동 후 서버가 실측해 준 값만이 근거다. 이 갱신이 빠지면 state.ptz 가 낡아 다음 상대 이동이 튄다.
+    const body = functionBody('gotoDevicePreset');
+    expect(body).toContain('state.ptz = data.ptz');
+    expect(body).toContain('updatePtzDisplay');
+    expect(body).toContain('updatePtzNativeDisplay');
   });
 
   it('runLiveDetect 는 **실패 경로에서도** 동기화한다(이미 움직인 뒤일 수 있다)', () => {

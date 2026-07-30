@@ -6,10 +6,32 @@
  * 인덱스는 전 구간 1-based(cam/preset). zoom 은 뷰어 단위(1.0~36.0).
  */
 
+import type { DevicePreset } from '../clients/onvif/presetParse.js';
+
+export type { DevicePreset };
+
 export interface Ptz {
   pan: number;
   tilt: number;
   zoom: number;
+}
+
+/**
+ * 장비 원시 PTZ(뷰어 좌표 변환 **전**). Hucoms 는 panpos/tiltpos/zoompos 이고,
+ * 이 값이 곧 장비 OSD·로그·문서(HTTP API v1.22)와 대조 가능한 정본이다.
+ */
+export interface NativePtz {
+  pan: number;
+  tilt: number;
+  zoom: number;
+}
+
+/** 장비 프리셋 이동 결과. `settled:false` = 장비가 멈춘 것을 확인하지 못했다(슬루 중일 수 있다). */
+export interface DevicePresetGoto {
+  number: number;
+  ptz: Ptz;
+  native?: NativePtz;
+  settled: boolean;
 }
 
 /**
@@ -47,6 +69,15 @@ export interface CameraSource {
   health?(): Promise<boolean>;
   /** (선택) 장비가 보고하는 현재 PTZ. 실카메라·시뮬레이터 UI 상태 동기화에 사용한다. */
   getPtz?(cam: number): Promise<Ptz>;
+  /** (선택) 장비 원시 PTZ. 뷰어 좌표만으로는 장비 로그·OSD 와 대조할 수 없어 함께 노출한다. */
+  getNativePtz?(cam: number): Promise<NativePtz>;
+  /**
+   * (선택) **장비에 저장된** PTZ 프리셋 목록(camerapos.json 의 뷰어 프리셋과 다른 것이다).
+   * 미구현 소스(시뮬레이터 등)는 라우트가 501 로 강등한다.
+   */
+  listDevicePresets?(cam: number): Promise<DevicePreset[]>;
+  /** (선택) 장비 프리셋 번호로 **실제 이동**. 이동 후 실측 PTZ 를 돌려준다(프리셋 PTZ 를 아는 유일한 방법). */
+  gotoDevicePreset?(cam: number, presetNumber: number): Promise<DevicePresetGoto>;
   listCameras(): Promise<CameraList>;
   snapshot(cam: number, opt: SnapshotOpts): Promise<SnapshotResult>;
   move(cam: number, ptz: Ptz): Promise<boolean>;

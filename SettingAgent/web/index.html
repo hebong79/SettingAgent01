@@ -110,6 +110,15 @@
             <span>T <b id="ptz-tilt">-</b></span>
             <span>Z <b id="ptz-zoom">-</b></span>
           </div>
+          <!-- 장비 원시 PTZ(panpos/tiltpos/zoompos). 뷰어 좌표(-180~180 / -90~90 / 1~36)와 달리
+               장비 OSD·로그·HTTP API 문서와 그대로 대조되는 값이다. 실카에서만 표시. -->
+          <div id="ptz-native-row" class="ptz-now ptz-native" hidden
+               title="장비가 보고하는 원시 PTZ(Hucoms panpos/tiltpos/zoompos). 위 값은 뷰어 좌표로 환산한 것이고, 이 줄이 장비 정본이다">
+            <span>장비 원시</span>
+            <span>P <b id="ptz-native-pan">-</b></span>
+            <span>T <b id="ptz-native-tilt">-</b></span>
+            <span>Z <b id="ptz-native-zoom">-</b></span>
+          </div>
         </section>
 
         <section class="panel-section">
@@ -141,6 +150,26 @@
           <div class="ptz-control-footer">
             <button id="btn-ptz-refresh" title="선택한 카메라가 보고하는 현재 Pan·Tilt·Zoom을 다시 읽습니다">현재 PTZ 불러오기</button>
             <span id="ptz-control-status" aria-live="polite"></span>
+          </div>
+
+          <!--
+            장비 프리셋(카메라가 들고 있는 프리셋). 위 '대상 선택'의 프리셋(camerapos.json)과 **다른 것**이다.
+            ★ 목록은 ONVIF GetPresets 로 읽는다 — Hucoms HTTP API v1.22 에는 프리셋 조회 명령이 없다
+              (§8.4 = setpreset/gopreset/clearpreset 뿐. 실측에서도 get* 계열은 204 빈 응답).
+            ★ 장비는 프리셋의 PTZ 값을 주지 않는다(GetPresets 의 PTZPosition 이 전부 0) →
+              PTZ 는 '이동한 뒤 실측'한 값만 표시한다.
+          -->
+          <div class="device-preset" id="device-preset-box" hidden>
+            <div class="section-title">장비 프리셋</div>
+            <p class="ptz-control-note">카메라 장비에 저장된 프리셋입니다(camerapos.json 프리셋과 별개). 이동하면 그 위치의 PTZ를 실측해 표시합니다.</p>
+            <div class="roi-edit-bar toolbar">
+              <label class="field full">프리셋 <select id="dev-preset-sel"></select></label>
+            </div>
+            <div class="roi-edit-bar toolbar">
+              <button id="dev-preset-load" title="장비에서 프리셋 목록을 다시 읽는다(ONVIF GetPresets). 카메라를 움직이지 않는다">목록 불러오기</button>
+              <button id="dev-preset-goto" class="primary" title="선택한 장비 프리셋으로 카메라를 실제 이동한다(Hucoms gopreset). 이동 완료 후 장비 PTZ를 실측해 표시한다">프리셋 이동</button>
+              <span id="dev-preset-status" class="map-msg" aria-live="polite"></span>
+            </div>
           </div>
         </section>
 

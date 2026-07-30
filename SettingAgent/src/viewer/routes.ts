@@ -58,6 +58,13 @@ const SnapshotQuery = z.object({
   t: z.coerce.number().optional(),
 });
 
+/** 장비 프리셋 이동 body. `number` 는 Hucoms preset_control 규격(1~255). */
+const PresetGotoBody = z.object({
+  source: z.string().optional(),
+  cam: z.number().int().positive(),
+  number: z.number().int().min(1).max(255),
+});
+
 const MoveBody = z.object({
   source: z.string().optional(),
   cam: z.number().int().positive(),
@@ -146,6 +153,15 @@ export async function registerViewerRoutes(app: FastifyInstance, deps: ViewerDep
   /** 장비가 보고하는 현재 PTZ 조회. 실카메라 제어 UI의 상태 동기화에만 사용한다. */
   app.get('/viewer/api/ptz', withSource(deps, PtzQuery, handlePtz));
 
+  /**
+   * 장비에 저장된 PTZ 프리셋 목록(읽기 — 카메라를 움직이지 않는다).
+   * camerapos.json 의 뷰어 프리셋과 **다른 것**이다: 이쪽은 카메라 장비가 들고 있는 프리셋이다.
+   */
+  app.get('/viewer/api/presets', withSource(deps, PtzQuery, handleDevicePresets));
+
+  /** 장비 프리셋으로 **실제 이동**(변이 — /move 와 동일한 allowMove·controlToken 게이트). */
+  app.post('/viewer/api/preset/goto', (req, reply) => handleDevicePresetGoto(deps, req, reply));
+
   app.get('/viewer/api/snapshot', withSource(deps, SnapshotQuery, handleSnapshot));
 
   app.get('/viewer/api/stream', (req, reply) => handleStream(deps, streamState, req, reply));
@@ -212,7 +228,57 @@ async function handlePtz(
       reply.code(501);
       return { error: 'ptz state unsupported', code: 'PTZ_STATE_UNSUPPORTED' };
     }
-    return { ptz: await source.getPtz(parsed.cam) };
+    const ptz = await source.getPtz(parsed.cam);
+    // 장비 원시값은 **가산**이다: 지원 소스에서만 붙이고, 실패해도 뷰어 PTZ 응답을 깨뜨리지 않는다
+    // (원시값은 표시·로그 대조용이지 제어 근거가 아니다).
+    const native = source.getNativePtz ? await source.getNativePtz(parsed.cam).catch(() => undefined) : undefined;
+    return { ptz, ...(native ? { native } : {}) };
+}
+
+/** GET /viewer/api/presets 핸들러(withSource 콜백) — 장비 저장 프리셋 목록. */
+async function handleDevicePresets(
+  parsed: z.infer<typeof PtzQuery>,
+  source: CameraSource,
+  _req: FastifyRequest,
+  reply: FastifyReply,
+): Promise<unknown> {
+    if (!source.listDevicePresets) {
+      // 시뮬레이터 등 장비 프리셋 개념이 없는 소스. 빈 목록으로 위장하면 "프리셋이 0개인 카메라"와 구분되지 않는다.
+      reply.code(501);
+      return { error: 'device presets unsupported', code: 'DEVICE_PRESETS_UNSUPPORTED' };
+    }
+    const presets = await source.listDevicePresets(parsed.cam);
+    return { presets, count: presets.length };
+}
+
+/** POST /viewer/api/preset/goto 핸들러 — 장비 프리셋으로 물리 이동 후 실측 PTZ 반환. */
+async function handleDevicePresetGoto(deps: ViewerDeps, req: FastifyRequest, reply: FastifyReply): Promise<unknown> {
+    if (deps.viewer.allowMove === false) {
+      reply.code(403);
+      return { error: 'move disabled' };
+    }
+    if (deps.viewer.controlToken && req.headers['x-viewer-token'] !== deps.viewer.controlToken) {
+      reply.code(403);
+      return { error: 'invalid token' };
+    }
+    const parsed = parseOr400(reply, PresetGotoBody, req.body);
+    if (!parsed) return;
+    const source = pickSource(deps.sources, parsed.source);
+    if (!source) {
+      reply.code(400);
+      return { error: 'source not found' };
+    }
+    if (!source.gotoDevicePreset) {
+      reply.code(501);
+      return { error: 'device presets unsupported', code: 'DEVICE_PRESETS_UNSUPPORTED' };
+    }
+    try {
+      const result = await source.gotoDevicePreset(parsed.cam, parsed.number);
+      return { ok: true, ...result };
+    } catch (err) {
+      reply.code(502);
+      return { error: err instanceof CameraApiError ? err.message : String(err) };
+    }
 }
 
 /** GET /viewer/api/snapshot 핸들러(withSource 콜백). */
