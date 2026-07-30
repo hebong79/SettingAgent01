@@ -26,6 +26,11 @@ SettingAgent/reports/
 SettingAgent/data/refframes/
 # 코드 진단 스크래치(일회성 진단 산출물, 커밋 제외)
 SettingAgent/_diag_chord/
+# 자동 바닥 ROI 골든 프레임 세트(회차 간 비교 기준. 21MB — 마스터 결정으로 커밋 제외, 15회차)
+SettingAgent/test/fixtures/roiAutoGolden/
+SettingAgent/test/fixtures/roiAutoGolden_v2/
+# 실카 낮 프레임 예약 캡처 세트(런타임 누적 JPEG. 골든 세트와 같은 취급 — 마스터 결정, 18회차)
+SettingAgent/test/fixtures/realCamDaylight/
 # 정밀 수집 관측 DB(런타임 누적, 커밋 제외)
 *.sqlite
 *.sqlite-shm
@@ -51,6 +56,16 @@ SettingAgent/logs/
 
 # 세션 워크트리(transient — 워크트리 기본 정책이 .claude/worktrees/ 아래 생성)
 .claude/worktrees/
+
+# 2번째 SettingAgent 인스턴스(port 13021) 전용 고정 실행 디렉터리.
+# src/web/node_modules 는 메인 체크아웃을 가리키는 정션이고 config/data/save/reports 만
+# 실제 사본이다. 전부 로컬 런타임 자원이라 커밋 대상이 아니다.
+SettingAgent-13021/
+
+# 위 인스턴스를 MCP 로 물리는 프로젝트 스코프 등록. 절대경로(D:\...)가 박히는
+# 로컬 전용 설정이라 커밋하지 않는다. local 스코프(~/.claude.json)는 실행 중인
+# 세션이 자기 시작 시점 설정으로 덮어써 등록이 소실되므로 파일 스코프를 쓴다.
+.mcp.json
 
 # 하네스 설정 백업(예: settings.json.bak_20260728). 과거 allow 목록에 평문 자격증명이
 # 섞여 있어 절대 커밋되면 안 된다.
