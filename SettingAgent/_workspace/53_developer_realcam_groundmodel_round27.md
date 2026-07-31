@@ -1,0 +1,334 @@
+# 27-C — 실카 지면모델 정합 규명 (구현자 보고)
+
+_작성 2026-07-31 · 대상 `real-camera-1`(192.168.0.153) · **정본·DB 무접촉** · **PTZ 이동 명령 0건**_
+
+## 0. 결론 요약 (먼저)
+
+| # | 규명 대상 | 판정 |
+|---|---|---|
+| 1 | 서버가 real-camera-1 에 5m 를 내는 근거 | **확정.** `/capture/ground-model` 은 **카메라 식별자를 아예 받지 않는다**. 요청을 무시하고 `PtzCamRoi.json` 의 시뮬 cam_id 1·2 모델을 통째로 돌려준다. 뷰어는 그것을 **카메라 인덱스**로 조회하는데 실카의 camIdx 가 항상 `1` 이라 시뮬 cam1 과 **충돌**한다 |
+| 2 | 「설치고」 입력이 지면모델에 반영되는가 | **반영된다 — 단, 검출 경로에만.** 배너에는 원리적으로 반영되지 않는다(그 입력을 받는 경로가 아니다). **「입력 무시」는 결함이 아니다**. 진짜 결함은 배너가 **대상과 무관한 카메라의 모델을 아무 표시 없이** 보여주는 것 |
+| 3 | `lens_calibration.json` 의 13m 는 어디에 쓰이나 | **검출 경로가 실제로 읽는다(라이브 실측 확인).** 배너와 다른 이유는 애초에 **다른 파이프라인**이기 때문 |
+| 4 | 지면모델 소스 우선순위 | §4 표 |
+| 5 | 6/4/2/4 면 요동의 원인 | **프레임 종속이 단독 원인.** 지면모델은 요동에 대해 **무죄**(같은 뷰 연속 실행에서 f 가 비트 동일). 단 지면모델은 **면수 수준(level)** 에는 크게 관여한다 — 둘은 다른 축이다 |
+
+### ★ 리더 전제 1건 정정 (정직)
+
+> 「실카를 검출하면서 시뮬 카메라 기하를 쓰고 있다」
+
+**검출은 그렇지 않다.** 검출(`roi.auto.*`)은 `real-camera-1` 에 대해 **설치고 13m·zoomHfov 실측표·장비 tiltpos** 를 쓰고 있고, 이를 라이브로 확인했다(§3). 시뮬 기하를 쓰는 것은 **배너·3D 육면체·최종화(slot3d_front_center)** 쪽이다. 「검출이 5m 를 쓰고 있다」는 관측되지 않았다 — 배너가 그렇게 **보이게** 했을 뿐이다.
+
+또 하나: 배너의 5.0m 는 파일의 `camera.position[1] = 5` 를 **읽은 값이 아니다**. `groundModel.ts` 는 카메라 블록을 쓰지 않고(주석 `captureRoutes.ts:911-913` — "실카메라 호환") 주차면 폴리곤에서 2.5×5.0m 규격을 역산해 **d 를 추정**한다. 시뮬 ROI 가 5m 카메라에서 그려졌으니 추정이 ~5m 로 되돌아온 것이다. 결과는 같지만 **고치는 지점이 다르므로** 구분해 둔다.
+
+---
+
+## 1. `/capture/ground-model` 이 5m 를 내는 경로 (끝까지 추적)
+
+```
+web/app.js:1179   fetch('/capture/ground-model')          ← 쿼리 없음. 카메라를 말하지 않는다
+  └ captureRoutes.ts:915  app.get(... (req,reply) => handleGroundModel(deps, req, reply))
+    └ captureRoutes.ts:951 handleGroundModel(deps, _req, reply)   ← ★ req 를 `_req` 로 버린다
+      └ readFile(deps.placeRoiFile)                       ← data/Place01/PtzCamRoi.json 하나뿐
+        └ groundInputs.ts:16  for (const camEntry of cameras)     ← 파일 안 카메라 전부
+          └ groundInputs.ts:23  camIdx = Number(entry.camera.cam_id)   ← 키는 **숫자 1·2**
+            └ groundModel.ts  estimateGroundModels(...)   ← source:'file', d 는 폴리곤에서 추정
+  ← 응답 models[] = 1:1, 1:2, 1:3, 2:1, 2:2  (실카를 봐도 항상 이 5개)
+web/core.js:1661  groundModelsByKey(models)   → state.groundByKey["1:1"] ...
+web/app.js:1164   state.groundByKey[currentFrameKey()]     ← key = `${state.cam}:${state.preset}`
+```
+
+`state.cam` 은 `/viewer/api/cameras` 가 준 `camIdx` 다. 실카는:
+
+```
+src/viewer/RealPtzSource.ts:286
+  cameras: [{ camIdx: 1, name: this.cfg.id, ... }]      ← ★ 실카는 항상 camIdx 1
+```
+
+`state.preset` 은 **장비 프리셋 번호**다(`core.js:1738 presetOptions` — `isReal` 이면 `devicePresets[].number`). 장비에서 읽은 실제 목록:
+
+```
+GET /viewer/api/presets?source=real-camera-1&cam=1
+  EV1→number 1 · EV2→2 · EV3→3 · EV4→4 · EV5→5 · EX1-0→6 ...
+```
+
+→ **EV1 을 고르면 키가 `1:1`, EV3 을 고르면 `1:3`.** 그 키에 앉아 있는 것은 시뮬 `PTZ Camera 1` 의 preset1·preset3 이다.
+
+### 라이브 응답으로 대조 (원시 배정도)
+
+`GET http://127.0.0.1:13020/capture/ground-model` 실측:
+
+| key | `tiltDeg` (원시) | 배너 표기 | `d` (원시) | 배너 표기 | `metricErr` | ⚠판정(>0.008) |
+|---|---|---|---|---|---|---|
+| `1:1` | `8.947076834103065` | **8.9°** | `5.0158661592530684` | **5.0m** | `0.010721987708163109` | ⚠ |
+| `1:3` | `36.57717392555767` | **36.6°** | `4.946980959175835` | **4.9m** | `0.009271407893236905` | ⚠ |
+
+마스터 화면(EV1 = 8.9°/5.0m, EV3 = 36.6°/4.9m, 둘 다 `⚠ROI 어긋남?`)과 **완전 일치**. 배너 문자열은 `core.js:1655-1659`(`formatGroundBadge`)가 이 값을 `toFixed(1)` 한 것이다. **`⚠ROI 어긋남?` 도 실카와 무관하다** — 시뮬 정본 ROI 자체의 metric 잔차 1.07%/0.93% 를 보고 있는 것이며, 시뮬 화면에서도 똑같이 뜬다.
+
+> 참고 — 시뮬 cam2(`2:1`,`2:2`)는 `metricErr ≈ 2.6e-7`, `conf ≈ 0.99999` 로 사실상 완전하다. 즉 경고는 cam1 ROI 의 문제이지 실카가 붙어서 생긴 것이 아니다.
+
+**이 경로에는 폴백이 없다.** 「실카를 못 찾아서 시뮬로 떨어진다」가 아니라 **애초에 카메라를 묻지 않는다.** 라우트 주석이 그 의도를 명시한다(`captureRoutes.ts:911-913`: "Unity camera 블록은 쓰지 않는다(실카메라 호환)") — 카메라 **제원**에서 독립시키는 데는 성공했지만 카메라 **정체성**을 함께 버렸다.
+
+---
+
+## 2. 「설치고」 입력은 어디로 가는가
+
+```
+web/index.html:250   <input id="ap-height">            ← 「카메라 제원(비우면 자동)」 바 안
+  └ web/app.js:2297  apCameraSpec() { spec.heightM = apNum('ap-height') }
+    └ web/app.js:2455  cameraSpec: apCameraSpec()      ← ★ 호출처는 여기 **한 곳뿐**
+      └ RPC roi.auto.detect / roi.auto.score
+```
+
+`apCameraSpec()` 의 호출처는 `web/app.js:2455` **단 하나**이며 그것은 `roi.auto.*` 요청이다. `loadGroundModel()`(app.js:1176)은 파라미터 없는 `fetch('/capture/ground-model')` 이므로 **입력이 도달할 통로 자체가 없다**.
+
+서버 쪽에서 그 값은 확실히 이긴다:
+
+```ts
+// src/rpc/services/roiAuto.ts:362-363  (hucoms 분기)
+const heightM = spec?.heightM ?? cfg.heightM;   // ★ UI 입력이 lens_calibration 을 이긴다
+```
+
+**판정: 「13 을 넣어도 배너가 5.0」은 정상 동작이다.** 배너는 그 입력의 표면이 아니다. 마스터가 결함으로 느낀 것은 타당하지만, 고쳐야 할 지점은 입력 배선이 아니라 **배너가 무엇을 보여주고 있는지 말하지 않는 것**이다(§6).
+
+최신 스샷의 「설치고 입력란 비어 있음」도 문제가 아니다 — 비면 `lens_calibration.cameraSpec.heightM = 13` 이 자동으로 쓰인다(§3에서 실측 확인).
+
+---
+
+## 3. `lens_calibration.json` 의 13m — 검출 경로가 실제로 읽는가
+
+**읽는다. 라이브로 확인했다.** `roi.auto.detect`(`view:'current'`, 무이동) 실측 응답:
+
+```
+intrinsics.source =
+  real:real-camera-1(zoomHfov@z=8998→19.231°←lens_calibration 실측표,
+                     tilt 16.11°←PTZ tiltpos 1611/100,
+                     설치고 13m←lens_calibration.cameraSpec)
+intrinsics.focalPx = 5666.54781
+issues: "지상고 자가보정: 13.000m → 12.952m (관측 칸간격 2.5092m vs 규격 2.5m, 계수 0.99631, 표본 21)"
+```
+
+- 설치고 **13m** ✔ (`data/lens_calibration.json` → `real-camera-1.cameraSpec.heightM`)
+- 틸트 **16.11°** = 장비 tiltpos 1611 ÷ 100 ✔ (OSD `48/16/x35` 와 일치)
+- 화각 zoompos 8998 → 19.231° (13점 실측표 보간) ✔
+
+배너(f=1683px, tilt 36.58°, d=4.947m)와 **한 숫자도 겹치지 않는다.** 같은 화면의 두 숫자가 다른 이유는 오차가 아니라 **서로 다른 파이프라인**이기 때문이다.
+
+경로 분기의 근거는 `roiAuto.ts:344-352`:
+```ts
+if (fs.kind !== 'hucoms') { ...placeMetaProvider(정본 메타)... }   // 시뮬 계열
+const cfg = readGroundSpec(lensCalibFile(), fs.id);                // 실카: 렌즈 실측표
+```
+그리고 `realMissing()`(`roiAuto.ts:334`)이 설치고가 없으면 **검출을 거부**한다 — 시뮬 값으로 대체하지 않는다. 이 안전장치는 살아 있다.
+
+---
+
+## 4. 지면모델 소스 우선순위 (어떤 조건에서 무엇이 이기는가)
+
+| 표면 | 진입점 | 지면모델 소스 | 카메라 식별 | 설치고 출처(우선순위) | UI「설치고」 |
+|---|---|---|---|---|---|
+| **배너** `#ground-badge`<br>**3D 육면체** `#roi-cuboid`<br>**차량 육면체** `#roi-vcuboid` | `GET /capture/ground-model` | `PtzCamRoi.json` 주차면 폴리곤에서 **추정** (`source:'file'`). zoom 은 ROI 프리셋 ptz > `camerapos.json` | **없음** (`_req` 폐기) | 폴리곤에서 2.5×5.0m 규격 역산으로 **추정**. `camera.position[1]` 은 읽지 않음 | **✗ 통로 없음** |
+| **도색선 자동검출** (실카) | `roi.auto.detect/score`, `kind==='hucoms'` | `lens_calibration.zoomHfov` + 장비 `tiltpos` + `cameraSpec.heightM` | **있음** (`source` → `fs.id`) | UI `cameraSpec.heightM` > `lens_calibration.cameraSpec.heightM` > **거부**. 이후 `bayGrid` 자가보정이 관측 칸간격으로 미세보정(13.000→12.952) | **✓ 최우선** |
+| **도색선 자동검출** (시뮬/rpc) | 같은 RPC, `kind!=='hucoms'` | `placeMetaProvider(PtzCamRoi camera 메타)` | 인덱스만 | UI `heightM` > `PtzCamRoi.camera.position[1]` | ✓ |
+| **자동 격자** | `POST /capture/ground-grid/bootstrap` | `PtzCamRoi` 에서 부트스트랩한 카메라 상수 (`source:'auto'`) | 없음 | 부트스트랩 프리셋의 **추정 d** | ✗ |
+| **최종화** `slot3d_front_center` | `Finalizer` / `buildSlotFrontCenters` | 배너와 **같은 조합**(주석이 "새 조합 금지"로 못박음) | 없음 | 추정값 | ✗ |
+
+**요약**: 실카 정체성을 아는 경로는 **`roi.auto.*` 단 하나**다. 나머지 넷은 전부 `PtzCamRoi.json` 을 유일 진실로 삼으며 카메라를 묻지 않는다. 배너에 `source:'auto'` 가 뜰 일은 없다 — `state.groundByKey` 는 `/capture/ground-model` 에서만 채워지고 그 라우트는 항상 `'file'` 을 낸다.
+
+---
+
+## 5. ★ 6/4/2/4 면 요동 — 성분 분해
+
+신규 진단 도구 `src/tools/realGroundSplit.ts` 로 두 성분을 각각 고립시켰다. **PTZ 이동 명령 0건**(`RealPtzSource.snapshot` 은 `mode==='manual' && ptz` 일 때만 이동한다 — 그 조건을 만들지 않았다).
+
+### [A] 프레임 성분 — 지면모델 **고정**, 무이동 연속 캡처
+
+2회 독립 실행, 각 6장:
+
+| 회 | frameHash (6장 전부 상이) | tiltpos/zoompos | f(px) | **자동 quad** |
+|---|---|---|---|---|
+| 1차 | `95bc47532063` `6f796747fcd8` `4a30e96aa8fe` `7ee6db78b603` `ff53dba478f6` `707a053dc903` | 1611/8998 **6/6 동일** | `5666.5478117581315` **비트 동일** | **[2, 1, 2, 3, 4, 4]** 폭 3 |
+| 2차 | `1e8935339463` `87929dc450e2` `6decd37ab464` `8b5875e4abc8` `a168108eeb44` `5ee18b886e1a` | 1611/8998 **6/6 동일** | `5666.5478117581315` **비트 동일** | **[2, 1, 2, 2, 4, 3]** 폭 3 |
+
+→ **PTZ 도 지면모델도 한 비트도 변하지 않았는데 면수가 1~4 로 요동한다.** 이번엔 22회차의 무명령 PTZ 드리프트도 없었다(12회 관측 전부 1611/8998).
+
+### [B] 모델 성분 — **frame#1 바이트 고정**, 지면모델만 교체
+
+| arm | 설치고(m, 원시) | f(px, 원시) | tilt(°, 원시) | **자동 quad** |
+|---|---|---|---|---|
+| `REAL` (검출이 실제로 쓰는 값) | `13` | `5666.5478117581315` | `16.11` | **2** |
+| `H<-1:1` (설치고만 배너값) | `5.0158661592530684` | 동일 | 동일 | **3** |
+| `H<-1:3` (설치고만 배너값) | `4.946980959175835` | 동일 | 동일 | **2** |
+| `FULL<-1:1` (배너 모델 통째) | `5.0158661592530684` | `2850.486037390537` | `8.947076834103065` | **9** |
+| `FULL<-1:3` (배너 모델 통째) | `4.946980959175835` | `1683.2816845244429` | `36.57717392555767` | **4** |
+
+`reports/overlay_r27c/arm_FULL_-1_1.png` 를 육안으로 보면 **9개 quad 가 종이처럼 납작한 띠로 뭉개져** 차량 위를 가로지른다 — 배너 모델을 실제로 쓰면 검출이 붕괴한다는 시각 증거다. `arm_REAL.png` 는 뒷줄 2면에 정상적으로 앉는다.
+
+### [C] 재현성 — 같은 프레임 · 같은 모델 2회
+
+`quads 2 vs 2` · `quadDigest a95cd1516859` vs `a95cd1516859` → **비트 동일**. 요동의 기저 분산은 **0**이다(비결정 성분 없음).
+
+### [D] 라이브 서비스로 재현 (교차확인)
+
+같은 뷰에서 `roi.auto.detect`(`view:'current'`, `consensus:false`) 3연속:
+
+| run | frameHash | f(px) | 설치고 | **quads** | rows |
+|---|---|---|---|---|---|
+| 1 | `23cdcf566312` | `5666.54781` | 13m | **2** | 3 |
+| 2 | `f9d729777e5f` | `5666.54781` | 13m | **2** | 1 |
+| 3 | `e08676e73030` | `5666.54781` | 13m | **3** | 2 |
+
+지면모델 문자열이 세 번 다 **완전히 동일**한데 면수가 갈린다. **마스터의 6/4/2/4 와 같은 현상이며, 원인은 지면모델이 아니다.**
+
+#### [D-2] 독립 경로의 교차확인 (27-B 프레임 아카이브)
+
+27-B 가 같은 시각에 배선한 검출 프레임 아카이브가 **내 실행을 독립적으로 기록**했다 — 내 도구가 아니라 서비스 훅이 남긴 것이라 서로 다른 코드 경로의 대조가 된다. `reports/detect_frames/20260731T041408068Z_23cdcf566312.json`:
+
+```json
+"ptz": { "native": { "zoom": 8998, "tilt": 1611 } },
+"groundModel": { "f": 5666.5478117581315, "d": 13, "tiltDeg": 16.11 },
+"detect": { "bays": 2, "rows": 3 }
+```
+
+내 [D] 표 run1(`23cdcf566312`, quads 2, rows 3, f 5666.54781)과 **원시 배정도까지 일치**. 아카이브 24건 중 04:11:28~04:14:34 구간 11건이 전부 `8998/1611` 이다 — **무이동 확증이 두 번째 출처로 확인됐다.**
+
+#### [D-3] ★ 291ms 함정에 대한 정정 — **실카는 순서가 반대다**
+
+앞선 초고에서 나는 아카이브의 `timing.ptzToFrameMs = 273` 을 「291ms 함정의 실측 재확인」으로 적었다. **틀렸다. 철회한다.** 27-B 지적으로 재검한 뒤 **코드에서 직접 확인**했다:
+
+```ts
+// src/rpc/services/roiAuto.ts:727
+cap = await fs.camera.requestImage(t.camId, t.presetIdx,
+        fs.kind === 'hucoms' ? undefined : t.ptz ?? undefined);   // ★ 실카는 undefined
+// → CameraSourceClient: ptz 없음 → mode:'preset'
+// → RealPtzSource.snapshot:
+//      const jpeg = await this.client.getJpeg();     ← ① 이미지 먼저
+//      const ptz  = await this.currentPtz();         ← ② PTZ 나중
+```
+
+- **리더의 우려는 「PTZ 를 먼저 읽고 이미지를 나중에 받는다」**(gopreset → 291ms → PTZ, 16.1초 뒤 이미지)였다. **실카 검출 경로는 순서가 반대다** — 이미지가 먼저고 PTZ 가 나중이다. 이동 여부와 무관한 구조적 사실이며, 「이번엔 이동을 안 해서 조건이 없었다」보다 **한 단계 강한 진술**이다.
+- `ptzToFrameMs = 273` 은 **시점 차가 아니다.** 사이드카 자신이 `ptzQueriedAt == frameRequestedAt`(둘 다 `04:14:07.795`)이라고 적고 있다 — 273ms 는 `snapshot()` **왕복 시간**일 뿐이다. 27-B 가 `timing.note` 를 소스 종류별로 갈라 고쳤고, 다음 실카 프레임부터 새 문구가 붙는다(**기존 24개 사이드카는 옛 문구 그대로** — 위 해석을 적용할 것).
+- **간격 크기는 내가 직접 쟀다**(27-B 가 제시한 33~51ms 는 `getptzfpos` **자체 소요시간**이지 간격이 아니다). 패킷 로그에서 *JPEG 완료 → getptzfpos 완료* 를 재면:
+
+| 표본 | jpeg 완료 | getptzfpos 완료 | **간격** |
+|---|---|---|---|
+| 1 | `1785471529335` (ms=221) | `1785471529407` (ms=43) | **72ms** |
+| 2 | `1785471346099` (ms=245) | `1785471346467` (ms=33) | **368ms** |
+
+→ 실측 간격은 **72~368ms** 로 `getptzfpos` 자체 소요(33~51ms)보다 크다. 이 수치는 인용하되 **33~51ms 로 줄여 적지 않는다**.
+- **잔여 위험(정직)**: 순서가 반대라는 것이 어긋남을 **불가능하게** 만들지는 않는다 — 부호를 뒤집을 뿐이다. 이 창 안에서 카메라가 움직이면 **픽셀은 옛 자리, PTZ 는 새 자리**가 된다. 다만 이번 측정은 12/12 관측이 `1611/8998` 로 고정이었으므로 어느 방향으로도 무관하다.
+- 내 도구 `realGroundSplit.ts` 도 같은 `requestImage(1, 1)` 경로를 쓰므로 **같은 성질**을 갖는다(이미지 → PTZ).
+
+> ⚠ **후속 회차 주의**: `04:23:57` 이동 이후의 실카 프레임을 그 이전 것과 비교하면 안 된다 — zoompos 가 `8998 → 8155` 로 바뀌어 f 가 달라진다. 아카이브의 `04:24:43` 항목(`042bbc07f3c2`)은 실카가 아니라 **`simulator-1`** 이므로 이 구간 대조군이 되지 않는다. **이동 이후의 real-camera-1 프레임은 아직 0건이다.**
+
+### 판정
+
+- **요동(분산)의 원인 = 프레임 종속 단독.** 14회차에 시뮬에서 관측된 ±6면 성분이 실카에서도 그대로 살아 있다. 지면모델은 이 축에 대해 **무죄**.
+- **면수 수준(level)에는 지면모델이 크게 관여한다** — 같은 프레임에서 2 ↔ 9 (4.5배). 다만 **서비스는 옳은 모델(13m)을 쓰고 있으므로** 이 성분은 현재 발현되지 않고 있다.
+- **둘 다인가?** 아니다 — 관측된 요동에 한해서는 **프레임 단독**이다. 지면모델은 "지금 틀려 있지 않지만, 틀리면 크게 틀릴 축"이다.
+- **미규명**: 프레임에 따라 면수가 갈리는 **내부 메커니즘**(어느 단계에서 갈리는가)은 이번에 재지 않았다. 표에 `직선 59~60` · `가설 7~8` · `코너 2~5` 가 함께 흔들리는 것으로 보아 **`detectPaintLines` 단계부터** 갈리는 것으로 보이나, 단계별 고립은 하지 않았다. 별도 회차 표적.
+
+---
+
+## 6. 제안 (적용하지 않았음 — 리더 판단 필요)
+
+### 6-1. `PtzCamRoi.json` 에 `real-camera-1` 항목 추가 — **권장하지 않는다**
+
+지시대로 제안서로만 낸다. 다만 **조사 결과 이 방법은 성립하지 않는다.** 세 가지가 막는다:
+
+1. **키가 이름이 아니라 숫자다.** `groundInputs.ts:23` 이 `cam_id`(숫자)로 키를 만들고 뷰어는 `state.cam`(카메라 인덱스)으로 조회한다. 실카는 `RealPtzSource.ts:286` 에서 **항상 camIdx 1** 이다. `cam_id:3` 으로 넣으면 **영원히 조회되지 않고**, `cam_id:1` 로 넣으면 **시뮬 cam1 과 정면충돌**한다(둘 중 뒤엣것이 맵을 덮는다).
+2. **넣을 좌표가 없다.** `d`·`f`·`tilt` 는 그 프리셋의 **주차면 폴리곤에서 추정**된다. real-camera-1 의 EV1~EV5 에는 수동 정본 폴리곤이 없다. 폴리곤 없이 `camera.position[1]=13` 만 적어도 **아무 효과가 없다** — 그 필드는 읽히지 않는다(§0 정정 참조).
+3. **프리셋 번호 공간이 다르다.** 실카 프리셋은 1~20, 30, 131, 161, 162 로 흩어져 있다(장비 실측). 시뮬 preset_idx 1~3 과 겹치는 구간이 그대로 충돌 구간이다.
+
+**따라서 「값을 넣는」 제안 대신 「경로를 고치는」 제안을 낸다.**
+
+### 6-2. 최소 수정안 — 배너가 대상 불일치를 **말하게 한다** (미적용, 상신)
+
+가장 작고 위험이 0인 지점은 `web/app.js:1163-1170 updateGroundBadge` 다. 실카가 선택돼 있으면 표시 모델이 그 카메라의 것이 아님을 명시한다.
+
+```js
+function updateGroundBadge() {
+  const g = state.groundByKey[currentFrameKey()] ?? null;
+  const badge = $('ground-badge');
+  // ★ /capture/ground-model 은 카메라를 묻지 않는다(captureRoutes.ts:951 `_req`).
+  //   실카를 보는 동안 표시되는 모델은 **시뮬 정본 cam_id 1·2** 의 것이며 이 카메라의 값이 아니다.
+  const real = selectedSourceIsReal();
+  badge.textContent = (real ? '⚠ 대상 아님(시뮬 정본 모델) · ' : '') + formatGroundBadge(g);
+  ...
+}
+```
+
+- `web/core.js`(봉인 테스트 다수)를 건드리지 않는다 — `formatGroundBadge` 무변경.
+- 시뮬 경로는 문자 하나 안 바뀐다(`real===false` 면 종전과 동일).
+- **적용하지 않은 이유**: `web/app.js` 는 공유 파일이고 같은 `main` 에서 27-A/27-B 가 진행 중이다. 순서를 리더가 정하는 편이 안전하다고 판단했다.
+
+### 6-3. 더 큰 수정(상신 — 이번 범위 밖으로 판단)
+
+- **③ 육면체·최종화도 같은 모델을 쓴다.** `#roi-cuboid`/`#roi-vcuboid`(`app.js:895`,`954`)와 `Finalizer`/`buildSlotFrontCenters` 가 전부 `/capture/ground-model` 조합을 쓴다. 실카에서 이 기능을 켜면 **5m 기하로 13m 현장의 육면체를 세우고, 그 값을 DB `slot3d_front_center` 에 쓴다**. 배너와 달리 이쪽은 **표시가 아니라 저장**이므로 영향이 크다. 이번엔 손대지 않았고 실행하지도 않았다(DB 무접촉).
+- 근본 해법은 `/capture/ground-model` 에 `source` 파라미터를 주고 실카면 `roi.auto` 와 **같은 제원 해석기**(`resolverFor`)를 태우는 것이다. 이중구현 금지 규약과도 맞는다. 다만 라우트 계약·뷰어 키 체계·`Finalizer` 3곳이 함께 움직여야 해 **최소 수정이 아니다 → 설계자 경유 권장**.
+
+---
+
+## 7. 변경 파일 / 무회귀
+
+### 신규 (1건)
+- `SettingAgent/src/tools/realGroundSplit.ts` — 진단 전용 하네스. `src/ground/*`·`src/rpc/services/*` 는 **import 만**. 검출 알고리즘 0줄 변경.
+
+### 수정
+- **없음.** 정본(`data/Place01/PtzCamRoi.json`)·DB·`web/*`·`src/ground/*`·`src/rpc/services/*` 전부 무변경.
+- 27-A(`contactOrient.ts`)·27-B(`roiAuto.ts`) 파일 **무접촉**. `git add`·커밋 하지 않음.
+
+### 골든 무회귀 — `npx tsx src/tools/roiAutoRecall.ts v1 evidence rows --raw`
+
+| 항목 | 요구값 | 실측 | |
+|---|---|---|---|
+| recall | `0.5853658536585366` | `0.5853658536585366` | ✔ |
+| precision | `0.8571428571428571` | `0.8571428571428571` | ✔ |
+| meanIoU | `0.8886003068644802` | `0.8886003068644802` | ✔ |
+| minIoU | `0.6130202566182261` | `0.6130202566182261` | ✔ |
+| pass95 / pass98 | 8 / 1 | 8 / 1 | ✔ |
+| 프레임해시 5개 | — | `1:1=6006a034bfe2 1:2=ceaaed722663 1:3=3c0db12efe75 2:1=e33628e921c2 2:2=0cf4fda4d3aa` | ✔ 참조 로그(`_workspace/19_recall_v1_evidence_rows.log`)와 비트 동일 |
+
+### tsc
+- **최종 상태: `npx tsc --noEmit` exit 0 · 출력 0바이트** (내가 직접 재실행해 확인).
+- ~~선행 에러 `roiAuto.ts(724,3) TS2739`~~ → **철회.** 이것은 27-B 의 **편집 중간 상태**를 스냅샷한 것이었다(반환 **타입**에 4개 필드를 넣은 뒤 반환 **객체**를 채우기 전 몇 분). 27-B 확인 결과 현재 724행은 `const requestedAt = ...` 이고 네 필드 모두 반환된다. **실재했던 에러이나 이미 해소됐다** — 내 보고가 시점 때문에 과장됐던 것을 정정한다.
+- 교훈(기록): 병행 세션이 있는 `main` 에서 `tsc` 전역 결과를 남의 파일 판정에 쓰면 **중간 상태를 결함으로 오인**한다. 내 파일 한정 필터(`grep realGroundSplit`)가 옳은 판정이었다.
+
+### vitest
+- `npx vitest run` → **308 파일 / 3895 테스트 전부 green** (102.07s, exit 0).
+- ⚠ 정직 주석: vitest 는 transpile-only 라 위 `roiAuto.ts` 타입 에러를 잡지 못한다. **green 이 tsc clean 을 뜻하지 않는다** — 두 지표를 함께 봐야 한다.
+
+---
+
+## 8. 카메라 사용 기록 (마스터 확인용)
+
+- **PTZ 이동 명령: 0건.** 프리셋 이동·상대 이동·센터링 **전부 미사용**.
+- 시작 시 PTZ 기록: native `pan 4877 / tilt 1611 / zoom 8998` (= **EV3**, `evPresetDetect.ts` 의 EV3 제원과 정확히 일치. OSD `48/16/x35` 로 화면에서도 확인).
+- 측정 종료 직후 PTZ: native `pan 4877 / tilt 1611 / zoom 8998` — **동일**(내 작업 구간 내내 12/12 관측 일치).
+- ⚠ **그 이후 제3자가 카메라를 옮겼다 — 나는 복귀시키지 않았다.** 보고서 집필 중 재확인하니 native `pan 7034 / tilt 2760 / zoom 8155` 로 바뀌어 있었다.
+  - 로그 증거(`logs/setting_20260731_131844.log`): `time 1785471837788` 에 `preset_control.cgi?action=gopreset&number=2` **204**. 내 프로세스가 낸 요청이 아니다 — 내 패킷은 전 구간 `jpeg.cgi`(캡처)와 `ptzf_status.cgi?action=getptzfpos`(읽기) **둘뿐**이며 로그에도 그렇게만 남아 있다.
+  - 시각 대조: 이 `gopreset` 은 내 마지막 측정(골든 회귀 직후 PTZ 확인) **뒤**, vitest 시작(13:24:32) **앞**이다. vitest 도 아니다.
+  - **27-B 도 자기 것이 아님을 확인했다**(실카 접촉 전량 04:13:46~04:14:07, 이동 명령 0건 — 문제의 `gopreset` 보다 9분 50초 앞). 구조적으로도 `roi.auto.detect` 는 `gopreset` 을 낼 수 없다: `requestImage(cam, preset, undefined)` → `mode:'preset'` → `RealPtzSource.snapshot` 은 `mode==='manual'` 일 때만 `move()`(=`goptzfpos`)를 부르고, `gopreset` 은 `gotoDevicePreset` 경로 전용이다.
+  - **사람 조작으로 보는 근거**(27-B 로그 판독): `04:22:28.585 ONVIF GetProfiles 200` → `04:22:28.641 ONVIF GetPresets 200` → **89초 공백** → `04:23:57.788 gopreset number=2 204`. 이것은 커밋 `9946e56` 이 넣은 뷰어의 「프리셋 목록 조회 → [이동]」 UI 흐름 그대로다. **기계 호출자는 목록을 뽑고 89초를 쉬지 않는다.**
+  - **복귀시키지 않은 이유**: 마스터가 화면을 보며 직접 조작한 것으로 보이고, 물리 이동은 마스터 판단 사항이다. 내가 EV3 으로 되돌리면 보고 있는 화면을 뺏는다. 지시서의 「원위치 복귀」는 **내가 움직였을 때**의 규칙이므로 여기엔 해당하지 않는다고 판단했다. 27-B 도 같은 결론으로 복귀시키지 않았다. **리더/마스터 판단 요청.**
+  - **미규명 1건**: 현재값 `7034/2760/8155` 는 `evPresetDetect.ts` 에 기록된 **EV1** 제원과 정확히 같은데 로그의 명령은 `number=2`(EV2)다. EV2 는 마스터 지시로 제원을 수집하지 않아 대조군이 없다 — **어느 프리셋에 있는지 단정하지 않는다**(관측값과 로그만 그대로 싣는다).
+  - **측정 무결성에는 영향 없음**: 이 이동은 모든 측정이 끝난 뒤에 일어났고, [A]/[B]/[C]/[D] 전 구간에서 tiltpos/zoompos 가 `1611/8998` 로 고정돼 있었음이 표에 원시값으로 남아 있다.
+- 정지영상 캡처: 총 **18장**(성분분해 6×2회 + 라이브 검출 3회 + 초기 1회). 캡처는 `jpeg.cgi` 단순 조회로 PTZ 를 건드리지 않는다.
+- 「gopreset 후 291ms 만에 PTZ 를 읽는」 함정 — **§5 [D-3] 참조.** 실카 검출 경로는 **순서가 반대**(이미지 → PTZ, 간격 실측 72~368ms)라 리더가 우려한 형태의 불일치는 구조적으로 발생하지 않는다. 더불어 이동이 0건이라 12/12 관측이 `1611/8998` 로 고정이었다.
+
+---
+
+## 9. 산출물
+
+- `_workspace/53_developer_realcam_groundmodel_round27.md` (이 문서)
+- `src/tools/realGroundSplit.ts` (신규 진단 도구)
+- `reports/overlay_r27c/`
+  - `split_report.txt` · `split_raw.json` — 원시 배정도 전문
+  - `arm_REAL.png` / `arm_H_-1_1.png` / `arm_H_-1_3.png` / `arm_FULL_-1_1.png` / `arm_FULL_-1_3.png` — **같은 프레임** 위 모델별 대조
+  - `frame{1..6}_*.png` / `.jpg` — **같은 모델** 아래 프레임별 대조
+
+## 10. 미규명 (정직)
+
+1. **프레임 종속의 내부 메커니즘** — 어느 단계에서 갈리는지 고립하지 않았다. `직선 59~60`/`가설 7~8`/`코너 2~5` 가 함께 흔들리는 것으로 보아 `detectPaintLines` 상류로 **추정**되나 측정하지 않았다.
+2. **마스터의 6/4/2/4 와 내 1~4 의 절대 수준 차이** — 시각·조도·「예상 주차면 수」 입력 유무가 다를 수 있다. 요동 **현상**은 재현했으나 **같은 조건**이었는지는 확인하지 못했다.
+3. **육면체·`slot3d_front_center` 의 실제 오염 여부** — 실카에서 그 기능을 실행하면 5m 기하가 DB 에 들어간다고 **코드상 판단**했으나, DB 무접촉 원칙 때문에 **실행해 확인하지 않았다**.
+4. **22회차의 무명령 PTZ 드리프트** — 이번 12회 관측에서는 발현되지 않았다. 소멸했는지 조건부인지 모른다.

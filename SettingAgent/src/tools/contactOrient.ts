@@ -169,9 +169,16 @@ export interface KinkOpts {
   minKinkDeg: number;
   /** τ_gain — 같은 근거의 1.5배. */
   minRmsGain: number;
+  /**
+   * ★ 27-A **F4 꺾임점 고정**(설계 §3 F4) — 채택 앞변 2점 중 꺾임점 쪽 끝을 `cols[splitIdx]` 의
+   * TLS 투영으로 **고정**한다. 발동 근거: C6 실측(앞변 끝점↔꺾임점 최소거리 중앙값 14.944379128562943 px ·
+   * 악화군 30.664152241448438 vs 개선/폴백군 13.63107017901973). `segEndpoints` 자체는 무변경이다.
+   * **기본 false** — 26회차 `'kink'` 산출을 비트 그대로 보존한다(Q3b 앵커).
+   */
+  pinKink: boolean;
 }
 
-export const KINK_DEFAULTS: KinkOpts = { minCols: 8, minSegCols: 4, minKinkDeg: 20, minRmsGain: 1.5 };
+export const KINK_DEFAULTS: KinkOpts = { minCols: 8, minSegCols: 4, minKinkDeg: 20, minRmsGain: 1.5, pinKink: false };
 
 export interface EdgeFit {
   p0: Px;
@@ -242,6 +249,15 @@ export function frontEdgeOf(
   if (!Number.isFinite(ra) || !Number.isFinite(rb)) return fallback(sp.kinkDeg, sp.gain);
   const front = ra >= rb ? eA : eB;
   const other = ra >= rb ? eB : eA;
+  // ★ F4 — 꺾임점 쪽 끝을 `cols[splitIdx]` 의 TLS 투영으로 고정(스팬 과연장 차단).
+  const kp = o.pinKink ? cols[sp.k] : null;
+  if (kp) {
+    const L = ra >= rb ? sp.a : sp.b;
+    const t = (kp.x - L.cx) * L.dir[0] + (kp.y - L.cy) * L.dir[1];
+    const proj = { x: L.cx + t * L.dir[0], y: L.cy + t * L.dir[1] };
+    const i = Math.hypot(front[0].x - kp.x, front[0].y - kp.y) <= Math.hypot(front[1].x - kp.x, front[1].y - kp.y) ? 0 : 1;
+    front[i] = proj;
+  }
   return { p0: front[0], p1: front[1], mode: 'kink', kinkDeg: sp.kinkDeg, rmsGain: sp.gain, splitIdx: sp.k, other };
 }
 

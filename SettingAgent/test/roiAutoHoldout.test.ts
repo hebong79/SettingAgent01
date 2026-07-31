@@ -23,6 +23,10 @@ const NOT_SEALED = [
   'src/ground/cameraIntrinsics.ts',
   'src/ground/placeMetaIntrinsics.ts',
   'src/ground/contactTypes.ts',
+  // ★ 27-B — `GroundModel` 타입 하나를 쓰려고 들어왔다(아카이브 사이드카가 지면모델 값을 담는다).
+  //   **런타임 코드가 0줄인 순수 선언 모듈**이라 주차면 데이터를 담을 수도, 읽을 수도 없다.
+  //   (`cameraIntrinsics.ts`·`bayGrid.ts` 가 이미 같은 타입을 여기서 가져다 쓴다 — 신규 의존이 아니다.)
+  'src/ground/types.ts',
 ];
 
 /** 수동 정본에 닿는 심볼·경로. 하나라도 등장하면 hold-out 오염이다. */

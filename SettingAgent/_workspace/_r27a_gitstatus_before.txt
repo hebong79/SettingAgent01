@@ -1,0 +1,5 @@
+ M SettingAgent/src/rpc/services/roiAuto.ts
+?? SettingAgent/_workspace/51_architect_plan_round27_contour_refine.md
+?? SettingAgent/_workspace/_r27a_gitstatus_before.txt
+?? SettingAgent/src/capture/frameArchive.ts
+?? SettingAgent/src/tools/realGroundSplit.ts

@@ -21,6 +21,12 @@ __pycache__/
 SettingAgent/save/
 # 정밀수집 결과 보조 미러(reports/*, 런타임 누적, 커밋 제외)
 SettingAgent/reports/
+# 검출 프레임 아카이브(27-B). 위 reports/ 규칙이 이미 덮지만 **결정을 명시**해 둔다 —
+# 사이드카(JSON)만 추적하는 안을 검토했으나 기각: 그림 없는 메타는 재현이 불가능한데(이 기능의 목적)
+# 보존정책이 오래된 쌍을 지우므로 git 에는 삭제 이력만 무한 누적된다. 골든 프레임 세트(21MB)를
+# 커밋에서 뺀 15회차 결정과 같은 취급이다. 대신 **서버가 항상 main 체크아웃에서 돌므로**
+# 워크트리에서 작업해도 프레임은 이 한 자리에 모인다(26-1 의 "워크트리에서 복사" 문제의 실제 해법).
+SettingAgent/reports/detect_frames/
 *.log
 # 센터라이징 기준 프레임(런타임 생성 JPEG, 커밋 제외)
 SettingAgent/data/refframes/

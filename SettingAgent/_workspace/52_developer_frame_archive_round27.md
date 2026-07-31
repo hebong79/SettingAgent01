@@ -1,0 +1,343 @@
+# 27-B 구현 보고 — 뷰어 검출 프레임 자동 저장(R3 해소)
+
+작성: 구현자 · 2026-07-31 · 브랜치 `main` 직접 · 서버 13020 실행 중(nodemon)
+
+---
+
+## 0. 실패·미측정·주의 (먼저 읽어라)
+
+| # | 항목 | 상태 |
+|---|------|------|
+| F1 | **도입 직후 vitest 가 아카이브를 오염시켰다(실측 사고)** | 기본 ON 인 채로 다른 에이전트가 `npx vitest run` 을 돌리자, 모킹된 가짜 소스 `real-x`(hucoms 로 위장) + 픽스처 프레임 `6006a034bfe2` 가 `reports/detect_frames/` 에 **20쌍 4.3MB** 쌓였다. 아카이브는 "실제 관측"의 저장소인데 모킹 프레임이 섞이면 그 자체가 오염이다. → `vitest.config.ts` 에 `env: { ROI_FRAME_ARCHIVE: '0' }` 를 넣어 차단. 오염분은 삭제. **가설이 아니라 실제로 밟은 함정이다.** |
+| F2 | `frameReceivedAt` 은 **JPEG 도착 시각이 아니라 `requestImage()` 반환 시각** | hucoms 소스는 내부에서 `getJpeg()` → `currentPtz()` 순으로 돈다. 즉 실제 JPEG 도착은 기록값보다 **36~368ms(n=29 실측, 중앙값 약 61ms) 앞선다.** 정확히 재려면 `CapturedImage`(`domain/types.ts`)·`RealPtzSource` 에 타임스탬프 필드를 넣어야 하는데, 그 파일들은 27-A/27-C 와 겹칠 수 있어 **손대지 않았다.** 사이드카 `timing.note` 에 이 한계를 명시했다. |
+| F3 | **`consensus:true`(다시점 합의) 경로의 아카이브는 라이브 검증 안 됨** | 코드상 디더 6시점이 각각 archive 되고 `dPanDeg`/`dTiltDeg` 가 기록되도록 배선했으나(`detectOne(…, dt, dp)`), 실카는 합의를 쓰지 않고 시뮬 preset+consensus 라이브 실행은 **카메라를 6번 흔들어** 다른 에이전트 작업을 방해할 수 있어 돌리지 않았다. **미검증**. |
+| F4 | 보존정책의 **용량 상한이 실제로 발동하는 것을 라이브에서 못 봤다** | 유닛테스트(임시 디렉터리)에서만 확인. 실사용 400쌍/400MB 에 도달하려면 수 시간이 걸린다. |
+| F5 | `roiAutoRecall`(골든) 은 **`roiAuto.ts` 를 import 하지 않는다** | 즉 골든 무회귀는 `src/ground/*` 무변경만 증명한다(내가 그쪽을 0줄 건드렸으므로 당연히 통과). `roiAuto.ts` 자체의 무회귀 증거는 §6 에 따로 적었다 — **골든 통과를 서비스 무회귀로 읽지 마라.** |
+| F6 | **리더 가설(291ms)은 이 로그로는 지지되지 않는다** | 반증 근거는 §7. 다만 "지면모델과 이미지가 다른 시점"이라는 **우려 자체는 실재**한다 — 실카 실측 **36~368ms(n=29, 중앙값 약 61ms)**, 순서는 리더 우려와 **반대**(이미지 먼저 → PTZ 나중). ★ 내가 처음 적은 33~51ms 는 **오류**였다(§11-5, 27-C 가 잡았다). |
+
+---
+
+## 1. 무엇을 만들었나
+
+| 파일 | 종류 | 내용 |
+|------|------|------|
+| `SettingAgent/src/capture/frameArchive.ts` | **신규** | 아카이브 코어. 저장·보존정책·스위치·해시. `node:fs/promises` 외 의존 없음. **throw 하지 않는다.** |
+| `SettingAgent/src/rpc/services/roiAuto.ts` | 수정 | `grabFrame` 이 원본 JPEG·캡처 PTZ·시각을 반환. `detectOne` 이 **3개 종료 경로 전부**에서 archive. 검출 코어를 `detectGridFromFrame`(export)로 추출. |
+| `SettingAgent/src/tools/roiAutoReplay.ts` | **신규** | 저장된 프레임으로 **같은 검출을 재현**하고 quad 를 비트 비교. |
+| `SettingAgent/src/tools/frameArchiveBench.ts` | **신규** | 저장 비용 실측(요구 ③). |
+| `SettingAgent/test/frameArchive.test.ts` | **신규** | 15 테스트(스위치·저장·보존·실패내성·배선봉인). |
+| `SettingAgent/test/roiAutoHoldout.test.ts` | 수정 | `src/ground/types.ts` 를 `NOT_SEALED` 에 사유와 함께 추가(§6). |
+| `SettingAgent/vitest.config.ts` | 수정 | 테스트에서 아카이브 OFF (F1). |
+| `ParkAgent/.gitignore` | 수정 | 주석 + 명시 경로(§5). |
+
+**건드리지 않은 것**: `src/ground/*`(types.ts 는 import 만, 코드 0줄) · 정본 `PtzCamRoi.json` · DB · `roi.auto.apply` 경로 · 27-A/27-C 파일(`contactOrient.ts`·`contourRefine.ts`·`realGroundSplit.ts` 등) · `git add`/커밋 **미실행**.
+
+---
+
+## 2. 저장 위치·형식·보존 정책
+
+### 위치
+```
+SettingAgent/reports/detect_frames/
+  20260731T041354350Z_610471649483.jpg     ← 원본 JPEG
+  20260731T041354350Z_610471649483.json    ← 사이드카(메타 + 재현 입력 + 결과)
+```
+- 파일명 = `압축ISO(UTC)_frameHash`. **요구대로 frameHash 가 파일명에 있다** → `ls *_610471649483.*` 하나로 찾는다.
+- 시각 접두 이유: 같은 해시가 재등장해도 덮어쓰지 않고, **사전순 = 시간순**이라 보존정책이 정렬만으로 성립한다.
+- 콜론 제거는 윈도 파일명 제약.
+- 별도 index 파일을 두지 않았다 — 사이드카가 곧 인덱스이고, 인덱스를 두면 회전시켜야 할 대상이 하나 늘어난다.
+
+### 보존 정책
+`FRAME_ARCHIVE_MAX_ENTRIES = 400` **AND** `FRAME_ARCHIVE_MAX_BYTES = 400MB`, 둘 중 먼저 걸리는 쪽. 초과분은 **오래된 쌍부터 짝 단위로** 삭제(반쪽 상태가 생기지 않는다). 규약에 맞지 않는 파일명(`README.md` 등)은 건드리지 않는다(테스트로 못 박음).
+
+400쌍의 근거(실측): 실카 JPEG 300,802B·사이드카 5,060B → 쌍당 ≈0.3MB → 400쌍 ≈120MB(용량 상한 안). 다시점 합의(1검출=6프레임)로 `roi.auto.score` 5프리셋을 돌려도 30쌍이라 **연속 13회분**이 남는다.
+
+### 스위치
+- `ROI_FRAME_ARCHIVE=0` → OFF (그 외 전부 ON)
+- `ROI_FRAME_ARCHIVE_DIR=<경로>` → 위치 변경(테스트·벤치 전용)
+
+---
+
+## 3. 사이드카에 무엇이 들어가나 (요구 ②)
+
+실카 실측 1건 전문(`20260731T041354350Z_610471649483.json`, 값 원문):
+
+```jsonc
+{ "_schema": "parkagent.detectFrame/1", "_precision": "raw",
+  "frameHash": "610471649483",
+  "capturedAt": "2026-07-31T04:13:54.350Z",
+  "timing": { "ptzQueriedAt": "2026-07-31T04:13:54.142Z",
+              "frameRequestedAt": "2026-07-31T04:13:54.142Z",
+              "frameReceivedAt":  "2026-07-31T04:13:54.350Z",
+              "ptzToFrameMs": 208, "note": "…" },
+  "source": { "id": "real-camera-1", "kind": "hucoms", "requested": null },
+  "target": { "key": "1:current", "camId": 1, "presetIdx": 1, "view": "current",
+              "dPanDeg": 0, "dTiltDeg": 0 },
+  "ptz": { "viewer": { "pan": -131.22864524014557, "tilt": -30.910909090909094,
+                       "zoom": 20.2218017578125 },
+           "requested": null,                       // 실카엔 이동 명령을 보내지 않는다
+           "native":   { "zoom": 8998, "tilt": 1611 } },   // ★ 장비 원시값
+  "intrinsics": { "source": "real:real-camera-1(zoomHfov@z=8998→19.231°←lens_calibration 실측표, tilt 16.11°←PTZ tiltpos 1611/100, 설치고 13m←lens_calibration.cameraSpec)",
+                  "fovDeg": 19.230966638152267, "fovAxis": "horizontal", "fovAtZoom": null,
+                  "tiltDeg": 16.11, "heightM": 13, "imgW": 1920, "imgH": 1080,
+                  "focalPx": 5666.5478117581315, "hfovDegEffective": 19.230966638152267 },
+  "groundModel": { "f": 5666.5478117581315, "n": [...], "d": 13, "tiltDeg": 16.11, "issues": [...] },
+  "options": { "slotWidthM": 2.5, "slotDepthM": 5, "cameraHeightM": 13,
+               "expectedBays": 0, "coverageDenom": "phaseInvariant", "consensus": false },
+  "detect": { "graded": true, "greenRatio": 0, "paintLines": 60, "bays": 4, "rows": 3,
+              "quadsNorm": [ … ], "issues": [ … ] },
+  "files": { "jpg": "20260731T041354350Z_610471649483.jpg" } }
+```
+
+요구 항목 대응: frameHash ✔ / 카메라·프리셋 ✔(`source`+`target`) / 타임스탬프 ✔(4종) / PTZ 뷰어+**장비 원시값** ✔ / f·hfov ✔ / **지면모델 소스와 값** ✔(`intrinsics.source` 문자열이 출처를 그대로 말한다 + `groundModel`) / 결과 요약 ✔(`bays`·`rows`·`paintLines`).
+
+### ★ 반올림하지 않았다 — 규약 이탈을 의도적으로 했다
+저장소 규약은 「영속화 수치 소수점 최대 5자리(`stringify5`)」다. **이 파일에는 적용하지 않았다.** 이유: 이 기능의 목적이 재현인데 `fovDeg 19.230966638…` 을 `19.23097` 로 자르면 f 가 8자리째부터 갈라져 quad 좌표가 비트 동일해지지 않는다 = 재현이 성립하지 않는다. 5자리 규약은 **좌표 정본**의 규약이고 이건 정본이 아니다. 파일이 스스로 `"_precision": "raw"` 를 들고 다녀 오해를 막는다.
+
+---
+
+## 4. 기본 ON 판단 (요구 ③) — 근거
+
+### 성능 실측 (`npx tsx src/tools/frameArchiveBench.ts 500`)
+JPEG 350,000B + 실사 크기 사이드카, 상한(400쌍)을 채워 가며 500회:
+
+```
+평균 18.639ms · 중앙 19.729ms · p95 32.129ms · 최대 46.813ms
+첫 10회 평균 3.011ms · 마지막 10회 평균 31.930ms   (prune 부하 증가분)
+검출 1회  9000ms 대비 평균 비중 0.2071%
+검출 1회 14000ms 대비 평균 비중 0.1331%
+```
+
+- **최악(46.8ms)조차 검출 1회의 0.52%.** 라이브 실측에서도 실카 검출 총 소요 **13.701초**(§5)로 종전 9~14초대 그대로다.
+- 비용의 대부분은 쓰기가 아니라 **보존정책 집행**(readdir + 쌍마다 stat)이고 아카이브가 찰수록 3ms→32ms 로 는다. 상한에서 32ms 는 여전히 0.23% 라 **최적화하지 않았다**(단순함 우선). 상한을 크게 올릴 때 다시 볼 지점이다.
+
+### 용량
+쌍당 ≈0.3MB · 상한 400쌍 = **≤120MB 로 유계**. `reports/` 는 이미 305MB 를 쓰고 있는 런타임 디렉터리라 새 부담이 아니다.
+
+### 결론: **기본 ON**
+성능 0.13~0.21%, 용량 유계, 그리고 반대편에는 **잃으면 되살릴 수 없는 자료**가 있다 — 25·26-1·26-2 에서 이미 3번 잃었다. 다만 F1 때문에 **테스트에서는 강제 OFF**다(모킹 프레임이 관측 저장소를 오염시킨다).
+
+---
+
+## 5. 스모크 — 라이브 실행 (curl)
+
+### 5-1. 시뮬레이터 (`simulator-1`, `view:"current"`)
+```
+POST /rpc roi.auto.detect {"source":"simulator-1","view":"current","camId":1,"consensus":false}
+→ 200, 14.416s, frameHash 042bbc07f3c2
+→ reports/detect_frames/20260731T034522489Z_042bbc07f3c2.{jpg,json} 생성 확인
+   timing.ptzToFrameMs = 101
+```
+
+### 5-2. 실카 (`real-camera-1` = 192.168.0.153) — **★ 카메라 이동 0회**
+
+| 시각(UTC) | 행위 | 목적 | 결과 |
+|---|---|---|---|
+| 04:13:46.625 | `cam.getPTZ` (읽기) | **이동 전 현재 위치 기록** | pan `-131.22864524014557` · tilt `-30.910909090909094` · zoom `20.2218017578125` / native pan **4877** tilt **1611** zoom **8998** |
+| 04:13:54.067 ~ 04:14:07.793 | `roi.auto.detect` `view:"current"` | 실검출 1회 | 200, **13.701초**, frameHash `610471649483` |
+| 04:14:07.8 | `cam.getPTZ` (읽기) | 이동 여부 확인 | pan `-131.22864524014557` · tilt `-30.910909090909094` · zoom `20.2218017578125` / native **4877/1611/8998** |
+
+- **이동 횟수 0.** PTZ 전후가 **원시 배정도로 비트 동일**하고 네이티브 정수도 동일. 원위치 복귀 조작이 **필요 없었다**(애초에 움직이지 않았다).
+- 근거(코드): `roiAuto.ts` `grabFrame` 이 hucoms 에는 `requestImage(cam, preset, undefined)` 를 보내고 → `CameraSourceClient` 가 `mode:'preset'` 으로 → `RealPtzSource.snapshot` 이 `mode==='manual'` 일 때만 `move()` 를 부른다.
+- 근거(로그): 해당 프로세스(04:12:05 기동 ~ 04:15:14 nodemon 재시작)의 로그에 `goptzfpos`·`gopreset` 이 **0건**. 이동 명령은 새 집계 키라 반드시 즉시기록되므로 **부재가 곧 증거**다.
+- 지시서에 따라 **이동 없이 현재 뷰로만** 검증했다. `mode:'preset'` 이라도 실카는 `move()` 에 들어가지 않는다는 사실을 라이브로 재확인한 셈이다.
+
+### 5-3. 아카이브에 실제로 쌓인 것
+검증 종료 시점 `reports/detect_frames/` = **11쌍 3.4MB**(뷰어·타 에이전트의 실검출 포함). **11개 프레임 해시가 전부 다르다** — 14회차 「같은 PTZ 라도 프레임은 매번 다르다」가 그대로 재현된다. 이게 이 기능이 필요한 이유의 재확인이다.
+
+---
+
+## 6. 재현 검증 — **이 기능의 존재 이유**
+
+`npx tsx src/tools/roiAutoReplay.ts --all`
+
+**11/11 일치.** 각 건에서:
+- `f` 기록값 = 재현값 (예 실카 `5666.5478117581315` **원시 배정도 동일**)
+- 도색선 수 동일 · 면 수 동일
+- **`best` quad 정규화 좌표 전량 비트 동일**(`toFixed` 판정 아님 — `JSON.stringify` 원문 비교)
+
+시뮬 1건 개별 확인: 프레임 `042bbc07f3c2`, f `2932.791547272291` 동일, 도색선 60, 면 7, quad 비트 동일.
+실카 1건 개별 확인: 프레임 `610471649483`, f `5666.5478117581315` 동일, 도색선 60, 면 4, quad 비트 동일.
+
+### 재현이 신뢰할 수 있는 이유 (구조)
+서비스와 재현 도구가 **같은 함수**를 지난다. 검출 코어를 `roiAuto.ts` 에서 `detectGridFromFrame(frame, model, opts)` 로 **그대로 들어냈고**(로직 0줄 변경), `detectOne` 과 `roiAutoReplay` 가 둘 다 이걸 부른다. 코어를 두 벌로 두면 "재현했다"가 곧 거짓말이 되므로, 테스트가 `roiAutoReplay.ts` 에 `detectBaysWithModel` 이 **등장하지 않을 것**을 못 박는다.
+
+강등 프레임(지면모델 없음)은 재현 대상이 아니라 `⏭` 로 건너뛰고 그 사실을 출력한다 — 성공으로 위장하지 않는다.
+
+---
+
+## 7. ★ 부수 발견 확인 — 리더의 291ms 가설
+
+### 결론: **그 로그로는 지지되지 않는다(반증).** 다만 우려 자체는 실재하고, 크기는 작다.
+
+**반증 근거 — 패킷 로그는 완전한 기록이 아니다.**
+`src/util/packetAggregator.ts`(`PACKET_WINDOW_MS = 5분`)는 같은 키(METHOD+쿼리제거URL+op)에 대해 **창의 첫 건만 즉시기록**하고 나머지는 창 만료 시 1줄 요약으로 낸다. 같은 로그가 스스로 그 사실을 말한다:
+
+```
+line 6  : summary getptzfpos  win 550016  span 17743  n 4    flushAt 1785460947795
+line 7  : gopreset  204        1785460947795       ← 이 패킷이 sweep 을 유발해 창을 리셋
+line 8  : getptzfpos 200       1785460948086       ← +291ms = **새 창의 첫 즉시기록**
+line 10 : summary getptzfpos  win 466786  span 129006  n 17  windowStart 1785460948086
+```
+`windowStart = flushAt − win = 1785460948086` 이 line 8 과 정확히 일치한다 → **line 8 이후 129초 동안 getptzfpos 가 17회 더 있었고 전부 로그에 개별로 없다.** 그 17회가 `RealPtzSource.waitUntilStopped()` 의 폴링이다(`RealPtzSource.ts:395-424`).
+
+**코드 근거.** `gotoDevicePreset`(`RealPtzSource.ts:259-265`)은
+`goPreset` → `waitUntilStopped()` → `readNativePtz()` → `currentPtz()` 순이다. 즉 **보고되는 PTZ 는 정착 대기가 끝난 뒤 읽는다.** +291ms 의 그 조회는 대기 루프의 첫 폴이지 지면모델에 쓰인 값이 아니다. 같은 이유로 line 9 의 jpeg(+16.1s)도 "이동 후 첫 jpeg"이 아니라 **재무장된 창의 첫 즉시기록**이다.
+
+**같은 함정을 이번에 직접 밟았다.** 내 실카 검출(04:13:54)이 낸 jpeg.cgi·getptzfpos 는 그 프로세스의 로그에 **한 줄도 없다**(창이 04:12:11 에 열린 채 04:15:14 nodemon 재시작으로 sweep 없이 죽었다). 프레임은 정상 취득됐는데 로그는 침묵한다. → **패킷 로그의 시각차로 인과를 읽는 것은 이 저장소에서 안전하지 않다.**
+
+### 그럼에도 "기하와 이미지의 시점 불일치"는 실재한다 — 실측한 크기
+- **실카 현재뷰 검출**: 지면모델의 `tiltpos/zoompos` 는 `RealPtzSource.snapshot` 이 **JPEG 를 받은 뒤** 읽은 값이다(`snapshot`: `getJpeg()` → `currentPtz()`). 즉 **이미지가 먼저, PTZ 가 나중**이다. 간격은 §11-5 재측정으로 **36~368ms(n=29, 중앙값 약 61ms)** — 처음 적었던 33~51ms 는 **오류**였다(그건 `getptzfpos` 자체 소요시간이지 간격이 아니다).
+- 검출 시작 시점에 읽는 `ptzNow` 는 실카에서 **버려진다**(`grabFrame` 이 hucoms 에 `undefined` 를 넘긴다). 그 간격(실측 **208ms**)은 지면모델에 개입하지 않는다.
+- **시뮬 현재뷰**는 `ptzNow`(프레임보다 **101ms 먼저** 읽음)가 tilt 로 쓰인다. 다만 같은 값을 되써서 찍으므로 자기정합적이다.
+
+### 조치
+- 요구대로 **「PTZ 읽은 시각」과 「이미지 취득 시각」을 둘 다** 사이드카에 넣었다(`timing.ptzQueriedAt` / `frameRequestedAt` / `frameReceivedAt` / `ptzToFrameMs`). 이제 가설이 아니라 **매 검출마다 측정치가 남는다.**
+- **수정은 하지 않았다.** 순서가 반대라 통상 조건에서 무해하고(§11-5 의 잔여 위험은 별도), 정확히 재려면 `CapturedImage`·`RealPtzSource` 를 고쳐야 하는데 그건 27-A/27-C 와 파일이 겹칠 수 있다. **27회차 이후로 상신**한다(F2).
+
+---
+
+## 8. 무회귀
+
+### 8-1. 골든 rows — **전 항목 비트 동일**
+`npx tsx src/tools/roiAutoRecall.ts v1 evidence rows --raw` (변경 전·후 각 1회, 동일)
+
+| 항목 | 요구 기준선 | 실측(변경 후) |
+|---|---|---|
+| recall | `0.5853658536585366` | `0.5853658536585366` ✔ |
+| precision | `0.8571428571428571` | `0.8571428571428571` ✔ |
+| meanIoU | `0.8886003068644802` | `0.8886003068644802` ✔ |
+| minIoU | `0.6130202566182261` | `0.6130202566182261` ✔ |
+| pass95 / pass98 | 8 / 1 | **8 / 1** ✔ |
+| 프레임해시 5개 | — | `1:1=6006a034bfe2 1:2=ceaaed722663 1:3=3c0db12efe75 2:1=e33628e921c2 2:2=0cf4fda4d3aa` ✔ |
+
+매칭 쌍 24개 원시 배정도도 전량 동일(`r1f1=0.9131704858218849 … r4f4=0.9573547364401328`).
+단, **F5** — 이 도구는 `roiAuto.ts` 를 import 하지 않으므로 이 통과는 `src/ground/*` 무변경의 증거다.
+
+### 8-2. `roiAuto.ts` 자체의 무회귀 근거
+1. **검출 산출에 개입하는 코드 변경 0.** 코어는 `detectGridFromFrame` 으로 **문자 그대로 이동**했고 인자·순서·상수(`DEFAULT_PAINT_OPTIONS`·`DEFAULT_BAY_OPTS`·`Math.max(1, expectedBays)`)가 동일하다.
+2. `expectedBays`/`coverageDenom` 계산을 오염검사 **앞으로 끌어올렸다** — 순수 식이고 `issues` 에 넣는 위치는 그대로라 응답 배열 순서 불변.
+3. 아카이브는 **반환값을 바꾸지 않는** 부수효과다(`archive(o, …)` 가 받은 `o` 를 그대로 돌려준다).
+4. **응답 바이트 변화 없음** — `detectView`/`currentDetectView`/`rowsView` 무변경.
+5. 유일한 관측 가능한 변화: 검출 1회가 **평균 18.6ms 느려진다**(§4).
+
+### 8-3. 전체 스위트
+```
+tsc --noEmit          exit 0
+npx vitest run        308 파일 · 3895 테스트 전량 green   (내 신규 15 포함)
+```
+중간에 1건 red 가 났고 해소했다: `roiAutoHoldout.test.ts` 의 「roi.auto 가 쓰는 ground 모듈은 전부 봉인 대상이거나 명시적 예외다」가 새로 들어온 `src/ground/types.ts` 를 잡았다. **봉인이 제 일을 했다.** 우회(`ReturnType<typeof …>` 로 import 숨기기)를 쓰지 않고 `NOT_SEALED` 에 사유를 적어 등재했다 — 런타임 코드 0줄인 순수 선언 모듈이고, `cameraIntrinsics.ts`·`bayGrid.ts` 가 이미 같은 타입을 거기서 가져다 쓴다.
+
+### 8-4. 금지사항 준수
+- `roi.auto.apply` **미실행** · 정본 `PtzCamRoi.json` **무접촉** · DB **무접촉**(`frameArchive.ts` 는 `node:fs/promises`·`node:crypto`·logger 만 import, 테스트가 봉인)
+- `toFixed` 판정 **미사용** — 재현 비교·무회귀 전부 원시 배정도
+- 27-A/27-C 파일 **무접촉**, `git add -A`·커밋 **미실행**
+
+---
+
+## 5-bis. `.gitignore` 정책 (요구 ⑤)
+
+**아무것도 추적하지 않는다.** `SettingAgent/reports/` 가 이미 통째로 무시하므로 동작상 변경은 없고, **결정을 명시**하는 주석 + 명시 경로만 추가했다.
+
+검토했다가 **기각한 안**: 사이드카(JSON 5KB)만 추적. 기각 이유 — ① 그림 없는 메타로는 재현이 불가능한데 재현이 이 기능의 목적이다 ② 보존정책이 오래된 쌍을 지우므로 git 에는 **삭제 이력만 무한 누적**된다 ③ 골든 프레임 세트(21MB)를 커밋에서 뺀 15회차 결정과 같은 성격이다.
+
+**26-1(「워크트리에 프레임이 없어 복사」)의 실제 해법은 git 이 아니다**: 서버는 항상 main 체크아웃에서 돌고 아카이브 경로는 그 CWD 기준이라, 어느 워크트리에서 작업하든 프레임은 **`SettingAgent/reports/detect_frames/` 한 자리에** 모인다.
+
+---
+
+## 9. 사용법 (다음 회차용)
+
+```bash
+# 해시로 프레임 찾기 (25회차에 0건이던 그 동작)
+ls SettingAgent/reports/detect_frames/*_610471649483.*
+
+# 그 프레임으로 검출 재현 (quad 비트 비교)
+npx tsx src/tools/roiAutoReplay.ts 610471649483
+npx tsx src/tools/roiAutoReplay.ts --all
+
+# 저장 비용 재측정
+npx tsx src/tools/frameArchiveBench.ts 500
+
+# 임시로 끄기 / 위치 바꾸기
+ROI_FRAME_ARCHIVE=0 npm run dev
+ROI_FRAME_ARCHIVE_DIR=reports/frames_r28 npm run dev
+```
+
+---
+
+## 10. 다음 사람에게 남기는 것
+
+1. **F3(합의 경로 라이브 미검증)** 을 시뮬에서 한 번 돌려 6쌍이 `dPanDeg`/`dTiltDeg` 와 함께 쌓이는지 확인할 것.
+2. **F2** — JPEG 도착 시각을 정확히 재려면 `CapturedImage` 에 타임스탬프를 넣어야 한다. 27-A/27-C 가 끝난 뒤 착수.
+3. 상한(400쌍)을 크게 올릴 거면 prune 의 stat 스윕을 먼저 손볼 것(현재 상한에서 32ms).
+4. **아카이브를 켠 채로 vitest 를 돌리지 마라** — 설정으로 막았지만, 새 테스트 러너/스크립트를 만들면 같은 구멍이 다시 난다(F1).
+
+---
+
+## 11. 마감 후 추가 확인 (27-C 지적 대응 · 2026-07-31 04:30Z)
+
+### 11-1. tsc 일시적 red — **내 편집 중간 상태였다(해소됨)**
+27-C 가 `roiAuto.ts(724,3) TS2739`(반환 객체에 `jpg`/`capturedPtz`/`requestedAt`/`receivedAt` 누락)를 보고했다. **실재하던 에러가 맞다** — `grabFrame` 의 반환 **타입**을 먼저 넓히고 반환 **객체**를 몇 분 뒤에 채웠는데, 그 사이 창에 tsc 가 돌았다. 재실행 결과 `npx tsc --noEmit` **exit 0 · 출력 0바이트**.
+
+교훈(기록): vitest 는 transpile-only 라 이 구멍을 못 잡는다. **여러 에이전트가 같은 main 을 공유할 때 타입-먼저/구현-나중 편집은 남의 tsc 를 막는다.** 한 커밋 단위로 붙여서 편집할 것.
+
+### 11-2. 실카가 04:23:57Z 에 움직였다 — **내 작업이 아니다**
+`logs/setting_20260731_131844.log` 실측:
+```
+04:22:28.585  ONVIF GetProfiles   200
+04:22:28.641  ONVIF GetPresets    200      ← 프리셋 목록 조회
+04:23:57.788  gopreset number=2   204      ← 89초 뒤 이동
+```
+- 내 real-camera-1 접촉은 04:13:46.6 / 04:13:54.067~04:14:07.793 / 04:14:07.8 **세 건뿐**이고 이후 0건. 이동은 **9분 50초 뒤**다.
+- 구조적으로도 `roi.auto.detect` 는 `gopreset` 을 낼 수 없다 — hucoms 경로는 `mode:'preset'` 이라 `RealPtzSource.move()`(=`goptzfpos`)조차 타지 않고, `gopreset` 은 `gotoDevicePreset`(=`cam.gotoPreset` RPC · 뷰어 프리셋 버튼) 전용이다.
+- `GetPresets` → **89초 대기** → `gopreset` 은 커밋 9946e56 의 뷰어 「프리셋 목록 조회 → [이동]」 UI 흐름 그대로다. 기계 호출자는 목록을 뽑고 89초를 쉬지 않는다 → **사람 조작(마스터)으로 판단**.
+- 현재 위치(읽기 전용 확인 04:30:07Z): native pan **7034** / tilt **2760** / zoom **8155** (뷰어 −109.65805 / −12.10909 / 18.42096). EV3(4877/1611/8998)에서 벗어나 있다.
+- **임의 복귀시키지 않았다.** 물리 이동은 마스터 판단 사항이고, 마스터가 그 화면을 보고 있을 수 있다. 27-C 에게도 되돌리지 말고 상신하라고 회신했다. → **리더/마스터 판단 대기 1건.**
+
+### 11-3. ★ 아카이브가 바로 값을 냈다 — PTZ 원장
+사이드카에서 뽑은 실카 검출 이력(도구 없이 `ptz.native` 만 읽음):
+```
+04:11:28.837Z view=preset  native zoom=8998 tilt=1611  f=5666.55
+ … 11건 전부 동일 …
+04:14:34.925Z view=current native zoom=8998 tilt=1611  f=5666.55
+```
+→ 04:11:28~04:14:34 의 실카 검출 **11건이 전부 같은 PTZ**였음이 사후에 증명된다(내 검출 무이동의 독립 증거이기도 하다). 그리고 **04:23:57 이후 프레임은 이 11건과 비교하면 안 된다** — zoompos 8998→8155 로 f 가 바뀐다.
+
+이게 정확히 25·26 회차에 없어서 못 하던 판정이다. 도입 첫날에 **① 다른 검출들의 PTZ 동일성 확증 ② 이동 시점 기준 비교 금지선 확정** 두 가지를 즉시 산출했다.
+
+### 11-4. `timing.note` 정정 — **내 필드 설명이 팀원을 오독하게 했다**
+27-C 가 실카 사이드카의 `ptzToFrameMs=273`(`…041408068Z_23cdcf566312.json`)을 「리더가 경고한 291ms 함정의 실측 재확인」으로 인용하려 했다. **틀린 해석이고, 원인은 내 note 문구의 모호함이다.**
+
+- 그 사이드카는 `ptzQueriedAt == frameRequestedAt == 04:14:07.795` 다. 즉 273ms 는 **`snapshot()` 왕복 시간**이지 "PTZ 를 먼저 읽고 이미지를 나중에 받은 간격"이 아니다.
+- **실카에서 `ptzQueriedAt` 의 PTZ 는 지면모델에 쓰이지 않고 버려진다**(`grabFrame` 이 hucoms 에 `undefined` 를 넘긴다). 지면모델의 `tiltpos/zoompos` 는 `RealPtzSource.snapshot` 이 `getJpeg()` **뒤에** 부르는 `currentPtz()` 에서 온다.
+- 따라서 실카 검출 경로는 **순서가 리더 우려와 반대**(이미지 먼저 → PTZ 나중)다. 이건 "이번엔 이동을 안 해서 발생 조건이 없었다"보다 **한 단계 강한 사실**이다 — 이동 여부와 무관하게 성립한다.
+
+**조치**: `timing.note` 를 소스 종류별로 갈랐다. 실카 사이드카는 이제 스스로 "이 값을 시점 차로 읽지 마라 · ptzQueriedAt 의 PTZ 는 버려진다"고 말하고, 시뮬은 "이 간격이 곧 시점 차다(101ms, 되쓰기라 자기정합)"라고 말한다. `tsc` exit 0 · 관련 테스트 30/30 green · 시뮬 라이브 1회로 새 문구 방출 확인.
+**기존 24개 사이드카는 옛 문구 그대로다** — 그것들을 읽을 때는 위 해석을 적용할 것.
+
+**교훈**: 진단 필드는 값만 남기면 안 되고 **"이 값으로 무엇을 주장하면 안 되는가"** 를 같이 남겨야 한다. 그러지 않으면 다음 사람이 좋은 뜻으로 잘못된 수치를 회차 보고서에 싣는다 — 이번에 실제로 그 직전까지 갔다.
+
+### 11-5. ★ 내 수치 오류 정정 — 실카 이미지↔PTZ 간격은 33~51ms 가 아니다 (27-C 가 잡음)
+
+§7·§11-4 에 「간격 = getptzfpos 1회분 = **33~51ms**」라고 적었다. **틀렸다.**
+33~51ms 는 패킷 로그의 `ms` 필드, 즉 **`getptzfpos` 요청 자체의 소요시간**이지 "JPEG 를 받은 시점과 PTZ 를 읽은 시점의 간격"이 아니다. 27-C 가 패킷 로그에서 *jpeg 완료 → getptzfpos 완료* 를 직접 재서 지적했다(표본 2건: 72ms · 368ms). **지적이 옳다.**
+
+**전 로그 재측정**(`logs/setting_*.log` 전량, jpeg 직후에 인접한 getptzfpos 쌍만):
+
+| 항목 | 값 |
+|---|---|
+| 표본 수 | **29** |
+| 범위 | **36 ~ 368ms** |
+| 중앙값 | **약 61ms** |
+| 상위 2건 | 273ms · 368ms |
+| getptzfpos **시작**까지 | 3 ~ 335ms (중앙값 약 15ms) |
+
+- 27-C 의 72~368ms 도 방향은 맞으나 표본 2건이라 **하한(36ms)과 통상값(61ms)이 빠져 있고 368ms 는 29건 중 최악값**이다. 셋 중 이 재측정이 가장 정확하다.
+- **이것도 하한이다.** 픽셀이 참인 순간은 jpeg 응답 *완료*보다 앞서고(센서 노출 → 인코딩 → 전송), PTZ 가 참인 순간은 getptzfpos 처리 *안*이다. 실제 시점 차는 이보다 크다.
+- 방법론 한계(정직): 패킷 집계기 때문에 로그의 인접이 **같은 `snapshot()` 호출임을 증명하지는 못한다.** 다만 getptzfpos 가 jpeg 완료 후 중앙값 15ms 만에 시작하는 군집 형태는 `await` 연속 호출의 모양 그대로라 짝지음이 옳을 가능성이 높다.
+
+**27-C 의 잔여 위험 지적도 수용한다**: 순서가 반대인 것은 어긋남을 **불가능하게 만들지 않고 부호만 뒤집는다.** 그 36~368ms 창 안에서 카메라가 움직이면 **픽셀은 옛 자리, PTZ 는 새 자리**가 된다. 오늘 04:23:57 같은 외부 프리셋 조작이 겹치면 실제로 발생한다. **「구조적으로 안전」이라고 쓰지 않는다.**
+
+**조치**: 사이드카 `timing.note`(hucoms 분기)에 ① 재측정값 36~368ms(n=29, 중앙값 61ms) ② "이것도 하한" ③ "순서 반대는 부호를 뒤집을 뿐 어긋남을 막지 못한다" 를 실었다. `tsc` exit 0 · 관련 테스트 30/30 green.
+
+**교훈 2**: §11-4 에서 "값과 함께 「무엇을 주장하면 안 되는가」를 남겨라"라고 썼는데, 정작 **내가 남긴 그 숫자 자체가 다른 양이었다.** 로그의 `ms` 는 *소요시간*이고 `time` 은 *완료시각*이다 — 간격을 주장하려면 `time` 끼리 빼야 한다. 팀원 검산이 없었으면 틀린 수치가 회차 보고서에 그대로 남았다.

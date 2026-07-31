@@ -35,8 +35,11 @@ import {
   groundModelFromIntrinsics,
   interpolateHfov,
   type CameraIntrinsicsProvider,
+  type PresetIntrinsics,
   type ZoomHfovPoint,
 } from '../../ground/cameraIntrinsics.js';
+import type { GroundModel } from '../../ground/types.js';
+import { archiveDetectFrame } from '../../capture/frameArchive.js';
 import { baseFocalPxOf, placeMetaProvider, readPlaceMeta } from '../../ground/placeMetaIntrinsics.js';
 import { scorePreset, summarize, resolveManualAssignment, type PresetScore } from '../../ground/roiAutoScore.js';
 import { assertAutoPromoteSafe } from '../../ground/autoRoiPlan.js';
@@ -613,6 +616,13 @@ interface Target {
   presetIdx: number;
   manual: PlaceRoiSpace[];
   ptz: { pan: number; tilt: number; zoom: number } | null;
+  /**
+   * ★ 27-B — 이 `ptz` 를 **읽은 시각**(ISO). 현재뷰 모드만 채운다(그 경로만 PTZ 를 미리 읽는다).
+   *
+   * 지면모델(f·tilt)은 이 시각의 PTZ 로 세우고 픽셀은 프레임 취득 시각의 것이다. 둘이 벌어지면
+   * **서로 다른 시점의 기하와 이미지를 합치는 것**이므로, 판단할 수 있도록 두 시각을 함께 남긴다.
+   */
+  ptzQueriedAt?: string;
 }
 
 /** 정본 프리셋 목록 → 채점 대상. camId/presetIdx 지정 시 필터. */
@@ -646,8 +656,13 @@ function targetsOf(json: unknown, views: readonly CameraView[], camId?: number, 
  *   ptz 를 비우면 `mode:'preset'` 이 되고 그쪽은 프리셋 PTZ 로 **실제로 카메라를 옮긴다**(CameraposSource:56 /
  *   RpcCameraSource:76 `preset.select`). "ptz 를 안 넘기면 안 움직인다"는 거짓이다.
  */
-function currentTargetOf(camId: number, presetIdx: number, ptzNow: { pan: number; tilt: number; zoom: number }): Target {
-  return { key: `${camId}:current`, camId, presetIdx, manual: [], ptz: ptzNow };
+function currentTargetOf(
+  camId: number,
+  presetIdx: number,
+  ptzNow: { pan: number; tilt: number; zoom: number },
+  ptzQueriedAt: string,
+): Target {
+  return { key: `${camId}:current`, camId, presetIdx, manual: [], ptz: ptzNow, ptzQueriedAt };
 }
 
 /**
@@ -688,6 +703,13 @@ async function grabFrame(
   tiltRaw: number | null;
   contaminated: boolean;
   frameHash: string;
+  /** ★ 27-B — 아카이브가 남길 **원본 JPEG**. 검출은 그레이만 쓰지만 사람이 볼 것은 이쪽이다. */
+  jpg: Buffer;
+  /** 캡처가 보고한 뷰어 단위 PTZ(= 이 프레임이 실제로 찍힌 자리). */
+  capturedPtz: { pan: number; tilt: number; zoom: number };
+  /** `requestImage` 를 부른 시각 / 프레임이 돌아온 시각(ISO). 지면모델과 픽셀의 시점 정합 판정용. */
+  requestedAt: string;
+  receivedAt: string;
 }> {
   // D-5 ①: 합성 단서(초록 주차면 박스) 제거. Unity RPC 미배선이면 조용히 건너뛰지 않고 아래 초록 가드가 잡는다.
   // ★ 실카에는 의미가 없는 시뮬 전용 메서드라 부르지 않는다(F2 — 초록 박스는 시뮬만 렌더한다).
@@ -699,12 +721,14 @@ async function grabFrame(
     }
   }
   let cap;
+  const requestedAt = new Date().toISOString();
   try {
     // ★ 실카에는 PTZ 이동 명령을 보내지 않는다(마스터가 조작 중일 수 있다) — 현재 위치 그대로 캡처한다.
     cap = await fs.camera.requestImage(t.camId, t.presetIdx, fs.kind === 'hucoms' ? undefined : t.ptz ?? undefined);
   } catch (err) {
     throw new RpcMethodError(RpcCode.UPSTREAM, `${t.key}: 프레임 취득 실패`, { detail: (err as Error).message });
   }
+  const receivedAt = new Date().toISOString();
   const img = sharp(cap.jpg);
   const meta = await img.metadata();
   const width = meta.width ?? 0;
@@ -722,6 +746,10 @@ async function grabFrame(
     tiltRaw: native.tilt,
     contaminated: greenRatio > GREEN_RATIO_LIMIT,
     frameHash: createHash('sha256').update(cap.jpg).digest('hex').slice(0, 12),
+    jpg: cap.jpg,
+    capturedPtz: { pan: cap.pan, tilt: cap.tilt, zoom: cap.zoom },
+    requestedAt,
+    receivedAt,
   };
 }
 
@@ -800,7 +828,7 @@ async function detectConsensus(
     let out: DetectOutcome;
     try {
       // ★ 14회차 수정: 디더 프레임은 tilt 가 dt 만큼 다르다 — 지면모델도 그 tilt 로 세워야 한다.
-      out = await detectOne(ctx, fs, shifted, p, res, dt);
+      out = await detectOne(ctx, fs, shifted, p, res, dt, dp);
     } catch {
       continue; // 한 시점의 실패가 전체를 막지 않는다
     }
@@ -853,6 +881,45 @@ async function detectConsensus(
   };
 }
 
+/** 검출 코어에 넘기는 옵션 — 아카이브 사이드카가 그대로 담고, 재현 도구가 그대로 되먹인다. */
+export interface DetectCoreOpts {
+  slotWidthM: number;
+  slotDepthM: number;
+  cameraHeightM: number | null;
+  expectedBays: number;
+  coverageDenom: 'expectedBays' | 'phaseInvariant';
+}
+
+/**
+ * ★ 27-B — **프레임 1장 + 지면모델 → 격자**. 서비스(`detectOne`)와 재현 도구(`roiAutoReplay`)가
+ * 반드시 **같은 코드**를 지나게 하려고 뽑아낸 것이다. 두 벌로 두면 "재현했다"가 곧 거짓말이 된다.
+ * 순수 함수다 — IO·시각·전역 상태를 만지지 않는다.
+ */
+export function detectGridFromFrame(frame: FrameGray, model: GroundModel, opts: DetectCoreOpts): { grid: GridDetection; lines: number } {
+  const { lines, mask } = detectPaintLines(frame, DEFAULT_PAINT_OPTIONS);
+  const evidence = paintEvidenceOf(mask, frame.width, frame.height);
+  const cands: RowCandidate[] = [];
+  for (const front of lines.slice(0, DEFAULT_PAINT_OPTIONS.frontCandidates)) {
+    const peaks = scanSeparators(frame, mask, front, DEFAULT_PAINT_OPTIONS);
+    const seps = peaks.length ? refineSeparators(frame, peaks, DEFAULT_PAINT_OPTIONS) : [];
+    const pts: Array<{ x: number; y: number }> = [];
+    for (const sep of seps) {
+      const q = meetLines(sep.line, front.line);
+      if (q) pts.push(q);
+    }
+    cands.push({ front, cornersPx: pts });
+  }
+  const grid = detectBaysWithModel(cands, model, evidence, DEFAULT_PAINT_OPTIONS, {
+    ...DEFAULT_BAY_OPTS,
+    slotWidthM: opts.slotWidthM,
+    slotDepthM: opts.slotDepthM,
+    cameraHeightM: opts.cameraHeightM,
+    expectedBays: Math.max(1, opts.expectedBays),
+    coverageDenom: opts.coverageDenom,
+  }, frame);
+  return { grid, lines: lines.length };
+}
+
 async function detectOne(
   ctx: RpcContext,
   fs: FrameSource,
@@ -869,24 +936,113 @@ async function detectOne(
    *   기저 시점은 0 이므로 단일 시점 경로는 비트 단위로 불변이다.
    */
   tiltDeltaDeg = 0,
+  /** 같은 디더의 pan 오프셋(도). **아카이브 메타 전용** — 검출 산출에는 개입하지 않는다(t.ptz 가 이미 옮겨져 있다). */
+  panDeltaDeg = 0,
 ): Promise<DetectOutcome> {
   const grab = await grabFrame(ctx, fs, t);
-  if (grab.contaminated) {
-    return {
-      target: t,
-      imgW: grab.frame.width,
-      imgH: grab.frame.height,
-      greenRatio: grab.greenRatio,
+  const expectedBays = p.expectedBays ?? t.manual.filter((s) => Array.isArray(s.points) && s.points.length === 4).length;
+  // ★ 21회차 ② — **면수를 모르는 호출자는 개수를 쓰지 않는 커버리지**로 검출한다.
+  //   종전에는 면수를 모르면 `max(1, 0)` 으로 **조용히 1면**이 됐고(17회차 함정), 그래서 현재뷰가
+  //   `expectedBays` 를 필수로 요구했다. 이제 `coverageDenom:'phaseInvariant'` 에서 `expectedBays` 는
+  //   `rowExtentMode:'evidence'`(기본) 경로의 어느 식에도 등장하지 않으므로 **잘릴 개수 자체가 없다**
+  //   (유닛테스트가 `bays ∈ {1,2,4,7,8,12,16}` 산출 좌표 비트 동일로 못 박는다).
+  //   면수를 아는 경로(프리셋 정본 면수 · 사용자가 직접 입력)는 종전 식을 그대로 쓴다 → 무회귀.
+  const coverageDenom: 'expectedBays' | 'phaseInvariant' = expectedBays >= 1 ? 'expectedBays' : 'phaseInvariant';
+
+  /**
+   * ★ 27-B — **어느 경로로 끝나든 그 프레임을 남긴다.** 오염·제원미상으로 강등된 프레임이야말로
+   *   나중에 사람이 봐야 할 것이고, 지금은 그게 디스크 어디에도 남지 않는다.
+   *   실패는 검출을 무효화하지 않는다(`archiveDetectFrame` 은 throw 하지 않는다).
+   */
+  const archive = async (o: DetectOutcome, intr: PresetIntrinsics | null, model: GroundModel | null): Promise<DetectOutcome> => {
+    const b = o.grid?.best ?? null;
+    const ptzQueriedAt = t.ptzQueriedAt ?? null;
+    await archiveDetectFrame(grab.jpg, {
       frameHash: grab.frameHash,
-      grid: null,
-      focalPx: null,
-      intrinsicsSource: null,
-      lines: 0,
-      issues: [
-        `${DEGRADE.SYNTHETIC_CUE}: 초록 픽셀 ${(grab.greenRatio * 100).toFixed(3)}% > ${(GREEN_RATIO_LIMIT * 100).toFixed(1)}% — ` +
-          `시뮬레이터가 주차면 박스를 렌더하고 있습니다. roi.show2d{visible:false} 후 다시 호출하세요(채점 중단)`,
-      ],
-    };
+      capturedAt: grab.receivedAt,
+      timing: {
+        ptzQueriedAt,
+        frameRequestedAt: grab.requestedAt,
+        frameReceivedAt: grab.receivedAt,
+        ptzToFrameMs: ptzQueriedAt ? Date.parse(grab.receivedAt) - Date.parse(ptzQueriedAt) : null,
+        note:
+          fs.kind === 'hucoms'
+            ? '★ ptzToFrameMs 를 「지면모델과 픽셀의 시점 차」로 읽지 마라. 실카(hucoms)에서 ptzQueriedAt 의 PTZ 는 ' +
+              '**버려진다**(grabFrame 이 requestImage 에 undefined 를 넘긴다). 지면모델의 tiltpos/zoompos 는 소스가 ' +
+              '**JPEG 를 받은 뒤** 읽은 값이라 순서가 이미지→PTZ 다. 따라서 이 값은 snapshot 왕복 시간일 뿐이다. ' +
+              '실제 시점 차는 패킷 로그의 jpeg 완료→getptzfpos 완료 = **36~368ms(n=29, 중앙값 약 61ms)** 이며 ' +
+              '이것도 하한이다(픽셀은 jpeg 응답 완료보다 앞선 순간의 것). ' +
+              '★ 순서가 반대인 것은 어긋남을 **불가능하게 만들지 않고 부호만 뒤집는다** — 그 창 안에서 카메라가 움직이면 ' +
+              '픽셀은 옛 자리, PTZ 는 새 자리가 된다(외부 프리셋 조작과 겹치면 실제로 발생한다).'
+            : '지면모델(f·tilt)의 출처 PTZ 와 픽셀이 같은 시점의 것인지 판정하기 위한 값이다. ' +
+              '시뮬 계열 현재뷰는 ptzQueriedAt 의 PTZ 가 그대로 tilt·zoom 으로 쓰이므로 이 간격이 곧 시점 차다' +
+              '(다만 같은 값을 되써서 찍으므로 자기정합적이다).',
+      },
+      source: { id: fs.id, kind: fs.kind, requested: null },
+      target: { key: t.key, camId: t.camId, presetIdx: t.presetIdx, view: p.view, dPanDeg: panDeltaDeg, dTiltDeg: tiltDeltaDeg },
+      ptz: {
+        viewer: grab.capturedPtz,
+        requested: fs.kind === 'hucoms' ? null : t.ptz,
+        native: { zoom: grab.zoomRaw, tilt: grab.tiltRaw },
+      },
+      intrinsics: {
+        source: intr?.source ?? null,
+        fovDeg: intr?.fovDeg ?? null,
+        fovAxis: intr?.fovAxis ?? null,
+        fovAtZoom: intr?.fovAtZoom ?? null,
+        tiltDeg: intr?.tiltDeg ?? null,
+        heightM: intr?.heightM ?? null,
+        imgW: grab.frame.width,
+        imgH: grab.frame.height,
+        focalPx: model?.f ?? null,
+        hfovDegEffective: model ? (2 * Math.atan(grab.frame.width / 2 / model.f)) / DEG : null,
+      },
+      groundModel: model ? { f: model.f, n: model.n, d: model.d, tiltDeg: model.tiltDeg, issues: model.issues } : null,
+      options: {
+        slotWidthM: p.slotWidthM,
+        slotDepthM: p.slotDepthM,
+        cameraHeightM: res.cameraHeightM,
+        expectedBays,
+        coverageDenom,
+        consensus: p.consensus,
+      },
+      detect: {
+        graded: o.grid != null,
+        greenRatio: o.greenRatio,
+        paintLines: o.lines,
+        bays: b?.quads.length ?? 0,
+        rows: o.grid?.rows?.length ?? 0,
+        quadsNorm: (b?.quads ?? []).map((q) => ({
+          latticeIndex: q.latticeIndex,
+          quad: quadToNormalized(q.quad, o.imgW, o.imgH),
+        })),
+        issues: o.issues,
+      },
+      files: { jpg: '' },
+    });
+    return o;
+  };
+
+  if (grab.contaminated) {
+    return archive(
+      {
+        target: t,
+        imgW: grab.frame.width,
+        imgH: grab.frame.height,
+        greenRatio: grab.greenRatio,
+        frameHash: grab.frameHash,
+        grid: null,
+        focalPx: null,
+        intrinsicsSource: null,
+        lines: 0,
+        issues: [
+          `${DEGRADE.SYNTHETIC_CUE}: 초록 픽셀 ${(grab.greenRatio * 100).toFixed(3)}% > ${(GREEN_RATIO_LIMIT * 100).toFixed(1)}% — ` +
+            `시뮬레이터가 주차면 박스를 렌더하고 있습니다. roi.show2d{visible:false} 후 다시 호출하세요(채점 중단)`,
+        ],
+      },
+      null,
+      null,
+    );
   }
   const issues: string[] = [];
   // ★ 제원은 프레임을 받은 **뒤**에 푼다 — 실카 화각·틸트는 그 프레임의 네이티브 PTZ 로 정해진다.
@@ -904,76 +1060,62 @@ async function detectOne(
       : intrBase;
   const model = intr ? groundModelFromIntrinsics(intr, grab.zoom) : null;
   if (!model) {
-    return {
-      target: t,
-      imgW: grab.frame.width,
-      imgH: grab.frame.height,
-      greenRatio: grab.greenRatio,
-      frameHash: grab.frameHash,
-      grid: null,
-      focalPx: null,
-      intrinsicsSource: intr?.source ?? null,
-      lines: 0,
-      // ★ 21회차 D2 — **강등 경로에서도 경고를 싣는다.** 종전에는 `D5_VP_DEGENERATE` 한 줄만 나갔는데,
-      //   원인을 말해 주는 경고(예 "틸트 입력이 0 이하 = 상향 시선")가 **정확히 이때 가장 필요하다.**
-      //   마스터가 본 화면이 이 경로였고, 그 한 줄로는 무엇을 고쳐야 할지 알 수 없었다.
-      issues: [
-        `${DEGRADE.VP_DEGENERATE}: 카메라 제원 공급 실패(${intrinsics?.id ?? `제원 미상 — 소스 ${fs.id}`})`,
-        ...(res.warningsFor?.(frameSpec) ?? []),
-      ],
-    };
+    return archive(
+      {
+        target: t,
+        imgW: grab.frame.width,
+        imgH: grab.frame.height,
+        greenRatio: grab.greenRatio,
+        frameHash: grab.frameHash,
+        grid: null,
+        focalPx: null,
+        intrinsicsSource: intr?.source ?? null,
+        lines: 0,
+        // ★ 21회차 D2 — **강등 경로에서도 경고를 싣는다.** 종전에는 `D5_VP_DEGENERATE` 한 줄만 나갔는데,
+        //   원인을 말해 주는 경고(예 "틸트 입력이 0 이하 = 상향 시선")가 **정확히 이때 가장 필요하다.**
+        //   마스터가 본 화면이 이 경로였고, 그 한 줄로는 무엇을 고쳐야 할지 알 수 없었다.
+        issues: [
+          `${DEGRADE.VP_DEGENERATE}: 카메라 제원 공급 실패(${intrinsics?.id ?? `제원 미상 — 소스 ${fs.id}`})`,
+          ...(res.warningsFor?.(frameSpec) ?? []),
+        ],
+      },
+      intr,
+      null,
+    );
   }
   issues.push(...model.issues);
   // 거부는 아니지만 결과 해석에 필수인 사실(단일점 화각표·틸트 부호 가정)을 응답에 그대로 싣는다.
   issues.push(...(res.warningsFor?.(frameSpec) ?? []));
-  const expectedBays = p.expectedBays ?? t.manual.filter((s) => Array.isArray(s.points) && s.points.length === 4).length;
-  // ★ 21회차 ② — **면수를 모르는 호출자는 개수를 쓰지 않는 커버리지**로 검출한다.
-  //   종전에는 면수를 모르면 `max(1, 0)` 으로 **조용히 1면**이 됐고(17회차 함정), 그래서 현재뷰가
-  //   `expectedBays` 를 필수로 요구했다. 이제 `coverageDenom:'phaseInvariant'` 에서 `expectedBays` 는
-  //   `rowExtentMode:'evidence'`(기본) 경로의 어느 식에도 등장하지 않으므로 **잘릴 개수 자체가 없다**
-  //   (유닛테스트가 `bays ∈ {1,2,4,7,8,12,16}` 산출 좌표 비트 동일로 못 박는다).
-  //   면수를 아는 경로(프리셋 정본 면수 · 사용자가 직접 입력)는 종전 식을 그대로 쓴다 → 무회귀.
-  const coverageDenom: 'expectedBays' | 'phaseInvariant' = expectedBays >= 1 ? 'expectedBays' : 'phaseInvariant';
   if (coverageDenom === 'phaseInvariant') {
     issues.push(
       '예상 주차면 수 없이 검출했다 — 커버리지 분모를 **위상 불변**(근변 도색 지지 구간 기준)으로 바꿨다. ' +
         '개수는 산출에 개입하지 않는다(A 조건 실측: bays 1~16 전 구간 재현율 0.6000·매칭 IoU 0.92783 동일).',
     );
   }
-  const { lines, mask } = detectPaintLines(grab.frame, DEFAULT_PAINT_OPTIONS);
-  const evidence = paintEvidenceOf(mask, grab.frame.width, grab.frame.height);
-  const cands: RowCandidate[] = [];
-  for (const front of lines.slice(0, DEFAULT_PAINT_OPTIONS.frontCandidates)) {
-    const peaks = scanSeparators(grab.frame, mask, front, DEFAULT_PAINT_OPTIONS);
-    const seps = peaks.length ? refineSeparators(grab.frame, peaks, DEFAULT_PAINT_OPTIONS) : [];
-    const pts: Array<{ x: number; y: number }> = [];
-    for (const sep of seps) {
-      const q = meetLines(sep.line, front.line);
-      if (q) pts.push(q);
-    }
-    cands.push({ front, cornersPx: pts });
-  }
-  const grid = detectBaysWithModel(cands, model, evidence, DEFAULT_PAINT_OPTIONS, {
-    ...DEFAULT_BAY_OPTS,
+  const { grid, lines } = detectGridFromFrame(grab.frame, model, {
     slotWidthM: p.slotWidthM,
     slotDepthM: p.slotDepthM,
     cameraHeightM: res.cameraHeightM,
-    expectedBays: Math.max(1, expectedBays),
+    expectedBays,
     coverageDenom,
-  }, grab.frame);
+  });
   issues.push(...grid.issues);
-  return {
-    target: t,
-    imgW: grab.frame.width,
-    imgH: grab.frame.height,
-    greenRatio: grab.greenRatio,
-    frameHash: grab.frameHash,
-    grid,
-    focalPx: model.f,
-    intrinsicsSource: intr?.source ?? null,
-    lines: lines.length,
-    issues,
-  };
+  return archive(
+    {
+      target: t,
+      imgW: grab.frame.width,
+      imgH: grab.frame.height,
+      greenRatio: grab.greenRatio,
+      frameHash: grab.frameHash,
+      grid,
+      focalPx: model.f,
+      intrinsicsSource: intr?.source ?? null,
+      lines,
+      issues,
+    },
+    intr,
+    model,
+  );
 }
 
 const quadsOf = (o: DetectOutcome): BayQuad[] => o.grid?.best?.quads ?? [];
@@ -1136,8 +1278,10 @@ async function detectCurrentView(ctx: RpcContext, json: unknown, p: z.infer<type
   }
   const fs = resolveFrameSource(ctx, p.source);
   let ptzNow: { pan: number; tilt: number; zoom: number };
+  let ptzQueriedAt: string;
   try {
     ptzNow = await fs.camera.getPtz(p.camId);
+    ptzQueriedAt = new Date().toISOString();
   } catch (err) {
     return currentPtzUnavailableView(fs, p.source, (err as Error).message);
   }
@@ -1145,7 +1289,7 @@ async function detectCurrentView(ctx: RpcContext, json: unknown, p: z.infer<type
   const res =
     fs.kind === 'hucoms' ? resolverFor(fs, json, p, p.cameraSpec) : currentViewResolver(json, p, p.camId, ptzNow, p.cameraSpec);
   if (res.reject) return rejectView(fs, res.reject, p.source);
-  const o = await detectOne(ctx, fs, currentTargetOf(p.camId, p.presetIdx ?? 1, ptzNow), p, res);
+  const o = await detectOne(ctx, fs, currentTargetOf(p.camId, p.presetIdx ?? 1, ptzNow, ptzQueriedAt), p, res);
   // ★ "카메라를 움직이지 않는다"를 주장하는 모드는 **미세 이동도 삼키지 않는다**.
   //   되쓰기는 읽은 값 그대로지만, 장비가 float32 로 왕복 양자화하면 1 ULP(각도 ~1.9e-6°)가 남을 수 있다.
   //   차이가 0 이면 아무것도 싣지 않는다(잡음 금지). 실카는 애초에 되쓰지 않으므로 확인하지 않는다.

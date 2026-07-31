@@ -388,7 +388,8 @@ async function main(): Promise<void> {
   const sourceArg = argOf('--source', 'degraded');
   const cacheDir = argOf('--cache', 'reports/detcache_r24');
   // ★ 26회차 — 앞변 추정 방식. 기본 `chord` = 24회차 산출 보존(§4-5).
-  const edgeArg = argOf('--edge', 'chord') === 'kink' ? 'kink' : 'chord';
+  const edgeRaw = argOf('--edge', 'chord');
+  const edgeArg = edgeRaw === 'kink' ? 'kink' : edgeRaw === 'kink2' ? 'kink2' : 'chord';
   const names = sourceArg === 'all' ? ['degraded', 'vpdseg', 'lpd'] : [sourceArg];
   const dropsOf = new Map<string, Map<string, SourceDrops>>();
   for (const name of names) {
