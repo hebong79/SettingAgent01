@@ -330,6 +330,19 @@ function updateGroundBadge() {
     | `groundInputs` | 14 | **14** | — |
 
     → **`bayGrid` 는 6 이 아니라 2 다.** 「두껍게 덮여 있다」는 표현은 `groundInputs`(14/14)·`groundModel`(12/15)에는 맞고 **`bayGrid` 에는 과장**이었다. 정정한다.
+
+    **한 칸 더 — 모듈이 아니라 「이 도구가 실제로 부르는 함수」 단위**(27-B 가 함수 단위로 내려가 `detectGridFromFrame` 호출 **0** 을 찾은 것과 같은 해상도). `realGroundSplit.ts` 가 호출하는 코어 11개의 실제 호출 테스트 파일 수:
+
+    | 함수 | 호출 테스트 | | 함수 | 호출 테스트 |
+    |---|---|---|---|---|
+    | `buildGroundInputs` | 14 | | `groundModelFromIntrinsics` | 6 |
+    | `estimateGroundModels` | 12 | | `detectPaintLines` | 5 |
+    | `meetLines` | 3 | | `paintEvidenceOf` | 3 |
+    | `refineSeparators` | 3 | | `scanSeparators` | 3 |
+    | **`detectBaysWithModel`** | **2** | | **`interpolateHfov`** | **2** |
+    | **`readGroundSpec`** | **1** | | | |
+
+    → **0 인 함수는 없다**(27-B 쪽과 다른 점). 다만 **얇은 곳이 셋**이다 — `readGroundSpec` **1** · `detectBaysWithModel` **2** · `interpolateHfov` **2**. 공교롭게도 이 셋이 **실카 경로의 핵심**이다(설치고·화각 해석 + 격자 산출). 「코어는 덮여 있다」로 뭉뚱그리지 않고 수치를 그대로 남긴다.
     ※ 이 「호출 기준」도 종착이 아니다 — **호출한다고 의미 있게 단언한다는 보장은 없다**(스모크 호출일 수 있다). import 기준보다 나은 근사일 뿐이며, 이 회차 내내 확인된 대로 **사다리는 계속 올라간다**.
   - 대신 이 도구의 **불변식**(무이동 `requestImage(1, 1)` · `roi.auto.apply` 미호출 · 정본/DB 무쓰기)은 §교훈 8 의 **정합 판정문 + 양성 대조 A·B** 로 기계 검증했다(exit 0). 유닛테스트의 완전한 대체는 아니다.
 - ★ **여기서도 거짓 음성이 났다(규칙 즉시 재현).** 커버리지를 파일명 패턴 `^bayGrid\.` 로 훑어 **0** 을 얻었으나, 실제 파일명은 `bayGridExtent.test.ts`·`groundModelBuild.test.ts` 등이라 패턴이 못 맞춘 것이었다. 내용 기준(`from '.../bayGrid.js'`) 재검색으로 6/15/14 를 확인했다. **27-B 의 「0 이 나오면 패턴부터 의심하라」가 정식화된 직후 내 마지막 스윕에서 그대로 재현됐다.**
