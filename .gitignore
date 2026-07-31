@@ -77,3 +77,7 @@ SettingAgent-13021/
 
 # 정본 ROI 자동 백업(승인 적용 시 런타임 생성 — 커밋 대상 아님)
 SettingAgent/data/Place01/PtzCamRoi.*.bak.json
+
+# 도구가 흘린 빈 껍데기 임시 산출물(37B, {"createdAt":"T","items":[]}).
+# 실제 시각이 아니라 문자 "T" 가 박힌 미완성 템플릿이며 참조하는 코드가 없다.
+SettingAgent/x.json

@@ -1,5 +1,27 @@
 # 체크포인트: MCP 자동 바닥 ROI 생성 — 이미지에서 4점 검출 (goal/loop B 모드)
-_갱신: 2026-07-29 11:00 · 트리거: 압축(마스터 지시 — 컨텍스트 70%↑ 시 메모 후 클리어)_
+_갱신: 2026-07-30 22회차 진행 중 · 트리거: goal/loop 이터레이션 1 완료_
+
+## ⚡ 22회차 진행 중 (2026-07-30) — 워크트리 `round22-rows-threshold`
+
+- **작업 위치**: `.claude/worktrees/round22-rows-threshold`(브랜치 `worktree-round22-rows-threshold`). 골든 픽스처는 main 체크아웃에 **junction** 으로 연결, `.env`·`setting.sqlite` 는 사본(DB md5 `3ab9c8363d7a8c4ff584c7a2df4b0a5c` 불변).
+- **goal**: `rows` 진입 문턱 재설계 → PI(면수 미사용) 분모를 골든에 통일해도 정밀도 ≥0.8571 · 재현율 ≥0.5854 유지.
+- **이터레이션 1 완료(판정: 미달, 표적 변경)** — 리더 실측 전문은 `SettingAgent/_workspace/00_leader_loop1_measure_round22.md`.
+  - ★ PI 붕괴는 **`2:1` 한 프리셋 집중**(거짓 22 중 15개)
+  - ★ 메커니즘 = **`refScore` 기준선이 진짜 행 → 가짜 행으로 이동**(2:1 문턱 1.31674 → 0.96518, −27%)
+  - ★ **진짜 행 `paint.score` 는 분모에 비트 불변, 가짜만 부푼다**(칸당 평균이라 짧아지면 오름). **반증 있음** — 1:1 ci=4·1:2 ci=2 는 짧아지며 진짜로 뒤집힘(PI 가 1:2 를 8/14→11/14 로 올린 성분)
+  - ★ depth **99.31m**·지면각 −65.6° 같은 **물리 불가 후보가 기준선을 차지**한다
+  - ★ 마스터 실카 실측(`etc/test/주차면생성_0{1,2,3}.jpg`): 같은 뷰·같은 설정에서 **검출 14/3/8** 요동. 기하는 건전(칸간격 오차 0.11%). 우하단 **빈 도색 구역은 세 장 모두 미검출**(가림 천장과 별개 성분)
+- **진단 도구 확장(검출 경로 무접촉)**: `roiAutoRowsDiag.ts` `argv[3]=coverageDenom` + refScore/ratioRef/baseScore/effective/denomC/게이트 컬럼 · `roiAutoRowsOverlay.ts` `argv[5]=coverageDenom`
+- **스샷**: `reports/overlay_r22a_expected/` · `reports/overlay_r22a_phaseinv/`(동일 frameHash 대조)
+- **설계**: `_workspace/01g_architect_plan_round22_rows_threshold.md`(초안 + 리더 실측 반영 개정 요청 발신)
+- **하네스 변경(마스터 지시)**: `parkagent-dev` 스킬에 **매 이터레이션 스샷 실측 필수** + **매 회차 메모 요약·docs md 필수** 규약 명시. `.claude/settings.json` 승인 규칙 확장(삭제·push·카메라 물리이동·`setting_rpc` 쓰기는 승인 유지)
+- **측정 ⓕ 완료(구현자, 2026-07-30)** — 「우하단 빈 도색구역 미검출」 규명. 전문 `SettingAgent/_workspace/02z_developer_emptybay_probe_round22.md`, 신규 도구 `src/tools/emptyBayProbe.ts`(검출 경로 무접촉·tsc 0), 스샷 `reports/overlay_r22f/`. 프레임 `2b82336acb05`(PTZ 전후 동일·무이동, tiltpos 1668/zoompos 4956/f 3051.1px = 마스터 03 로그와 일치)
+  - ★ 도색선은 **잘 검출된다**(votes 2위 rank#1, frontCandidates 8 안) · 분리선 19개 정상 → **(A)(B) 기각**
+  - ★ 표면 원인 **(C)**: `paint.score 1.00298 < refScore 1.53262×0.94 = 1.44066` (near 게이트는 1.0 으로 통과 — 탈락은 `rowMinScoreRatio` 단 하나)
+  - ★★ 근본 원인 **(E)**: 이 행은 **근변(카메라 쪽) 무도색 「ㄷ」자 칸** → 칸이 실제 있는 깊이방향이 `paint.near 0.17857~0.25000`(위상 8/8) 로 `minNearSupport 0.5` 미달 → `bayGrid.ts:402` 에서 **위상 전멸**. 살아남는 건 칸 없는 반대편(near 1.0/far 0.0/side 0.006)
+  - ★ **개별 독립 방식은 ⓕ 를 못 푼다**: 문턱 0 반사실 실측 → rows 1→8행·quad 10→74 로 번지고 그 구역엔 **5m 어긋난 quad 4개**가 빈 아스팔트에 생긴다(미검출→오검출). 옳은 격자는 문턱보다 **상류**에서 죽는다
+  - ★ 곁가지: **이동 명령 0건인데 카메라 PTZ 가 40초 간격으로 변했다**(zoompos 4956→9533→8998, OSD 47/16/x25→49/16/x35) → 마스터 14/3/8 요동은 최소 부분적으로 「같은 설정·다른 PTZ」와 교락. 움직인 주체는 미측정
+- **다음**: 설계자 개정안 → 구현자가 축 측정 도구 → 축 등급 → 배선 여부 판정 → 회차 마감(메모+docs md+tsc/vitest)
 
 ## 목표 (성공기준)
 2개 카메라 전 프리셋(23면)에서 **주차면 개별 IoU ≥ 0.98**.
