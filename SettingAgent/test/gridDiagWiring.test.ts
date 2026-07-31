@@ -1,12 +1,17 @@
-// ★ 25회차 — `cellAreaRatioMin/Max` 배선 봉인 + 거리 불변성 측정 봉인.
+// ★ 25회차 — `cellAreaRatio` 거리 불변성 측정 봉인 / ★ 26회차 R2 — **배선 부재** 봉인으로 전환.
+//
+// 26회차 R2 판정: `cellAreaRatio` 축은 **원리적으로 무력**하다(격자를 규격으로 세운 뒤 같은 모델로
+// 역투영하니 지상 면적이 정확히 규격으로 되돌아온다 — 실측 |ratio−1| ≤ 5.218048215738236e-15).
+// 승격 계획이 없으므로 `BayDetectOpts.cellAreaRatioMin/Max` 와 `bayGrid` 칸 필터 배선을 **제거**했다.
+// 그러나 **지식은 남긴다** — 왜 무력한지를 아래 ④⑤⑥ 이 계속 증명하므로 27회차가 같은 시도를 반복하지 않는다.
 //
 // 이 테스트가 지키는 것
-//   ① 무력 기본값(`0`/`Infinity`) — 이 값이면 칸 필터가 아무것도 거르지 않으므로 **골든 무회귀가
-//      측정 결과가 아니라 구조적 보장**이 된다(설계서 §5-2).
-//   ② 서비스 미오버라이드 — `roiAuto.ts` 소스에 `cellAreaRatio` 문자열이 **없다**(§5-2 ④).
-//   ③ 오라클 봉인 — 신규 계측 도구가 정답 필드를 읽지 않는다.
+//   ① ★ 배선 부재 — `BayDetectOpts`/`DEFAULT_BAY_OPTS` 에 `cellAreaRatio*` 가 **없다**(재배선 방지).
+//   ② 서비스·격자 미사용 — `roiAuto.ts`·`bayGrid.ts` 칸 필터에 `cellAreaRatio` 판정이 **없다**.
+//   ③ 오라클 봉인 — 계측 도구가 정답 필드를 읽지 않는다.
 //   ④ `cellAreaRatio` 의 거리 불변성 — 같은 규격 칸을 두 깊이에 놓아도 비율이 같다.
-//   ⑤ 플래그 ON 동작 — 무력값이 아닌 값을 주면 실제로 칸이 걸러진다(무력값이라 안 걸러지는 게 아님을 못 박는다).
+//   ⑤ 축이 값에 반응하기는 한다 — 반쪽 칸은 0.5 다. 즉 「함수가 고장나서 1 이 나오는 것」이 아니다.
+//   ⑥ ★ 규격 칸은 어느 깊이에서도 정확히 1 — 그래서 어떤 하한/상한도 참·거짓을 가르지 못한다.
 
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -50,15 +55,20 @@ function quadAtDepth(g: GroundModel, depthAlong: number, w: number, d: number): 
   return q ? { latticeIndex: 0, quad: q } : null;
 }
 
-describe('25회차 cellAreaRatio 배선', () => {
-  it('① 기본값이 무력이다 — 0 / Infinity (골든 무회귀의 구조적 보장)', () => {
-    expect(DEFAULT_BAY_OPTS.cellAreaRatioMin).toBe(0);
-    expect(DEFAULT_BAY_OPTS.cellAreaRatioMax).toBe(Infinity);
+describe('26회차 R2 — cellAreaRatio 배선 제거 봉인', () => {
+  it('① 옵션에 배선이 없다 — BayDetectOpts/DEFAULT_BAY_OPTS 에 cellAreaRatio* 부재', () => {
+    expect(Object.keys(DEFAULT_BAY_OPTS)).not.toContain('cellAreaRatioMin');
+    expect(Object.keys(DEFAULT_BAY_OPTS)).not.toContain('cellAreaRatioMax');
+    const src = readFileSync('src/ground/bayGeometry.ts', 'utf8');
+    expect(src.includes('cellAreaRatioMin')).toBe(false);
+    expect(src.includes('cellAreaRatioMax')).toBe(false);
   });
 
-  it('② 서비스가 오버라이드하지 않는다 — roiAuto.ts 에 cellAreaRatio 부재', () => {
-    const src = readFileSync('src/rpc/services/roiAuto.ts', 'utf8');
-    expect(src.includes('cellAreaRatio')).toBe(false);
+  it('② 서비스·격자 칸 필터가 이 축을 쓰지 않는다', () => {
+    expect(readFileSync('src/rpc/services/roiAuto.ts', 'utf8').includes('cellAreaRatio')).toBe(false);
+    // `bayGrid.ts` 에는 계측 함수 `cellAreaRatioOf` 정의만 남고 **호출(판정)** 은 없다.
+    const grid = readFileSync('src/ground/bayGrid.ts', 'utf8');
+    expect(/cellAreaRatioOf\(/.test(grid.replace('export function cellAreaRatioOf(', ''))).toBe(false);
   });
 
   it('③ 신규 계측 도구가 오라클 필드를 읽지 않는다', () => {
@@ -89,27 +99,30 @@ describe('25회차 cellAreaRatio 배선', () => {
     expect(quadGroundAreaM2(near as BayQuad, g)).toBeCloseTo(OPTS.slotWidthM * OPTS.slotDepthM, 6);
   });
 
-  it('⑤ 플래그 ON 이면 실제로 판정이 바뀐다(무력값이라 안 걸리는 것이 아님)', () => {
+  it('⑤ 축 자체는 값에 반응한다 — 함수가 고장나서 1 이 나오는 것이 아니다', () => {
     const g = model();
     const q = quadAtDepth(g, 20, OPTS.slotWidthM, OPTS.slotDepthM) as BayQuad;
     const r = cellAreaRatioOf(q, g, OPTS) as number;
-    // 무력 기본값: 통과
-    expect(r >= DEFAULT_BAY_OPTS.cellAreaRatioMin && r <= DEFAULT_BAY_OPTS.cellAreaRatioMax).toBe(true);
-    // 하한 1.5: 탈락 / 상한 0.5: 탈락 — 게이트가 값에 반응한다.
-    expect(r >= 1.5).toBe(false);
-    expect(r <= 0.5).toBe(false);
-    // 절반 크기 칸은 비율 0.5 근방 — 하한 0.75 로 걸러진다.
+    // 규격 칸은 1 — 어떤 하한/상한도 이것을 자투리나 과대 면과 가르지 못한다.
+    expect(Math.abs(r - 1)).toBeLessThan(1e-9);
+    // 절반 크기 칸은 비율 0.5 근방 — 즉 함수는 정상이고, 격자 칸이 항상 규격이라 상수인 것이다.
     const half = quadAtDepth(g, 20, OPTS.slotWidthM / 2, OPTS.slotDepthM) as BayQuad;
     const rh = cellAreaRatioOf(half, g, OPTS) as number;
     expect(Math.abs(rh - 0.5)).toBeLessThan(1e-6);
     expect(rh >= 0.75).toBe(false);
   });
 
-  it('⑥ ★ 25회차 실측 봉인 — 격자 칸의 cellAreaRatio 는 정의상 1 이라 하한/상한이 무력하다', () => {
+  it('⑥ ★ 재시도 방지 — cellAreaRatio 는 깊이 붕괴 탐지기가 아니다(무력함이 실측돼 26회차에 배선을 제거했다)', () => {
     // 격자는 `buildAtPhase` 가 slotWidthM × slotDepthM 로 세우므로, 같은 모델로 역투영하면
-    // 지상 면적이 **정확히** 규격면적으로 되돌아온다. 실측 결과(시뮬 155칸 · 야간 60칸)에서
-    // |ratio − 1| 의 최대가 7.4e-15(배정도 잡음)였다. 이 사실을 테스트로 못 박아
-    // 26회차가 이 축으로 「과대 면」을 거를 수 있다고 다시 기대하지 않게 한다.
+    // 지상 면적이 **정확히** 규격면적으로 되돌아온다. 25회차 실측(시뮬 155칸 · 야간 60칸)에서
+    // |ratio − 1| 의 최대가 시뮬 5.218048215738236e-15 · 야간 7.327471962526033e-15 = 배정도 잡음이었다.
+    //
+    // ★ 26회차 R2: 이 실측을 근거로 `BayDetectOpts.cellAreaRatioMin/Max` 와 `bayGrid` 칸 필터 배선을
+    //   **제거**했다(승격 계획 없음 · CLAUDE.md §2). 배선은 사라졌지만 **이 사실은 배선 없이도 성립**하므로
+    //   여기 남긴다 — 야간 「과대 면」은 픽셀 투영이 팽창한 것이지 지상 면적이 커진 것이 아니고,
+    //   `cellAreaRatio` 는 붕괴한 그 모델 자신으로 재기 때문에 **원리적으로 붕괴를 볼 수 없다**.
+    //   27회차가 이 축으로 「과대 면」을 거를 수 있다고 다시 기대하지 마라. 모델 **밖**의 양이 필요하다
+    //   (지평선까지의 픽셀 거리 · 칸의 픽셀 종횡비 · mPerPx 절대값).
     const g = model();
     for (const depth of [6, 12, 24, 48, 96]) {
       const q = quadAtDepth(g, depth, OPTS.slotWidthM, OPTS.slotDepthM);

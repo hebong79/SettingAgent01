@@ -387,13 +387,15 @@ async function main(): Promise<void> {
   // ★ 24회차 — 관측원 선택. `--source all` 이 정본(프레임을 한 번만 읽으므로 frameHash 가 물리적으로 동일).
   const sourceArg = argOf('--source', 'degraded');
   const cacheDir = argOf('--cache', 'reports/detcache_r24');
+  // ★ 26회차 — 앞변 추정 방식. 기본 `chord` = 24회차 산출 보존(§4-5).
+  const edgeArg = argOf('--edge', 'chord') === 'kink' ? 'kink' : 'chord';
   const names = sourceArg === 'all' ? ['degraded', 'vpdseg', 'lpd'] : [sourceArg];
   const dropsOf = new Map<string, Map<string, SourceDrops>>();
   for (const name of names) {
     const dm = new Map<string, SourceDrops>();
     dropsOf.set(name, dm);
     const src: ObservationSource =
-      name === 'vpdseg' ? vpdSegSource(cacheDir, dm) : name === 'lpd' ? lpdPlateSource(cacheDir, dm) : simDegradedSource(cars, { sigmaPx, shadowPx, seed: 1 });
+      name === 'vpdseg' ? vpdSegSource(cacheDir, dm, edgeArg) : name === 'lpd' ? lpdPlateSource(cacheDir, dm) : simDegradedSource(cars, { sigmaPx, shadowPx, seed: 1 });
     console.log(`\n████ 관측원 = ${name} (kind=${src.kind}) ████`);
     await runOneSource(name, src, targets, views, evs, g, gateOn, sigmaPx, shadowPx, showDist, outDir, cars, wf);
   }

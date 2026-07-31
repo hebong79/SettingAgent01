@@ -379,13 +379,10 @@ function fitRowGridOnce(
     //                (= 보간, 근거 있음), 행의 끝 너머는 한쪽에만 증거가 있다(= 외삽, 근거 없음).
     //                개수 정보를 전혀 쓰지 않는다.
     const scored = built.quads.map((q) => ({ q, sup: quadPaintSupport([q], evidence, paintOpts, opts) }));
-    // ★ 25회차 — 절대 크기 게이트 1개. 기본값이 `0`/`Infinity` 라 **기본 경로에서는 항상 true** 다.
-    const ratioOk = (q: BayQuad): boolean => {
-      if (opts.cellAreaRatioMin <= 0 && opts.cellAreaRatioMax === Infinity) return true;
-      const r = cellAreaRatioOf(q, model, opts);
-      return r == null || (r >= opts.cellAreaRatioMin && r <= opts.cellAreaRatioMax);
-    };
-    const kept = scored.filter((e) => e.sup.near >= opts.extendMinNearSupport && ratioOk(e.q));
+    // ★ 26회차 R2 — 25회차가 여기 달았던 `cellAreaRatio` 칸 필터를 **제거**했다. 격자를 규격으로 세운 뒤
+    //   같은 모델로 역투영하면 지상 면적이 정확히 규격으로 되돌아와 이 축은 항상 1 이다(|ratio−1| ≤ 5.2e-15).
+    //   승격 계획이 없는 무력 배선이라 지웠다. 지식은 `test/gridDiagWiring.test.ts` ④⑤⑥ 이 보존한다.
+    const kept = scored.filter((e) => e.sup.near >= opts.extendMinNearSupport);
     if (!kept.length) continue;
     let window = kept;
     let extentEndedBy: GridResult['extentEndedBy'] = null;

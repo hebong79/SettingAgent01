@@ -199,20 +199,6 @@ export interface BayDetectOpts {
   calibrateHeight: boolean;
   /** 자가보정 계수의 허용 범위(|factor−1|). 이보다 크면 보정을 **거부**한다(엉뚱한 행 방어). */
   maxHeightCorrection: number;
-  /**
-   * ★ 25회차 — 칸의 **지상 면적 비율** 하한. `cellAreaRatio = 칸 지상면적 / (slotWidthM × slotDepthM)`.
-   *
-   * 축을 픽셀 면적이 아니라 **지상 면적 비율**로 잡은 이유: 픽셀 면적·화면 점유율은 거리에 반비례하므로
-   * 「원경의 **진짜** 면」을 같이 죽인다. 지상 면적 비율은 원리상 거리에 불변이라 자투리(≪1)만 걸러낸다.
-   * 기본값 `0` 은 **무력**(아무것도 안 거른다) — 서비스는 이 값을 오버라이드하지 않는다(무회귀 구조 보장).
-   */
-  cellAreaRatioMin: number;
-  /**
-   * ★ 25회차 — 같은 축의 **상한**. 역투영은 지평선에 가까울수록 발산하므로 깊이 추정이 무너진 행은
-   * 지상 면적이 폭발한다(「과대 면」). 그래서 이 상한은 **깊이 붕괴 탐지기**이기도 하다.
-   * 기본값 `Infinity` 는 **무력**.
-   */
-  cellAreaRatioMax: number;
 }
 
 export const DEFAULT_BAY_OPTS: Omit<BayDetectOpts, 'expectedBays'> = {
@@ -275,10 +261,6 @@ export const DEFAULT_BAY_OPTS: Omit<BayDetectOpts, 'expectedBays'> = {
   rowMinNearSupport: 0.69,
   calibrateHeight: true,
   maxHeightCorrection: 0.15,
-  // ★ 25회차 — **무력 기본값**. `0`/`Infinity` 면 칸 필터가 아무것도 거르지 않으므로 골든 무회귀가
-  //   측정 결과가 아니라 **구조적 보장**이 된다(21회차 `rowExtentMode` 보존 규약과 동형).
-  cellAreaRatioMin: 0,
-  cellAreaRatioMax: Infinity,
 };
 
 /** 자동 산출 quad 1건 — 격자 인덱스(0-based, 프리셋 로컬)와 픽셀 4점. */

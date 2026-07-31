@@ -34,6 +34,7 @@ import type { GroundModel, PixelQuad } from '../ground/types.js';
 import type { Vec3 } from '../ground/contactTypes.js';
 import type { NormalizedQuad } from '../domain/types.js';
 import { CAR_BODY, type VehicleObservation } from './carAnchorUpper.js';
+import { frontEdgeOf } from './contactOrient.js';
 import { goldenTargets, GOLDEN_DIRS, type Target } from './sepAudit.js';
 import type { ObservationSource } from './individualEngine.js';
 
@@ -140,8 +141,12 @@ export interface SourceDrops {
 
 export const CONTOUR_STEP_PX = 4;
 
-/** 캐시 seg 마스크 → 관측. 마스크 없는 프레임(캐시 부재/강등)은 빈 배열. */
-export function vpdSegSource(cacheDir: string, drops?: Map<string, SourceDrops>): ObservationSource {
+/**
+ * 캐시 seg 마스크 → 관측. 마스크 없는 프레임(캐시 부재/강등)은 빈 배열.
+ * `edge` 는 앞변 추정 방식 — **기본값 `'chord'` 로 24회차 산출을 비트 그대로 보존**한다(26회차 §4-5).
+ *   `'chord'` = 현행 `nearEdgeOf`(콘투어 좌우 끝을 잇는 현) · `'kink'` = `frontEdgeOf`(L 분해 후 앞변).
+ */
+export function vpdSegSource(cacheDir: string, drops?: Map<string, SourceDrops>, edge: 'chord' | 'kink' = 'chord'): ObservationSource {
   return {
     kind: 'real-seg',
     observe(t: Target): VehicleObservation[] {
@@ -157,12 +162,14 @@ export function vpdSegSource(cacheDir: string, drops?: Map<string, SourceDrops>)
             d.noContour += 1;
             continue;
           }
-          const edge = nearEdgeOf(cols);
-          if (!edge) {
+          const chord = nearEdgeOf(cols);
+          const fit = edge === 'kink' ? frontEdgeOf(cols, t.model, chord) : null;
+          const e2: readonly [{ x: number; y: number }, { x: number; y: number }] | null = edge === 'kink' ? (fit ? [fit.p0, fit.p1] : null) : chord;
+          if (!e2) {
             d.noNearEdge += 1;
             continue;
           }
-          const fp = footprintFromContact(edge[0], edge[1], t.model);
+          const fp = footprintFromContact(e2[0], e2[1], t.model);
           if (!fp) {
             d.noFootprint += 1;
             continue;

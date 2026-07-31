@@ -17,8 +17,9 @@
 // ★ 오라클 금지 — 씬 정답(슬롯 식별자·가시성·자세) 필드를 하나도 읽지 않는다.
 //   금지 토큰 목록은 `test/gridDiagWiring.test.ts` 가 정본으로 갖고 있고 이 파일에 부재함을 봉인한다.
 //
-// 사용: npx tsx src/tools/gridDiag.ts <sim|night> [ratioMin] [ratioMax] [outDir]
-//   ratioMin/ratioMax 를 주면 그 값으로 `cellAreaRatioMin/Max` 를 **CLI 인자로만** 켠다(정본 미기록).
+// 사용: npx tsx src/tools/gridDiag.ts <sim|night> [outDir]
+//   ★ 26회차 R2 — `cellAreaRatioMin/Max` 배선이 제거돼(축이 항상 1 이라 무력) 플래그 인자도 함께 없앴다.
+//     `cellAreaRatio` **분포 계측**은 그대로 남는다 — 그것이 축을 기각한 근거다.
 
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -46,10 +47,7 @@ import type { GroundModel } from '../ground/types.js';
 
 const mode = (process.argv[2] ?? 'sim') as 'sim' | 'night';
 if (mode !== 'sim' && mode !== 'night') throw new Error(`mode: sim | night (받은 값 ${mode})`);
-const ratioMin = process.argv[3] != null && process.argv[3] !== '' && process.argv[3] !== '-' ? Number(process.argv[3]) : 0;
-const ratioMax = process.argv[4] != null && process.argv[4] !== '' && process.argv[4] !== '-' ? Number(process.argv[4]) : Infinity;
-const outDir = process.argv[5] ?? 'reports/overlay_r25a';
-const flagOn = ratioMin > 0 || Number.isFinite(ratioMax);
+const outDir = process.argv[3] ?? 'reports/overlay_r25a';
 mkdirSync(outDir, { recursive: true });
 
 /** 픽셀 4점 다각형의 픽셀 면적(신발끈). */
@@ -285,7 +283,7 @@ async function renderOverlay(
     T(138, 20, '#ffab40', `통과행 depth/tolM: ` + (passRows.map((r) => `#${r.rank} ${r.medianDepthM?.toFixed(1) ?? '--'}m/tol ${r.tolM?.toFixed(3) ?? '--'}m/near ${r.paintNear.toFixed(3)}/q${r.quads}`).join('  ') || '없음')),
   );
   parts.push(T(168, 19, '#00e676', '■ 통과·비율 정상  <tspan fill="#2979ff">■ 비율 &lt;0.5(과소)</tspan>  <tspan fill="#ff00e5">■ 비율 &gt;2(과대)</tspan>  <tspan fill="#9e9e9e">■ 문턱 탈락</tspan>  <tspan fill="#ffea00">━ refScore 후보 근변</tspan>'));
-  parts.push(T(196, 19, '#aaa', `플래그 ${flagOn ? `ON  cellAreaRatio ∈ [${ratioMin}, ${ratioMax}]` : 'OFF (무력 기본값 0 / Infinity)'}`));
+  parts.push(T(196, 19, '#aaa', 'cellAreaRatio 는 계측만 한다 — 26회차 R2 에서 칸 필터 배선을 제거했다(축이 항상 1).'));
 
   await sharp(jpg)
     .composite([{ input: Buffer.from(`<svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg">${parts.join('')}</svg>`), top: 0, left: 0 }])
@@ -294,7 +292,7 @@ async function renderOverlay(
 }
 
 const all: FrameRec[] = [];
-const tagPrefix = flagOn ? 'r25_on' : 'r25_base';
+const tagPrefix = 'r25_base';
 
 if (mode === 'sim') {
   const cacheDir = 'test/fixtures/roiAutoGolden';
@@ -315,8 +313,6 @@ if (mode === 'sim') {
       const opts: BayDetectOpts = {
         ...DEFAULT_BAY_OPTS,
         expectedBays: Math.max(1, manual.length),
-        cellAreaRatioMin: ratioMin,
-        cellAreaRatioMax: ratioMax,
       };
       const out = await runFrame(key, jpg, model, opts);
       all.push(out.rec);
@@ -353,8 +349,6 @@ if (mode === 'sim') {
       cameraHeightM: heightM,
       expectedBays: 1,
       coverageDenom: 'phaseInvariant',
-      cellAreaRatioMin: ratioMin,
-      cellAreaRatioMax: ratioMax,
     };
     const out = await runFrame(f.file, jpg, model, opts);
     all.push(out.rec);
@@ -370,11 +364,12 @@ if (mode === 'sim') {
   }
 }
 
-const jsonPath = join(outDir, `gridDiag_${mode}_${flagOn ? 'on' : 'base'}.json`);
+const jsonPath = join(outDir, `gridDiag_${mode}_base.json`);
 writeFileSync(jsonPath, `${JSON.stringify(all, null, 1)}\n`, 'utf8');
 
 // ── 콘솔 표 ①: 행별 거리 편향
-console.log(`\n=== 25회차 gridDiag mode=${mode} 플래그 ${flagOn ? `ON [${ratioMin}, ${ratioMax}]` : 'OFF(무력)'} · paintTolPx=${DEFAULT_PAINT_OPTIONS.paintTolPx} ===`);
+console.log(`
+=== 25회차 gridDiag mode=${mode} · paintTolPx=${DEFAULT_PAINT_OPTIONS.paintTolPx} ===`);
 console.log('frame(tag)                hash          rk  q   depthM     mPerPx      tolM     near     score  cellPx   ref  게이트');
 const flat: Array<{ f: FrameRec; r: RowRec }> = [];
 for (const f of all) for (const r of f.rows) flat.push({ f, r });

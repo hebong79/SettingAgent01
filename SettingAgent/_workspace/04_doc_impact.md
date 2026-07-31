@@ -1,37 +1,39 @@
-# 04. 문서화·영향도 요약 — 24회차 관측원 이미지유래 교체
+# 04. 문서화·영향도 요약 — 26회차 접지방위수리(26-1)·자막가설(26-2)·진입컷반증(26-3)
 
-- 최종 문서: `docs/20260730_234500_24회차_관측원_이미지유래교체_방위붕괴.md`
+- 최종 문서: `docs/20260731_121500_26회차_접지방위수리_K1미달_자막가설_진입컷반증.md`
 
 ## 핵심 요약
 
-Q1 FAIL. 설계자 예측 4항목(재현율 `0.60~0.78`/정밀도 `0.75~0.90`/편의 방향 아래쪽/편의 크기 `10~30px`) 전부 빗나감 — 실측 재현율 `0.04878048780487805`, 정밀도 `0.0625`, 편의 방향 위쪽(중앙값 `-85.1104482577656px`), |편의| 중앙값 `101.66977056400071px`(60px 붕괴선 초과).
+**K1 = 1차·2차 관문 둘 다 실패, S3 분기, K1 1회 소진, 27회차 이월.**
+Q1(방위 오차 중앙값 ≤10°): `31.052940498468203`→`13.801162888055714` FAIL. Q2(vpdseg recall>`0.5853658536585366`/precision≥`0.70`): `0.04878048780487805`/`0.0625`→`0.2926829268292683`/`0.36363636363636365` FAIL. best-of-two 중앙값 `11.100430381019102`도 10 초과 → 「선택을 틀렸다」(S2)가 아니라 「두 선분 다 앞변이 아니다」(S3). 27회차 표적 = 콘투어 정제.
 
-**진짜 원인은 설계자가 예측 축에 넣지 않은 양** — 길이축 방위 오차(중앙값 `31.052940498468203`도·최대 `81.20361214245227`도). 사선 시점에서 마스크 하단은 「앞범퍼+옆면 사이드실」의 L자인데, `nearEdgeOf()`의 좌우끝 연결이 그 L자를 가로지르는 현(chord)을 만들어 면 전체가 회전했다. 설계자가 붕괴 분기에 적은 원인("마스크 하단이 접지가 아니다")은 틀렸음을 스샷(`r24_rawmask_2_2_0cf4fda4d3aa.png`)으로 반증.
+26-1 정직: 개선16·악화14·폴백6, 중앙값 개선은 크게 망가진 건이 견인, 최대오차는 악화(`81.20361214245227`→`85.6313443516677`). 90°뒤집힘 8/36→1/36 거의 해소. 음성대조군(ⓒ 근측밴드 `24.140026999999996`) 대비 ⓐ(`13.801162888055714`) 이득 2.5배로 「원인 수리는 맞으나 관문 미달」.
 
-**24회차 실제 산출물** — 미회수 면 원인 분해: VPD seg 기하 결손 34/39(`0.8717948717948718`), 검출 미탐 5/39(하드 실링 41−36과 정확히 일치). → 25회차는 검출기가 아니라 기하(비-오라클 방위 부트스트랩)를 봐야 함.
+26-3은 25회차의 「진입 컷(top8) 문제」 귀착을 반증 — 전경 근변선은 60개 직선 중 대응 0건(순위가 아니라 미검출, 프레임 밖+차량 가림). 리더 육안 오독(흰 도색선=중간열 r1, 전경열 아님) 정정. 단 마스터 실제 프레임(`1c0012045379`)은 골든과 달라 저장돼 있지 않음. 정렬 키 `fill` 정규화도 `votes:8` 대비 열등 → 서비스 기본값 무변경.
 
-**신뢰 근거**: Q3(강등본 소스 비트 동일: outputs 42·faces 39·recall `0.9512195121951219`·precision `0.9285714285714286`) PASS, Q4(상한 정합, 오라클 누출 없음) PASS → 낮은 성적은 배선 오염이 아니라 관측원 자체 성적임이 담보됨.
+26-2는 야간 확정(통과행 32→2, 자막위 30→0, sham 비트동일) / 낮 미지지(EV4 자막관통행 1→0이나 총수 불변) / 마스터 프레임(`24f2d7f77704`)은 뷰어 미저장으로 검증 불가. EV3의 −3은 자막제거가 아니라 refScore +32.6% 문턱상승 효과.
+
+R2(`cellAreaRatio`)는 원리적 무력(`|ratio−1|`≤`5.218048215738236e-15`) + CLAUDE.md §2 근거로 배선 제거, 지식은 순수함수 `cellAreaRatioOf`에 봉인 유지.
 
 ## 영향도
 
-- `src/ground/*` · `src/rpc/services/*` · `web/*` — **0줄**(`git status --porcelain` 실측 재확인, 빈 출력).
-- `proposeFromObservation`(`individualEngine.ts:155`) — 한 줄도 미변경.
-- `src/tools/carAnchorUpper.ts` — 타입 2줄만(`source` 유니온에 `'real-vpd-seg'|'real-lpd'` 추가, `confidence?: number` 추가). 이 파일은 git 미추적(`??`)이라 diff가 무용 — 무해성은 Q3 비트동일·전체 스위트 green·변경 라인 명시의 3중 증거로 대체.
-- 신규: `src/tools/imageObservation.ts`(신규 기하는 `nearEdgeOf` 12줄 + `footprintFromContact` 14줄뿐) · `src/tools/groundErrProbe.ts`(계측 전용) · `test/imageObservation.test.ts`(7개).
-- 수정: `src/tools/individualEngine.ts`(`--source` 배선, `GateParams.minConfidence`), `test/individualEngine.test.ts`(2줄).
-- `@parkagent/types` · REST 계약 · MCP 도구 스키마 — 미접촉. ActionAgent/DMAgent로 전파되는 영향 없음.
-- 정본(`PtzCamRoi.json`)·DB(`setting.sqlite`)·`config/` — 읽기만, 쓰기 없음. `roi.auto.apply` 0회. **카메라 물리 이동 0회**(골든 JPEG 파일만 읽음). 검출 응답은 `reports/detcache_r24/` 10개로 캐시해 결정성 확보.
-- VPD seg 소스는 계측 전용 — 실카 셋업 경로 배선 금지 규약 준수(auto-memory `vpd-auto-detect-forbidden`).
+- `src/ground/*`: **26-3(R2 제거)만 접촉** — `bayGeometry.ts`(−18줄, 필드 제거)·`bayGrid.ts`(칸 필터에서 `ratioOk(e.q)` 항 제거). 제거된 술어는 기본값에서 항상 `true`였으므로 **구조적 무회귀**(골든 rows diff 0줄로 확인).
+- `src/rpc/services/*` · `web/*`: 3갈래 전부 **0줄**.
+- `proposeFromObservation`(`individualEngine.ts:163`)·`footprintFromContact`·`nearEdgeOf`: 26-1에서도 무변경.
+- 신규(src/tools/·test/만): `contactOrient.ts`+`contactOrient.test.ts`(6) / `osdMaskLib.ts`+`osdMaskDiag.ts`+`osdMaskDiagWiring.test.ts`(13) / `frontCut.ts`+`frontCutWiring.test.ts`(4).
+- 수정(배선): `groundErrProbe.ts`(+492줄, 계측 확장) · `imageObservation.ts`(`vpdSegSource(...,edge='chord')` 기본값 보존) · `individualEngine.ts`(`--edge` 전달 2~4줄) · `gridDiag.ts`(R2 CLI 인자 제거) · `gridDiagWiring.test.ts`(6테스트 유지, 「무력기본값」→「배선부재」 봉인 전환).
+- `@parkagent/types` · REST 계약 · MCP 도구 스키마 — 미접촉. ActionAgent/DMAgent 전파 없음.
+- 정본(`PtzCamRoi.json`)·DB(`setting.sqlite`)·`config/` — 읽기만. `roi.auto.apply` 0회. **카메라 물리 이동 0회**(골든 JPEG + 복사 캐시만).
+- **병행편집 경위**: 26-1/26-2/26-3 3에이전트가 같은 `main`에서 동시 작업, `bayGeometry.ts`/`bayGrid.ts`(26-3) 편집 도중 `tsc`가 일시 exit 2 — 26-2·26-3 양쪽 구현자가 독립 보고. 편집 전/후 재실행으로 수치 불변 확인 후 회복. 교훈: 같은 브랜치 병행 시 제거 리팩터는 잔여 참조까지 한 에이전트 책임.
 
-## 검증 인용
+## 검증 인용/재확인
 
-- `npx tsc --noEmit` exit 0.
-- `npx vitest run` 296파일 / 3757테스트 전부 green(신규 +1파일/+7테스트, 기준선 295/3750과 정확히 일치, 실패·스킵 0).
-- 골든 rows diff 0줄(recall `0.5853658536585366`·precision `0.8571428571428571`·meanIoU `0.8886003068644802`·minIoU `0.6130202566182261`·pass95 `8`·pass98 `1`, frameHash 5개).
+- **문서화 단계 직접 재실행**: `npx tsc --noEmit` exit 0 · `npx vitest run` 306파일/3874테스트 green(실패·스킵 0) · rows 골든(`_r24_final_rows.txt` vs 재실행 산출) diff 0줄.
+- **인용(재계산 안 함)**: 골든 5지표 세부값(recall/precision/meanIoU/minIoU/pass95·98/frameHash 5개) — 26-3 §6-1 원문, rows 텍스트 diff로 간접 확인만 함. 스샷 육안 판독·개별 JSON 덤프 내용.
 
 ## 확인 필요/미확정
 
-- 게이트 `minConfidence` 실효 문턱 — 미도출(참 표본 2건, 「참을 하나도 안 죽이는 최대값」 규칙의 분포 근거 불성립). 효과 0 → 안 넣는 것이 결론.
-- `SlotAxes` 비-오라클 부트스트랩 — 설계 범위 밖, 25회차 최우선 과제로 이월.
-- 실카 σ — 여전히 미측정(시뮬 골든 실측만).
-- 접지선 오차 실측의 짝짓기는 근사(근변 중점↔접지사각형 중심 최근접) — 밀집 프레임 오짝 가능성, dy 과대평가 여지.
+- 지면 꺾임각 중앙값이 90°가 아닌 이유(`61.33468873182716`°) — 가림배제(M3)로도 해소 안 됨(`61.99`→`62.42` 무변화), 27회차 콘투어 정제 표적.
+- 세 하위 보고서 파일/테스트 수 스냅샷(304/3857→306/3874→305/3861)의 정확한 작성 순서 — 최종 상태 재실행값(306/3874)과 26-2 보고서가 일치하나 순서를 타임스탬프로 대조하지 못함.
+- 27-1 실카 채점 전 `PtzCamRoi.json`에 real-camera-1 부재 문제 미해소(지면모델이 시뮬 설치고 5m를 씀).
+- 1:3 프레임 0/2 원인(근변 도색지지 0.0000, 근변선 프레임 밖) 미규명.
