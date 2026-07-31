@@ -1,0 +1,33 @@
+23회차 이터레이션 1 — 개별 독립 검출 엔진(안 2 단독)
+★ 검출 소스 무접촉(src/ground · src/rpc/services · web 0줄) · Unity RPC 읽기 1회(car.list) · 카메라 이동 0
+★ 게이트: {"minFootprintAreaPx":11129.427613102946,"maxOutOfFramePts":2,"depthLoM":null,"depthHiM":null}
+★ 관측소스: sigma=0px shadow=0px · 배타성 mergeIoU=0.5
+대상: v1 · 차량 23대 · 씬 면 23개
+
+═══ 전역 성적 (분모 41면 · 원시 배정도) ═══
+  게이트 전(scoreUngated): 산출 42 · 회수면 39 · 재현율 0.9512195121951219 · 정밀도 0.9285714285714286
+  게이트 후(scoreGated)  : 산출 42 · 회수면 39 · 재현율 0.9512195121951219 · 정밀도 0.9285714285714286
+  ★ P3 기준(22회차 seg 상한): outputs 42 · faces 39 · recall 0.9512195121951219 · precision 0.9285714285714286
+  ★ P3 판정: PASS (비트 동일)
+
+  프리셋별(프레임해시 병기 — F13):
+   대상  프레임해시    가시면 제안 게이트통과 배타성후 회수면(전) 회수면(후)
+   1:1   6006a034bfe2     10   10        10       10         10         10
+   1:2   ceaaed722663     14   14        14       14         13         13
+   1:3   3c0db12efe75      2    2         2        2          1          1
+   2:1   e33628e921c2      7    7         7        7          7          7
+   2:2   0cf4fda4d3aa      8    9         9        9          8          8
+
+  ★ 게이트 탈락 0건 · 배타성 접힘 0건 (제안 42 → 게이트 후 42 → 배타성 후 42)
+
+  ★ 게이트 전 미회수 면(안 2 원리 한계 특정): 1:2|r2f2(차량있음) · 1:3|r5f2(빈 면)
+   스샷 1:1 → reports\overlay_r23a\eng_gateon_1_1_6006a034bfe2.png
+   스샷 1:2 → reports\overlay_r23a\eng_gateon_1_2_ceaaed722663.png
+   스샷 1:3 → reports\overlay_r23a\eng_gateon_1_3_3c0db12efe75.png
+   스샷 2:1 → reports\overlay_r23a\eng_gateon_2_1_e33628e921c2.png
+   스샷 2:2 → reports\overlay_r23a\eng_gateon_2_2_0cf4fda4d3aa.png
+
+※ 한계(추정으로 채우지 않는다):
+  · 관측 소스는 여전히 **강등 투영**이다. 이미지에서 차량을 실제로 검출하는 부분은 이터레이션 1 범위 밖이다.
+  · 도색지지(edgeHit)는 측정만 했다. 잡음 표본이 적어 게이트 승격 판정 불가.
+  · 실카 세그/VPD 의 실제 σ 는 미측정이다.

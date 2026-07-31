@@ -40,6 +40,10 @@ const framesArg = process.argv[2] ?? 'v1';
 const cacheDir = GOLDEN_DIRS[framesArg] ?? framesArg;
 const outDir = process.argv[3] ?? 'reports/overlay_r18';
 const rowExtentMode = (process.argv[4] ?? 'evidence') as 'evidence' | 'expected';
+// ★ 22회차 — 커버리지 분모 스위치. `phaseInvariant` 는 면수를 모르는 호출자(뷰어 칸 비움) 경로다.
+//   같은 골든 프레임 위에서 두 분모의 `rows` 를 육안 대조하기 위해 인자로 열었다(진단 전용, 검출 경로 무변경).
+const coverageDenom = (process.argv[5] ?? 'expectedBays') as 'expectedBays' | 'phaseInvariant';
+if (coverageDenom !== 'expectedBays' && coverageDenom !== 'phaseInvariant') throw new Error(`coverageDenom: ${coverageDenom}`);
 mkdirSync(outDir, { recursive: true });
 
 const PLANE_Y_M = 0.05;
@@ -92,7 +96,7 @@ for (const c of placeJson.cameras) {
     if (!model) continue;
     const manual = byPreset.get(key) ?? [];
     const bays = manual.filter((s) => Array.isArray(s.points) && s.points.length === 4).length;
-    const opts: BayDetectOpts = { ...DEFAULT_BAY_OPTS, expectedBays: Math.max(1, bays), rowExtentMode };
+    const opts: BayDetectOpts = { ...DEFAULT_BAY_OPTS, expectedBays: Math.max(1, bays), rowExtentMode, coverageDenom };
     const g = detectBaysWithModel(cands, model, ev, DEFAULT_PAINT_OPTIONS, opts, frame);
 
     const vis = visibleTruth(

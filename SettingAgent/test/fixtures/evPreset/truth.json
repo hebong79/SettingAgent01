@@ -1,0 +1,1185 @@
+{
+  "schema": "parkagent.evPreset.truth/1",
+  "purpose": "실카 프리셋 5장의 주차면 정답(채점 전용 R1). 검출 경로는 절대 이 파일을 읽지 않는다.",
+  "author": "수동 라벨(육안 + 스캔라인/그라디언트 측정), 마스터 검수 대기",
+  "createdAt": "2026-07-30",
+  "coordinateSystem": "원본 이미지 픽셀 (좌상단 0,0 / x→우 / y→아래). 소수점 최대 5자리(round5).",
+  "cornerStatus": {
+    "observed": "모서리(또는 이를 만드는 두 경계선)가 화면에서 직접 확인됨",
+    "uncertain": "경계선 중 하나가 희미하거나 짧게만 보여 좌표 신뢰도가 낮음",
+    "offscreen": "두 경계선은 확인되나 교점이 이미지 밖",
+    "occluded": "차량/구조물에 가려 관측 불가 — 좌표 없음(null)"
+  },
+  "presets": [
+    {
+      "preset": "EV1",
+      "sourceFile": "EV1.png",
+      "imageWidth": 1920,
+      "imageHeight": 1080,
+      "osdPtz": "70/27/x35",
+      "osdNote": "OSD 표기 그대로. pan/tilt/zoom배율로 보이나 단정하지 않음.",
+      "sceneNote": "아스팔트 주차면 1열. 근변(주행로 쪽)은 흰 도색선이 있다. 원변은 보도 연석↔아스팔트 재질 경계이며 스토퍼 열이 그 안쪽에 붙어 있다. 좌측 1면은 검은 스타리아가 점유.",
+      "lines": [
+        {
+          "id": "N",
+          "kind": "near",
+          "a": {
+            "x": 900,
+            "y": 680
+          },
+          "b": {
+            "x": 1700,
+            "y": 314
+          },
+          "uncertain": false,
+          "evidence": "흰 도색선 중심. 열 스캔 x=900/1100/1300/1500/1700 → y=680/588/497/406/314 (잔차<2px)"
+        },
+        {
+          "id": "F",
+          "kind": "far",
+          "a": {
+            "x": 700,
+            "y": 284
+          },
+          "b": {
+            "x": 1300,
+            "y": 56
+          },
+          "uncertain": false,
+          "evidence": "연석(콘크리트)↔아스팔트 재질 경계. 열 스캔 x=700/900/1100/1300 하단 → y=284/207/133/56"
+        },
+        {
+          "id": "P1",
+          "kind": "sep",
+          "a": {
+            "x": 100,
+            "y": 602
+          },
+          "b": {
+            "x": 400,
+            "y": 804
+          },
+          "uncertain": false,
+          "evidence": "흰 도색선. 열 스캔 x=100/200/300/400 → y=602/668/734/804"
+        },
+        {
+          "id": "P3",
+          "kind": "sep",
+          "a": {
+            "x": 700,
+            "y": 314
+          },
+          "b": {
+            "x": 1100,
+            "y": 532
+          },
+          "uncertain": false,
+          "evidence": "흰 도색선. 열 스캔 x=700/900/1100 → y=314/422/532"
+        },
+        {
+          "id": "P4",
+          "kind": "sep",
+          "a": {
+            "x": 965,
+            "y": 200
+          },
+          "b": {
+            "x": 1370,
+            "y": 400
+          },
+          "uncertain": false,
+          "evidence": "흰 도색선. 행 스캔 y=200/250/300/350/400 → x=965/1068/1165/1269/1370"
+        },
+        {
+          "id": "P5",
+          "kind": "sep",
+          "a": {
+            "x": 1220,
+            "y": 100
+          },
+          "b": {
+            "x": 1663,
+            "y": 300
+          },
+          "uncertain": false,
+          "evidence": "흰 도색선. 행 스캔 y=100/150/200/250/300 → x=1220/1330/1441/1550/1663"
+        },
+        {
+          "id": "P6",
+          "kind": "sep",
+          "a": {
+            "x": 1678,
+            "y": 100
+          },
+          "b": {
+            "x": 1799,
+            "y": 150
+          },
+          "uncertain": true,
+          "evidence": "흰 도색선(우상단 짧게만 보임). 행 스캔 y=100/150 → x=1678/1799"
+        }
+      ],
+      "bays": [
+        {
+          "id": "EV1-01",
+          "occupied": true,
+          "occluded": true,
+          "clipped": false,
+          "uncertain": false,
+          "leftSep": "P1",
+          "rightSep": "P2",
+          "corners": {
+            "nearLeft": {
+              "status": "observed",
+              "pt": {
+                "x": 492.6308,
+                "y": 866.37141
+              }
+            },
+            "nearRight": {
+              "status": "observed",
+              "pt": {
+                "x": 852,
+                "y": 700
+              },
+              "note": "근변선과 칸막이가 만드는 V자 꼭짓점을 3.3배 확대에서 직접 읽음"
+            },
+            "farRight": {
+              "status": "occluded",
+              "pt": null,
+              "note": "스타리아 차체에 가림"
+            },
+            "farLeft": {
+              "status": "occluded",
+              "pt": null,
+              "note": "스타리아 차체에 가림"
+            }
+          },
+          "cornerOrder": [
+            "nearLeft",
+            "nearRight",
+            "farRight",
+            "farLeft"
+          ],
+          "note": "검은 스타리아 점유. 우측 칸막이(P2)는 근변 교점만 보이고(852,700 육안 확인) 원변 쪽은 차량에 가림. 좌측 칸막이 P1 의 원변 교점도 차량 뒤라 관측 불가."
+        },
+        {
+          "id": "EV1-02",
+          "occupied": false,
+          "occluded": true,
+          "clipped": false,
+          "uncertain": false,
+          "leftSep": "P2",
+          "rightSep": "P3",
+          "corners": {
+            "nearLeft": {
+              "status": "observed",
+              "pt": {
+                "x": 852,
+                "y": 700
+              },
+              "note": "EV1-01 과 공유하는 꼭짓점"
+            },
+            "nearRight": {
+              "status": "observed",
+              "pt": {
+                "x": 1156.3591,
+                "y": 562.71571
+              }
+            },
+            "farRight": {
+              "status": "observed",
+              "pt": {
+                "x": 667.56757,
+                "y": 296.32432
+              }
+            },
+            "farLeft": {
+              "status": "occluded",
+              "pt": null,
+              "note": "스타리아 차체에 가림"
+            }
+          },
+          "cornerOrder": [
+            "nearLeft",
+            "nearRight",
+            "farRight",
+            "farLeft"
+          ],
+          "note": "좌측 칸막이(P2) 원변 교점이 차량에 가림. 나머지 3점은 관측."
+        },
+        {
+          "id": "EV1-03",
+          "occupied": false,
+          "occluded": false,
+          "clipped": false,
+          "uncertain": false,
+          "leftSep": "P3",
+          "rightSep": "P4",
+          "corners": {
+            "nearLeft": {
+              "status": "observed",
+              "pt": {
+                "x": 1156.3591,
+                "y": 562.71571
+              }
+            },
+            "nearRight": {
+              "status": "observed",
+              "pt": {
+                "x": 1438.29932,
+                "y": 433.72806
+              }
+            },
+            "farRight": {
+              "status": "observed",
+              "pt": {
+                "x": 945.88867,
+                "y": 190.56231
+              }
+            },
+            "farLeft": {
+              "status": "observed",
+              "pt": {
+                "x": 667.56757,
+                "y": 296.32432
+              }
+            }
+          },
+          "cornerOrder": [
+            "nearLeft",
+            "nearRight",
+            "farRight",
+            "farLeft"
+          ],
+          "note": "4점 모두 관측. 가장 신뢰도 높은 면."
+        },
+        {
+          "id": "EV1-04",
+          "occupied": false,
+          "occluded": false,
+          "clipped": false,
+          "uncertain": false,
+          "leftSep": "P4",
+          "rightSep": "P5",
+          "corners": {
+            "nearLeft": {
+              "status": "observed",
+              "pt": {
+                "x": 1438.29932,
+                "y": 433.72806
+              }
+            },
+            "nearRight": {
+              "status": "observed",
+              "pt": {
+                "x": 1697.02488,
+                "y": 315.36112
+              }
+            },
+            "farRight": {
+              "status": "observed",
+              "pt": {
+                "x": 1203.64337,
+                "y": 92.61552
+              }
+            },
+            "farLeft": {
+              "status": "observed",
+              "pt": {
+                "x": 945.88867,
+                "y": 190.56231
+              }
+            }
+          },
+          "cornerOrder": [
+            "nearLeft",
+            "nearRight",
+            "farRight",
+            "farLeft"
+          ],
+          "note": "4점 모두 관측."
+        },
+        {
+          "id": "EV1-05",
+          "occupied": false,
+          "occluded": false,
+          "clipped": true,
+          "uncertain": true,
+          "leftSep": "P5",
+          "rightSep": "P6",
+          "corners": {
+            "nearLeft": {
+              "status": "observed",
+              "pt": {
+                "x": 1697.02488,
+                "y": 315.36112
+              }
+            },
+            "nearRight": {
+              "status": "offscreen",
+              "pt": {
+                "x": 1935.33208,
+                "y": 206.33557
+              }
+            },
+            "farRight": {
+              "status": "uncertain",
+              "pt": {
+                "x": 1441.44613,
+                "y": 2.25047
+              }
+            },
+            "farLeft": {
+              "status": "observed",
+              "pt": {
+                "x": 1203.64337,
+                "y": 92.61552
+              }
+            }
+          },
+          "cornerOrder": [
+            "nearLeft",
+            "nearRight",
+            "farRight",
+            "farLeft"
+          ],
+          "note": "우측 근변 교점이 화면 오른쪽 밖(x>1919). 우측 원변 교점은 상단 경계(y≈2)에 걸림. P6 도색선은 짧게만 보여 불확실."
+        }
+      ]
+    },
+    {
+      "preset": "EV2",
+      "sourceFile": "EV2.png",
+      "imageWidth": 1920,
+      "imageHeight": 1080,
+      "osdPtz": "82/20/x95",
+      "osdNote": "OSD 표기 그대로 읽음(리더 미제공분, 본 작업자가 판독).",
+      "sceneNote": "아스팔트 주차면 1열을 크게 당겨(x95) 본 장면. 차량 없음. 칸막이는 흰 도색선, 원변은 연석 아래 콘크리트↔아스팔트 재질 경계, 근변은 우하단의 흰 도색선. 화면 우측 가장자리에 세로 광원 번짐(글레어) 있음.",
+      "lines": [
+        {
+          "id": "N",
+          "kind": "near",
+          "a": {
+            "x": 1100,
+            "y": 998
+          },
+          "b": {
+            "x": 1700,
+            "y": 628
+          },
+          "uncertain": false,
+          "evidence": "흰 도색선. 열 스캔 x=1100/1300/1500/1700 → y=998/871/753/628"
+        },
+        {
+          "id": "F",
+          "kind": "far",
+          "a": {
+            "x": 200,
+            "y": 404
+          },
+          "b": {
+            "x": 600,
+            "y": 215
+          },
+          "uncertain": false,
+          "evidence": "콘크리트↔아스팔트 계단 경계(gradient). x=200/300/400/500/600 → y=404/357/311/261/215"
+        },
+        {
+          "id": "L1",
+          "kind": "sep",
+          "a": {
+            "x": 100,
+            "y": 778
+          },
+          "b": {
+            "x": 900,
+            "y": 1034
+          },
+          "uncertain": false,
+          "evidence": "흰 도색선. 열 스캔 x=100/300/500/900 → y=778/842/906/1035"
+        },
+        {
+          "id": "L2",
+          "kind": "sep",
+          "a": {
+            "x": 300,
+            "y": 413
+          },
+          "b": {
+            "x": 1300,
+            "y": 716
+          },
+          "uncertain": false,
+          "evidence": "흰 도색선. 열 스캔 x=300/500/700/900/1100/1300 → y=413/475/538/597/653/716"
+        },
+        {
+          "id": "L3",
+          "kind": "sep",
+          "a": {
+            "x": 900,
+            "y": 217
+          },
+          "b": {
+            "x": 1700,
+            "y": 441
+          },
+          "uncertain": false,
+          "evidence": "흰 도색선. 열 스캔 x=900/1100/1300/1500/1700 → y=217/271/330/385/441"
+        },
+        {
+          "id": "L5",
+          "kind": "sep",
+          "a": {
+            "x": 1500,
+            "y": 47
+          },
+          "b": {
+            "x": 1700,
+            "y": 98
+          },
+          "uncertain": true,
+          "evidence": "흰 도색선(우상단 짧게). 열 스캔 x=1500/1700 → y=47/98"
+        }
+      ],
+      "bays": [
+        {
+          "id": "EV2-00",
+          "occupied": false,
+          "occluded": false,
+          "clipped": true,
+          "uncertain": true,
+          "leftSep": "none",
+          "rightSep": "L1",
+          "corners": {
+            "nearLeft": {
+              "status": "occluded",
+              "pt": null,
+              "note": "해당 칸막이 직선 미확정"
+            },
+            "nearRight": {
+              "status": "observed",
+              "pt": {
+                "x": 993.23843,
+                "y": 1063.8363
+              }
+            },
+            "farRight": {
+              "status": "offscreen",
+              "pt": {
+                "x": -312.30284,
+                "y": 646.06309
+              }
+            },
+            "farLeft": {
+              "status": "occluded",
+              "pt": null,
+              "note": "해당 칸막이 직선 미확정"
+            }
+          },
+          "cornerOrder": [
+            "nearLeft",
+            "nearRight",
+            "farRight",
+            "farLeft"
+          ],
+          "note": "좌측 칸막이가 화면 밖(추정 원변 교점 x≈-930). 좌측 두 점 관측 불가 → 라벨하지 않음."
+        },
+        {
+          "id": "EV2-01",
+          "occupied": false,
+          "occluded": false,
+          "clipped": true,
+          "uncertain": false,
+          "leftSep": "L1",
+          "rightSep": "L2",
+          "corners": {
+            "nearLeft": {
+              "status": "observed",
+              "pt": {
+                "x": 993.23843,
+                "y": 1063.8363
+              }
+            },
+            "nearRight": {
+              "status": "observed",
+              "pt": {
+                "x": 1472.52628,
+                "y": 768.27546
+              }
+            },
+            "farRight": {
+              "status": "observed",
+              "pt": {
+                "x": 227.46615,
+                "y": 391.02224
+              }
+            },
+            "farLeft": {
+              "status": "offscreen",
+              "pt": {
+                "x": -312.30284,
+                "y": 646.06309
+              }
+            }
+          },
+          "cornerOrder": [
+            "nearLeft",
+            "nearRight",
+            "farRight",
+            "farLeft"
+          ],
+          "note": "좌측 원변 교점이 화면 왼쪽 밖(x≈-312). 나머지 3점 관측."
+        },
+        {
+          "id": "EV2-02",
+          "occupied": false,
+          "occluded": false,
+          "clipped": false,
+          "uncertain": false,
+          "leftSep": "L2",
+          "rightSep": "L3",
+          "corners": {
+            "nearLeft": {
+              "status": "observed",
+              "pt": {
+                "x": 1472.52628,
+                "y": 768.27546
+              }
+            },
+            "nearRight": {
+              "status": "observed",
+              "pt": {
+                "x": 1908.55019,
+                "y": 499.39405
+              }
+            },
+            "farRight": {
+              "status": "observed",
+              "pt": {
+                "x": 708.9701,
+                "y": 163.51163
+              }
+            },
+            "farLeft": {
+              "status": "observed",
+              "pt": {
+                "x": 227.46615,
+                "y": 391.02224
+              }
+            }
+          },
+          "cornerOrder": [
+            "nearLeft",
+            "nearRight",
+            "farRight",
+            "farLeft"
+          ],
+          "note": "4점 모두 관측. 가장 신뢰도 높은 면."
+        },
+        {
+          "id": "EV2-03",
+          "occupied": false,
+          "occluded": false,
+          "clipped": true,
+          "uncertain": true,
+          "leftSep": "L3",
+          "rightSep": "L5",
+          "corners": {
+            "nearLeft": {
+              "status": "observed",
+              "pt": {
+                "x": 1908.55019,
+                "y": 499.39405
+              }
+            },
+            "nearRight": {
+              "status": "offscreen",
+              "pt": {
+                "x": 2308.03059,
+                "y": 253.0478
+              }
+            },
+            "farRight": {
+              "status": "offscreen",
+              "pt": {
+                "x": 1146.39175,
+                "y": -43.1701
+              }
+            },
+            "farLeft": {
+              "status": "observed",
+              "pt": {
+                "x": 708.9701,
+                "y": 163.51163
+              }
+            }
+          },
+          "cornerOrder": [
+            "nearLeft",
+            "nearRight",
+            "farRight",
+            "farLeft"
+          ],
+          "note": "우측 원변 교점이 화면 위쪽 밖(y≈-43), 우측 근변 교점이 오른쪽 밖(x≈2308). L5 도색선이 짧아 불확실."
+        }
+      ]
+    },
+    {
+      "preset": "EV3",
+      "sourceFile": "EV3.png",
+      "imageWidth": 1920,
+      "imageHeight": 1080,
+      "osdPtz": "48/16/x35",
+      "osdNote": "OSD 표기 그대로.",
+      "sceneNote": "보도블록 포장 주차면 1열. 흰 도색이 없고 칸막이는 **밝은 블록 띠**(포장 패턴 seam)다. 근변은 블록↔아스팔트 재질 경계. 원변(연석/잔디 경계)은 차량·수목에 상당 부분 가려 직선 확정 실패 → 원변 좌표 미확정.",
+      "lines": [
+        {
+          "id": "N",
+          "kind": "near",
+          "a": {
+            "x": 1100,
+            "y": 732
+          },
+          "b": {
+            "x": 1900,
+            "y": 643
+          },
+          "uncertain": false,
+          "evidence": "블록↔아스팔트 계단 경계(gradient). x=1100/1300/1700/1900 → y=732/710/665/643 (잔차<2px)"
+        },
+        {
+          "id": "F",
+          "kind": "far",
+          "a": {
+            "x": 700,
+            "y": 559.3
+          },
+          "b": {
+            "x": 1600,
+            "y": 468.9
+          },
+          "uncertain": true,
+          "evidence": "잔디 하단선을 색(G−(R+B)/2)으로 측정: x=500/700/900/1100/1600/1800 → 556/537/519/495/447/428 (잔차<3px). 그 아래 연석 폭만큼(육안 21~24px) 내린 선이 블록 포장 시작=원변. 오프셋이 육안이라 ±15px 불확실."
+        },
+        {
+          "id": "S1",
+          "kind": "sep",
+          "a": {
+            "x": 800,
+            "y": 640
+          },
+          "b": {
+            "x": 910,
+            "y": 740
+          },
+          "uncertain": false,
+          "evidence": "밝은 블록 띠 중심(원시 밝기 프로파일). y=640/690/740 → x=800/857/910 (잔차<1.5px)"
+        },
+        {
+          "id": "S2",
+          "kind": "sep",
+          "a": {
+            "x": 1162,
+            "y": 640
+          },
+          "b": {
+            "x": 1234,
+            "y": 690
+          },
+          "uncertain": true,
+          "evidence": "밝은 블록 띠 중심(원시 프로파일). y=640/690 → x=1162/1234. 아반떼 그림자로 아래쪽 연장 미확인"
+        },
+        {
+          "id": "S3",
+          "kind": "sep",
+          "a": {
+            "x": 1523,
+            "y": 630
+          },
+          "b": {
+            "x": 1584,
+            "y": 666
+          },
+          "uncertain": true,
+          "evidence": "밝은 블록 띠. 회색 아반떼 아래쪽 짧은 구간만 보임(3.1배 확대 육안)"
+        }
+      ],
+      "bays": [
+        {
+          "id": "EV3-01",
+          "occupied": false,
+          "occluded": false,
+          "clipped": false,
+          "uncertain": true,
+          "leftSep": "S1",
+          "rightSep": "S2",
+          "corners": {
+            "nearLeft": {
+              "status": "observed",
+              "pt": {
+                "x": 922.8756,
+                "y": 751.70509
+              }
+            },
+            "nearRight": {
+              "status": "uncertain",
+              "pt": {
+                "x": 1267.62627,
+                "y": 713.35158
+              }
+            },
+            "farRight": {
+              "status": "uncertain",
+              "pt": {
+                "x": 1002.09673,
+                "y": 528.95606
+              },
+              "note": "원변선 미확정 — 가안 좌표"
+            },
+            "farLeft": {
+              "status": "uncertain",
+              "pt": {
+                "x": 710.11266,
+                "y": 558.28424
+              },
+              "note": "원변선 미확정 — 가안 좌표"
+            }
+          },
+          "cornerOrder": [
+            "nearLeft",
+            "nearRight",
+            "farRight",
+            "farLeft"
+          ],
+          "note": "근변 2점은 관측. 원변 2점은 원변선 미확정으로 좌표 없음."
+        },
+        {
+          "id": "EV3-02",
+          "occupied": true,
+          "occluded": true,
+          "clipped": false,
+          "uncertain": true,
+          "leftSep": "S2",
+          "rightSep": "S3",
+          "corners": {
+            "nearLeft": {
+              "status": "uncertain",
+              "pt": {
+                "x": 1267.62627,
+                "y": 713.35158
+              }
+            },
+            "nearRight": {
+              "status": "uncertain",
+              "pt": {
+                "x": 1601.32928,
+                "y": 676.22712
+              }
+            },
+            "farRight": {
+              "status": "uncertain",
+              "pt": {
+                "x": 1300.92656,
+                "y": 498.94027
+              },
+              "note": "원변선 미확정 — 가안 좌표"
+            },
+            "farLeft": {
+              "status": "uncertain",
+              "pt": {
+                "x": 1002.09673,
+                "y": 528.95606
+              },
+              "note": "원변선 미확정 — 가안 좌표"
+            }
+          },
+          "cornerOrder": [
+            "nearLeft",
+            "nearRight",
+            "farRight",
+            "farLeft"
+          ],
+          "note": "회색 아반떼 점유. 칸막이 S2·S3 모두 차량에 가려 짧은 구간만 보임. 원변 미확정."
+        }
+      ]
+    },
+    {
+      "preset": "EV4",
+      "sourceFile": "EV4.png",
+      "imageWidth": 1920,
+      "imageHeight": 1080,
+      "osdPtz": "64/15/x55",
+      "osdNote": "OSD 표기 그대로(리더 미제공분, 본 작업자가 판독).",
+      "sceneNote": "보도블록 포장 주차면 1열에 **흰 도색 칸막이선**이 있다. 근변은 블록↔아스팔트 재질 경계로 매우 또렷하다. 원변은 연석/잔디 경계. 흰색 르노 SUV 1대 점유. 우측에 가로등 기둥이 세로로 서 있어 스캔 잡음을 만든다.",
+      "lines": [
+        {
+          "id": "N",
+          "kind": "near",
+          "a": {
+            "x": 100,
+            "y": 767
+          },
+          "b": {
+            "x": 1700,
+            "y": 444
+          },
+          "uncertain": false,
+          "evidence": "블록↔아스팔트 계단 경계(gradient). x=100/300/900/1100/1700 → y=768/727/604/564/445 (잔차<1.5px)"
+        },
+        {
+          "id": "F",
+          "kind": "far",
+          "a": {
+            "x": 500,
+            "y": 437.5
+          },
+          "b": {
+            "x": 1860,
+            "y": 191.6
+          },
+          "uncertain": true,
+          "evidence": "잔디 하단선을 색으로 측정: x=100/500/700/900/1600/1900 → 468/395/360/320/196/142 (잔차<3px). 그 아래 연석 폭(육안 42~43px, 좌우 일치)을 더한 선이 블록 포장 시작=원변. 오프셋이 육안이라 ±10px 불확실."
+        },
+        {
+          "id": "A",
+          "kind": "sep",
+          "a": {
+            "x": 654.7,
+            "y": 460
+          },
+          "b": {
+            "x": 958.6,
+            "y": 575
+          },
+          "uncertain": false,
+          "evidence": "흰 도색선. 원시 밝기 프로파일 y=460/500/540/575 → x=648/768/872/952 최소자승(잔차<8px)"
+        },
+        {
+          "id": "B",
+          "kind": "sep",
+          "a": {
+            "x": 397,
+            "y": 560
+          },
+          "b": {
+            "x": 587,
+            "y": 640
+          },
+          "uncertain": false,
+          "evidence": "흰 도색선. 원시 프로파일 y=560/600/640 → x=397/495/587 (잔차<2px)"
+        },
+        {
+          "id": "C",
+          "kind": "sep",
+          "a": {
+            "x": 64,
+            "y": 650
+          },
+          "b": {
+            "x": 192,
+            "y": 710
+          },
+          "uncertain": false,
+          "evidence": "흰 도색선. 원시 프로파일 y=650/680/710 → x=64/128/192 (완전 선형, 잔차 0)"
+        }
+      ],
+      "bays": [
+        {
+          "id": "EV4-01",
+          "occupied": false,
+          "occluded": false,
+          "clipped": true,
+          "uncertain": true,
+          "leftSep": "C",
+          "rightSep": "B",
+          "corners": {
+            "nearLeft": {
+              "status": "observed",
+              "pt": {
+                "x": 249.30103,
+                "y": 736.85986
+              }
+            },
+            "nearRight": {
+              "status": "observed",
+              "pt": {
+                "x": 633.0517,
+                "y": 659.39019
+              }
+            },
+            "farRight": {
+              "status": "uncertain",
+              "pt": {
+                "x": 224.40764,
+                "y": 487.32953
+              }
+            },
+            "farLeft": {
+              "status": "offscreen",
+              "pt": {
+                "x": -141.78175,
+                "y": 553.5398
+              }
+            }
+          },
+          "cornerOrder": [
+            "nearLeft",
+            "nearRight",
+            "farRight",
+            "farLeft"
+          ],
+          "note": "좌측 원변 교점이 화면 왼쪽 밖. C·B 둘 다 짧게만 보여 기울기 불확실."
+        },
+        {
+          "id": "EV4-02",
+          "occupied": false,
+          "occluded": false,
+          "clipped": false,
+          "uncertain": true,
+          "leftSep": "B",
+          "rightSep": "A",
+          "corners": {
+            "nearLeft": {
+              "status": "observed",
+              "pt": {
+                "x": 633.0517,
+                "y": 659.39019
+              }
+            },
+            "nearRight": {
+              "status": "observed",
+              "pt": {
+                "x": 990.77384,
+                "y": 587.17503
+              }
+            },
+            "farRight": {
+              "status": "uncertain",
+              "pt": {
+                "x": 564.44773,
+                "y": 425.84728
+              }
+            },
+            "farLeft": {
+              "status": "uncertain",
+              "pt": {
+                "x": 224.40764,
+                "y": 487.32953
+              }
+            }
+          },
+          "cornerOrder": [
+            "nearLeft",
+            "nearRight",
+            "farRight",
+            "farLeft"
+          ],
+          "note": "근변 2점은 신뢰. 원변 2점은 원변선(±10px)과 B 기울기 불확실이 겹침."
+        },
+        {
+          "id": "EV4-03",
+          "occupied": true,
+          "occluded": true,
+          "clipped": false,
+          "uncertain": true,
+          "leftSep": "A",
+          "rightSep": "none",
+          "corners": {
+            "nearLeft": {
+              "status": "observed",
+              "pt": {
+                "x": 990.77384,
+                "y": 587.17503
+              }
+            },
+            "nearRight": {
+              "status": "occluded",
+              "pt": null,
+              "note": "해당 칸막이 직선 미확정"
+            },
+            "farRight": {
+              "status": "occluded",
+              "pt": null,
+              "note": "해당 칸막이 직선 미확정"
+            },
+            "farLeft": {
+              "status": "uncertain",
+              "pt": {
+                "x": 564.44773,
+                "y": 425.84728
+              }
+            }
+          },
+          "cornerOrder": [
+            "nearLeft",
+            "nearRight",
+            "farRight",
+            "farLeft"
+          ],
+          "note": "흰색 르노 SUV 점유. 우측 칸막이가 차량과 가로등에 가려 직선 확정 실패 → 우측 2점 좌표 없음."
+        }
+      ]
+    },
+    {
+      "preset": "EV5",
+      "sourceFile": "EV5.png",
+      "imageWidth": 1920,
+      "imageHeight": 1080,
+      "osdPtz": "38/11/x55",
+      "osdNote": "OSD 표기 그대로.",
+      "sceneNote": "건물 앞 보도블록 포장 주차면 1열(차량 3대 코 내밀고 주차) + 화면 하단에 다른 열의 흰 아반떼. 흰 도색이 사실상 없고 칸막이는 밝은 블록 띠. 틸트 11°로 매우 비스듬해 원변(건물 쪽)이 압축돼 있고, 가로등 기둥·가로수가 좌우를 가린다.",
+      "lines": [
+        {
+          "id": "N",
+          "kind": "near",
+          "a": {
+            "x": 100,
+            "y": 531.6
+          },
+          "b": {
+            "x": 1200,
+            "y": 497.8
+          },
+          "uncertain": true,
+          "evidence": "블록↔아스팔트 경계. 열 원시 프로파일 x=100/400/1200 → y=532/522/498 최소자승(잔차<0.6px). 다만 대비가 약하고 x=900/1700 은 차량 그림자·수목으로 판독 불가"
+        },
+        {
+          "id": "F",
+          "kind": "far",
+          "a": {
+            "x": 65,
+            "y": 339
+          },
+          "b": {
+            "x": 452,
+            "y": 319
+          },
+          "uncertain": true,
+          "evidence": "⚠ 블록↔건물앞 콘크리트 경계. 3.1배 확대 육안 2점뿐이며 우측은 차량에 가려 미확인"
+        },
+        {
+          "id": "T1",
+          "kind": "sep",
+          "a": {
+            "x": 32,
+            "y": 360
+          },
+          "b": {
+            "x": 90,
+            "y": 480
+          },
+          "uncertain": true,
+          "evidence": "밝은 블록 띠. 행 원시 프로파일 y=360/420/480 → x=32/64/90 (띠가 넓고 흐려 중심 ±15px)"
+        },
+        {
+          "id": "T2",
+          "kind": "sep",
+          "a": {
+            "x": 384,
+            "y": 420
+          },
+          "b": {
+            "x": 416,
+            "y": 480
+          },
+          "uncertain": true,
+          "evidence": "밝은 블록 띠. 행 원시 프로파일 y=420/480 → x=384/416. y=360 에서는 띠가 사라져 위쪽 연장 미확인"
+        }
+      ],
+      "bays": [
+        {
+          "id": "EV5-01",
+          "occupied": false,
+          "occluded": false,
+          "clipped": false,
+          "uncertain": true,
+          "leftSep": "T1",
+          "rightSep": "T2",
+          "corners": {
+            "nearLeft": {
+              "status": "uncertain",
+              "pt": {
+                "x": 114.72137,
+                "y": 531.14765
+              }
+            },
+            "nearRight": {
+              "status": "uncertain",
+              "pt": {
+                "x": 437.9812,
+                "y": 521.21476
+              }
+            },
+            "farRight": {
+              "status": "uncertain",
+              "pt": {
+                "x": 333.40218,
+                "y": 325.12909
+              },
+              "note": "원변선 미확정 — 가안 좌표"
+            },
+            "farLeft": {
+              "status": "uncertain",
+              "pt": {
+                "x": 22.90155,
+                "y": 341.17563
+              },
+              "note": "원변선 미확정 — 가안 좌표"
+            }
+          },
+          "cornerOrder": [
+            "nearLeft",
+            "nearRight",
+            "farRight",
+            "farLeft"
+          ],
+          "note": "빈 면 1개만 4점 추정 가능. 근변·원변 모두 육안 2~3점 기반이라 불확실."
+        },
+        {
+          "id": "EV5-02",
+          "occupied": true,
+          "occluded": true,
+          "clipped": false,
+          "uncertain": true,
+          "leftSep": "T2",
+          "rightSep": "none",
+          "corners": {
+            "nearLeft": {
+              "status": "uncertain",
+              "pt": {
+                "x": 437.9812,
+                "y": 521.21476
+              }
+            },
+            "nearRight": {
+              "status": "occluded",
+              "pt": null,
+              "note": "해당 칸막이 직선 미확정"
+            },
+            "farRight": {
+              "status": "occluded",
+              "pt": null,
+              "note": "해당 칸막이 직선 미확정"
+            },
+            "farLeft": {
+              "status": "uncertain",
+              "pt": {
+                "x": 333.40218,
+                "y": 325.12909
+              },
+              "note": "원변선 미확정 — 가안 좌표"
+            }
+          },
+          "cornerOrder": [
+            "nearLeft",
+            "nearRight",
+            "farRight",
+            "farLeft"
+          ],
+          "note": "투싼 점유. 우측 칸막이가 가로등 기둥과 차량에 가림 → 우측 2점 좌표 없음."
+        }
+      ]
+    }
+  ]
+}
