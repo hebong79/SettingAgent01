@@ -316,6 +316,14 @@ function updateGroundBadge() {
 - ~~선행 에러 `roiAuto.ts(724,3) TS2739`~~ → **철회.** 이것은 27-B 의 **편집 중간 상태**를 스냅샷한 것이었다(반환 **타입**에 4개 필드를 넣은 뒤 반환 **객체**를 채우기 전 몇 분). 27-B 확인 결과 현재 724행은 `const requestedAt = ...` 이고 네 필드 모두 반환된다. **실재했던 에러이나 이미 해소됐다** — 내 보고가 시점 때문에 과장됐던 것을 정정한다.
 - 교훈(기록): 병행 세션이 있는 `main` 에서 `tsc` 전역 결과를 남의 파일 판정에 쓰면 **중간 상태를 결함으로 오인**한다. 내 파일 한정 필터(`grep realGroundSplit`)가 옳은 판정이었다.
 
+### 유닛테스트 (CLAUDE.md 규칙 2 — 정직 고지)
+
+- **`realGroundSplit.ts` 전용 유닛테스트는 작성하지 않았다.** 근거와 한계를 그대로 밝힌다:
+  - 이 파일은 **라이브 카메라가 있어야 도는 진단 하네스**이고, `src/tools/*.ts` **50개 중 40개**가 같은 관례다(테스트 있는 것 10개: `anchorCloseUpper`·`carAnchorUpper`·`contactOrient`·`contourRefine`·`imageObservation`·`individualEngine`·`migrateToSettingDb`·`realCamCapture`·`roiAutoCurrentView`·`sepAudit`). **다수 관례이지 면제는 아니다.**
+  - **검출 알고리즘은 0줄 바꾸지 않았다** — 이 도구는 기존 모듈을 조립만 한다. 그 코어는 이미 두껍게 덮여 있다(내용 기준 import 검색): `bayGrid` **6**개 · `groundModel` **15**개 · `groundInputs` **14**개 테스트 파일.
+  - 대신 이 도구의 **불변식**(무이동 `requestImage(1, 1)` · `roi.auto.apply` 미호출 · 정본/DB 무쓰기)은 §교훈 8 의 **정합 판정문 + 양성 대조 A·B** 로 기계 검증했다(exit 0). 유닛테스트의 완전한 대체는 아니다.
+- ★ **여기서도 거짓 음성이 났다(규칙 즉시 재현).** 커버리지를 파일명 패턴 `^bayGrid\.` 로 훑어 **0** 을 얻었으나, 실제 파일명은 `bayGridExtent.test.ts`·`groundModelBuild.test.ts` 등이라 패턴이 못 맞춘 것이었다. 내용 기준(`from '.../bayGrid.js'`) 재검색으로 6/15/14 를 확인했다. **27-B 의 「0 이 나오면 패턴부터 의심하라」가 정식화된 직후 내 마지막 스윕에서 그대로 재현됐다.**
+
 ### vitest
 - `npx vitest run` → **308 파일 / 3895 테스트 전부 green** (102.07s, exit 0).
 - ⚠ 정직 주석: vitest 는 transpile-only 라 위 `roiAuto.ts` 타입 에러를 잡지 못한다. **green 이 tsc clean 을 뜻하지 않는다** — 두 지표를 함께 봐야 한다.
