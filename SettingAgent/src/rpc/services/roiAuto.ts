@@ -970,7 +970,7 @@ async function detectOne(
             ? '★ ptzToFrameMs 를 「지면모델과 픽셀의 시점 차」로 읽지 마라. 실카(hucoms)에서 ptzQueriedAt 의 PTZ 는 ' +
               '**버려진다**(grabFrame 이 requestImage 에 undefined 를 넘긴다). 지면모델의 tiltpos/zoompos 는 소스가 ' +
               '**JPEG 를 받은 뒤** 읽은 값이라 순서가 이미지→PTZ 다. 따라서 이 값은 snapshot 왕복 시간일 뿐이다. ' +
-              '실제 시점 차는 패킷 로그의 jpeg 완료→getptzfpos 완료 = **36~368ms(n=29, 중앙값 약 61ms)** 이며 ' +
+              '실제 시점 차는 패킷 로그의 jpeg 완료→getptzfpos 완료 = **36~368ms(n=29, 중앙값 60ms)** 이며 ' +
               '이것도 하한이다(픽셀은 jpeg 응답 완료보다 앞선 순간의 것). ' +
               '★ 순서가 반대인 것은 어긋남을 **불가능하게 만들지 않고 부호만 뒤집는다** — 그 창 안에서 카메라가 움직이면 ' +
               '픽셀은 옛 자리, PTZ 는 새 자리가 된다(외부 프리셋 조작과 겹치면 실제로 발생한다).'
