@@ -17,7 +17,7 @@ const SRC = readFileSync('src/tools/imageObservation.ts', 'utf8');
  * 그 문장 때문에 봉인이 깨지면 검사가 문서화를 벌하는 꼴이 된다.
  */
 const CODE = SRC.replace(/\/\*[\s\S]*?\*\//g, '')
-  .split('\n')
+  .split(/\r?\n/) // CRLF 체크아웃 대응: \r 이 줄 끝에 남으면 `.` 이 그것을 못 먹어 아래 주석 제거가 통째로 불발한다.
   .map((l) => l.replace(/\/\/.*$/, ''))
   .join('\n');
 
