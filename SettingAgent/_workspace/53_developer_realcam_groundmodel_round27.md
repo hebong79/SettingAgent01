@@ -320,7 +320,17 @@ function updateGroundBadge() {
 
 - **`realGroundSplit.ts` 전용 유닛테스트는 작성하지 않았다.** 근거와 한계를 그대로 밝힌다:
   - 이 파일은 **라이브 카메라가 있어야 도는 진단 하네스**이고, `src/tools/*.ts` **50개 중 40개**가 같은 관례다(테스트 있는 것 10개: `anchorCloseUpper`·`carAnchorUpper`·`contactOrient`·`contourRefine`·`imageObservation`·`individualEngine`·`migrateToSettingDb`·`realCamCapture`·`roiAutoCurrentView`·`sepAudit`). **다수 관례이지 면제는 아니다.**
-  - **검출 알고리즘은 0줄 바꾸지 않았다** — 이 도구는 기존 모듈을 조립만 한다. 그 코어는 이미 두껍게 덮여 있다(내용 기준 import 검색): `bayGrid` **6**개 · `groundModel` **15**개 · `groundInputs` **14**개 테스트 파일.
+  - **검출 알고리즘은 0줄 바꾸지 않았다** — 이 도구는 기존 모듈을 조립만 한다. 코어 커버리지는 다음과 같다.
+    ⚠ **초판 정정 — 내가 「6/15/14 테스트 파일」이라고 적은 것은 부풀려진 수였다.** 그것은 **import 하는 파일 수**이지 **행위를 검증하는 파일 수**가 아니다(27-B 가 자기 산출물에서 같은 오독을 발견해 알려준 구분 —「**참조된다 ≠ 검증된다**」). 실제 **함수 호출** 기준으로 다시 세면:
+
+    | 모듈 | import | **실제 호출** | 참조만(호출 없음) |
+    |---|---|---|---|
+    | `bayGrid` | 6 | **2** | `anchorCloseUpper` · `cameraIntrinsics` · `gridDiagWiring` · `sepAudit` |
+    | `groundModel` | 15 | **12** | `groundFrame` · `groundModelBuild` · `placeRoiValidate` |
+    | `groundInputs` | 14 | **14** | — |
+
+    → **`bayGrid` 는 6 이 아니라 2 다.** 「두껍게 덮여 있다」는 표현은 `groundInputs`(14/14)·`groundModel`(12/15)에는 맞고 **`bayGrid` 에는 과장**이었다. 정정한다.
+    ※ 이 「호출 기준」도 종착이 아니다 — **호출한다고 의미 있게 단언한다는 보장은 없다**(스모크 호출일 수 있다). import 기준보다 나은 근사일 뿐이며, 이 회차 내내 확인된 대로 **사다리는 계속 올라간다**.
   - 대신 이 도구의 **불변식**(무이동 `requestImage(1, 1)` · `roi.auto.apply` 미호출 · 정본/DB 무쓰기)은 §교훈 8 의 **정합 판정문 + 양성 대조 A·B** 로 기계 검증했다(exit 0). 유닛테스트의 완전한 대체는 아니다.
 - ★ **여기서도 거짓 음성이 났다(규칙 즉시 재현).** 커버리지를 파일명 패턴 `^bayGrid\.` 로 훑어 **0** 을 얻었으나, 실제 파일명은 `bayGridExtent.test.ts`·`groundModelBuild.test.ts` 등이라 패턴이 못 맞춘 것이었다. 내용 기준(`from '.../bayGrid.js'`) 재검색으로 6/15/14 를 확인했다. **27-B 의 「0 이 나오면 패턴부터 의심하라」가 정식화된 직후 내 마지막 스윕에서 그대로 재현됐다.**
 
