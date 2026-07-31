@@ -398,16 +398,16 @@ export function auditRowFrame(
 
 // ── 실행부(도구) ─────────────────────────────────────────────────────────────
 
-const PLANE_Y_M = 0.05;
-const MIN_AREA_PX = 200;
+export const PLANE_Y_M = 0.05;
+export const MIN_AREA_PX = 200;
 const DEG = Math.PI / 180;
 const VIEW_CACHE_DIR = 'reports/overlay_r20/frames';
-const GOLDEN_DIRS: Record<string, string> = {
+export const GOLDEN_DIRS: Record<string, string> = {
   v1: 'test/fixtures/roiAutoGolden',
   v2: 'test/fixtures/roiAutoGolden_v2',
 };
 
-interface Target {
+export interface Target {
   key: string;
   jpg: Buffer;
   frameHash: string;
@@ -420,13 +420,13 @@ interface Target {
 }
 
 /** 전방선 후보 + 그 위 분리선. `pts` 와 `seps` 는 **같은 순서·같은 길이**(meetLines 성공 시에만 동시 push). */
-interface FrontCand {
+export interface FrontCand {
   front: RefinedLine;
   seps: RefinedLine[];
   pts: Array<{ x: number; y: number }>;
 }
 
-function frontCandidatesOf(frame: FrameGray): { cands: FrontCand[]; mask: Uint8Array } {
+export function frontCandidatesOf(frame: FrameGray): { cands: FrontCand[]; mask: Uint8Array } {
   const { lines, mask } = detectPaintLines(frame, DEFAULT_PAINT_OPTIONS);
   const out: FrontCand[] = [];
   for (const front of lines.slice(0, DEFAULT_PAINT_OPTIONS.frontCandidates)) {
@@ -459,7 +459,7 @@ function sceneFaces(): TruthFace[] {
   return specs.flatMap((s) => facesOfRow(s, PLANE_Y_M) ?? []);
 }
 
-async function goldenTargets(cacheDir: string): Promise<Target[]> {
+export async function goldenTargets(cacheDir: string): Promise<Target[]> {
   const placeJson = JSON.parse(readFileSync('data/Place01/PtzCamRoi.json', 'utf8'));
   const intrinsics = placeMetaProvider(readPlaceMeta(placeJson));
   const faces = sceneFaces();

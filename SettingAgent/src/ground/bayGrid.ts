@@ -208,6 +208,43 @@ export interface GridResult {
   issues: string[];
 }
 
+/**
+ * ★ 25회차 — 칸 4점을 지면으로 역투영해 **지상 면적(m²)** 을 낸다. 역투영 실패 점이 하나라도 있으면 `null`.
+ *
+ * 평면 다각형이므로 3D 신발끈(Σ Pi × Pi+1 의 크기 / 2)이 정확하다. 새 기하 근사를 만들지 않는다.
+ */
+export function quadGroundAreaM2(q: BayQuad, model: GroundModel): number | null {
+  const P: Vec3[] = [];
+  for (const p of q.quad) {
+    const X = backprojectToGround(p, model);
+    if (!X) return null;
+    P.push(X);
+  }
+  let ax = 0;
+  let ay = 0;
+  let az = 0;
+  for (let i = 0; i < P.length; i++) {
+    const c = cross3(P[i], P[(i + 1) % P.length]);
+    ax += c[0];
+    ay += c[1];
+    az += c[2];
+  }
+  const a = Math.hypot(ax, ay, az) / 2;
+  return Number.isFinite(a) ? a : null;
+}
+
+/**
+ * ★ 25회차 — `cellAreaRatio = 지상면적 / (slotWidthM × slotDepthM)`. 규격 칸이면 1 근방, 자투리는 ≪1,
+ * 깊이가 붕괴한 「과대 면」은 ≫1. **거리에 불변**이라 원경의 진짜 면을 죽이지 않는다.
+ * 역투영이 안 되면 `null`(판정 불가 — 필터는 통과시킨다. 없는 근거로 버리지 않는다).
+ */
+export function cellAreaRatioOf(q: BayQuad, model: GroundModel, opts: BayDetectOpts): number | null {
+  const a = quadGroundAreaM2(q, model);
+  const nominal = opts.slotWidthM * opts.slotDepthM;
+  if (a == null || !(nominal > 0)) return null;
+  return a / nominal;
+}
+
 /** 칸의 근변 중점이 프레임 안인가(18회차 A — `extentEndedBy` 판정. 기존 커버리지 판정과 같은 식). */
 function nearMidInFrame(q: BayQuad, model: GroundModel): boolean {
   const mx = (q.quad[0].x + q.quad[3].x) / 2;
@@ -342,7 +379,13 @@ function fitRowGridOnce(
     //                (= 보간, 근거 있음), 행의 끝 너머는 한쪽에만 증거가 있다(= 외삽, 근거 없음).
     //                개수 정보를 전혀 쓰지 않는다.
     const scored = built.quads.map((q) => ({ q, sup: quadPaintSupport([q], evidence, paintOpts, opts) }));
-    const kept = scored.filter((e) => e.sup.near >= opts.extendMinNearSupport);
+    // ★ 25회차 — 절대 크기 게이트 1개. 기본값이 `0`/`Infinity` 라 **기본 경로에서는 항상 true** 다.
+    const ratioOk = (q: BayQuad): boolean => {
+      if (opts.cellAreaRatioMin <= 0 && opts.cellAreaRatioMax === Infinity) return true;
+      const r = cellAreaRatioOf(q, model, opts);
+      return r == null || (r >= opts.cellAreaRatioMin && r <= opts.cellAreaRatioMax);
+    };
+    const kept = scored.filter((e) => e.sup.near >= opts.extendMinNearSupport && ratioOk(e.q));
     if (!kept.length) continue;
     let window = kept;
     let extentEndedBy: GridResult['extentEndedBy'] = null;

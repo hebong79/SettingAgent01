@@ -39,6 +39,9 @@ const GOLDEN_DIRS: Record<string, string> = {
 };
 const framesArg = process.argv[2] ?? 'v1';
 const cacheDir = GOLDEN_DIRS[framesArg] ?? framesArg;
+// ★ 22회차 — 커버리지 분모 스위치(진단 전용). 같은 프레임 위에서 두 분모의 후보 순위를 대조한다.
+const coverageDenom = (process.argv[3] ?? 'expectedBays') as 'expectedBays' | 'phaseInvariant';
+if (coverageDenom !== 'expectedBays' && coverageDenom !== 'phaseInvariant') throw new Error(`coverageDenom: ${coverageDenom}`);
 
 const PLANE_Y_M = 0.05;
 const MIN_AREA_PX = 200;
@@ -112,7 +115,7 @@ for (const c of placeJson.cameras) {
     }
     const model = groundModelFromIntrinsics(baseIntr, p.zoom);
     if (!model) continue;
-    const opts: BayDetectOpts = { ...DEFAULT_BAY_OPTS, expectedBays: Math.max(1, manual.length), rowExtentMode: 'evidence' };
+    const opts: BayDetectOpts = { ...DEFAULT_BAY_OPTS, expectedBays: Math.max(1, manual.length), rowExtentMode: 'evidence', coverageDenom };
 
     const local: Array<{ ci: number; r: GridResult }> = [];
     for (let ci = 0; ci < cands.length; ci++) {
@@ -150,15 +153,30 @@ for (const c of placeJson.cameras) {
     });
     recs.push(...rows);
 
-    console.log(`=== ${key}  프레임 ${frameHash} · 씬가시 ${vis.length}면 · 후보 ${local.length}개`);
-    console.log('  ci  quads  paint.score  paint.near   ratioBest   depth(m)   각(°)     hit/quads  rowPrec  판정  best');
+    // ★ 22회차 — `refScore` 는 **baseScore argmax 후보의 paint.score**(bayGrid.ts:682-699). 그 기준선이
+    //   커버리지에 따라 다른 후보로 옮겨가면 진입 문턱 자체가 통째로 움직인다. 그래서 여기서 함께 낸다.
+    let ri = 0;
+    for (let i = 1; i < local.length; i++) {
+      const bi2 = local[i].r.baseScore ?? local[i].r.paint.score;
+      const bb = local[ri].r.baseScore ?? local[ri].r.paint.score;
+      if (bi2 > bb + 1e-12) ri = i;
+    }
+    const refScore = local[ri].r.paint.score;
+
+    console.log(`=== ${key}  프레임 ${frameHash} · 씬가시 ${vis.length}면 · 후보 ${local.length}개 · denom=${coverageDenom} · refScore=${refScore.toFixed(5)}(ci=${local[ri].ci})`);
+    console.log('  ci  quads  paint.score  paint.near   ratioBest  ratioRef  baseScore  effective  denomC   depth(m)   각(°)     hit/quads  rowPrec  판정  게이트  best');
     for (const x of [...rows].sort((a, b) => b.r.paint.score - a.r.paint.score)) {
+      const g1 = x.r.paint.score >= refScore * opts.rowMinScoreRatio;
+      const g2 = x.r.paint.near >= opts.rowMinNearSupport;
       console.log(
         `  ${String(x.ci).padStart(2)}  ${String(x.quads).padStart(5)}  ` +
           `${x.r.paint.score.toFixed(5).padStart(11)}  ${x.r.paint.near.toFixed(5).padStart(10)}  ` +
-          `${x.ratioBest.toFixed(5).padStart(9)}  ${(x.depth?.toFixed(2) ?? '--').padStart(9)}  ` +
+          `${x.ratioBest.toFixed(5).padStart(9)}  ${(refScore > 0 ? x.r.paint.score / refScore : 0).toFixed(5).padStart(8)}  ` +
+          `${(x.r.baseScore ?? 0).toFixed(5).padStart(9)}  ${(x.r.effectiveScore ?? 0).toFixed(5).padStart(9)}  ` +
+          `${(x.r.denomCells?.toFixed(2) ?? '--').padStart(6)}  ${(x.depth?.toFixed(2) ?? '--').padStart(9)}  ` +
           `${x.angDeg.toFixed(3).padStart(8)}  ${String(x.hit).padStart(6)}/${String(x.quads).padEnd(3)}  ` +
-          `${x.rowPrec.toFixed(3).padStart(6)}  ${(x.rowPrec >= 0.5 ? '진짜' : x.hit > 0 ? '부분' : '가짜').padEnd(4)}  ${x.isBest ? '★' : ''}`,
+          `${x.rowPrec.toFixed(3).padStart(6)}  ${(x.rowPrec >= 0.5 ? '진짜' : x.hit > 0 ? '부분' : '가짜').padEnd(4)}  ` +
+          `${(g1 && g2 ? '통과' : g1 ? 'near탈락' : g2 ? '비율탈락' : '둘다탈락').padEnd(8)}  ${x.isBest ? '★' : ''}${x.ci === local[ri].ci ? '§ref' : ''}`,
       );
     }
 
