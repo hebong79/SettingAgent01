@@ -253,7 +253,7 @@ npx vitest run        308 파일 · 3895 테스트 전량 green   (내 신규 15
 | 산출물 | 상태 | 실질 |
 |---|---|---|
 | `src/capture/frameArchive.ts` | **행위 유닛테스트 15건** | 스위치·저장·보존정책·실패내성 전부 실행 검증 ✔ |
-| `src/rpc/services/roiAuto.ts` | 기존 5개 테스트파일이 덮음 | `roiAutoCurrentView`·`roiAutoRealCamSpec`·`roiAutoRpc`·`roiAutoSource`·`frameArchive` |
+| `src/rpc/services/roiAuto.ts` | **호출 기준 4개**(import 기준 5) | 아래 §정정 참조 — `frameArchive.test.ts` 는 import 하지만 **정적 문자열 검사만** 한다 |
 | `src/tools/roiAutoReplay.ts` | ⚠ **행위 유닛테스트 없음** | `frameArchive.test.ts` 가 참조하지만 **정적 문자열 봉인**(코어 재구현 금지)일 뿐 **재현 로직을 실행하지 않는다.** 검증은 **라이브 11/11 비트 동일**로만 했다 |
 | `src/tools/frameArchiveBench.ts` | ⚠ **테스트 없음** | 측정 전용 스크립트. `src/tools/*` 다수 관례이나 **관례는 면제가 아니다** |
 | `detectGridFromFrame`(추출 코어) | ⚠ **추출 자체의 직접 테스트 없음** | 동치성 근거는 ① 라이브 재현 11/11 비트 동일 ② 골든 rows 전 항목 비트 동일 ③ 코드가 **문자 그대로 이동**(§8-2) |
@@ -261,6 +261,26 @@ npx vitest run        308 파일 · 3895 테스트 전량 green   (내 신규 15
 **★ 특히 주의**: `grep -rl 'tools/roiAutoReplay' test/` 는 **1건**을 돌려준다. 이걸 "테스트가 있다"로 읽으면 틀린다 —
 그 1건은 **정적 봉인**이고 재현기는 한 줄도 실행되지 않는다. 「참조된다」와 「검증된다」는 다르다.
 이번 회차 규칙으로 말하면 **「N건이니 있다」의 전형적 오독**이고, 내가 이 표를 만들지 않았으면 그대로 넘어갈 자리였다.
+
+**★ 정정 — 내 이 표도 처음엔 부풀어 있었다**(27-C 가 자기 `6/15/14` 를 호출 기준 `2/12/14` 로 정정한 것을 보고 자기적용).
+내가 쓴 "5개 테스트파일이 덮음"은 **import 기준**이었다. `export` 함수의 **실제 호출** 기준으로 다시 세면:
+
+| 테스트 파일 | import | **호출** | 호출하는 함수 |
+|---|---|---|---|
+| `roiAutoRpc.test.ts` | ✔ | ✔ | `greenPixelRatio`·`roiAutoDetect`·`roiAutoScore`·`roiAutoApply` |
+| `roiAutoSource.test.ts` | ✔ | ✔ | `readGroundSpec`·`roiAutoDetect`·`roiAutoScore` |
+| `roiAutoCurrentView.test.ts` | ✔ | ✔ | `roiAutoDetect`·`roiAutoScore` |
+| `roiAutoRealCamSpec.test.ts` | ✔ | ✔ | `roiAutoDetect` |
+| **`frameArchive.test.ts`** | ✔ | **✘** | **정적 문자열 검사만**(내가 이번에 쓴 봉인) |
+| `roiAutoSeal`·`roiAutoHoldout`·`gridDiagWiring` | ✘ | ✘ | 정적 문자열 검사만 |
+
+→ **호출 기준 4개**다. 내가 이번 회차에 추가한 봉인 테스트를 **내가 커버리지로 세고 있었다.**
+
+**함수별로 보면 더 정확하다**: `roiAutoDetect` 4 · `roiAutoScore` 3 · `roiAutoApply` 1 · `greenPixelRatio` 1 · `readGroundSpec` 1 ·
+**`detectGridFromFrame` 0** ← **이번 회차에 내가 추출한 코어를 호출하는 테스트가 0개**다. 앞서 ⚠ 로만 적었던 것의 정확한 수치다.
+
+**27-C 단서 수용(호출 기준도 종착이 아니다)**: 호출한다고 **의미 있게 단언한다는 보장은 없다**(스모크 호출일 수 있다).
+import 기준보다 나은 근사일 뿐이다. 다만 이 지점은 수확 체감이라 **단서만 남기고 더 파지 않았다.**
 
 **숨기지 않는 이유**: 이 회차의 결론이 「검사되지 않은 것을 검사됐다고 적지 마라」인데 내 커버리지를 뭉뚱그리면 그 결론을 내가 위반한다.
 보완이 필요하면 `roiAutoReplay` 의 재현 술어를 픽스처 1장으로 도는 유닛테스트로 올리는 것이 최소 작업이다 —
